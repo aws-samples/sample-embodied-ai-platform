@@ -1,0 +1,121 @@
+version: '3.8'
+
+services:
+  gr00t-finetune:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        - BUILDKIT_INLINE_CACHE=1
+    # Note: The Dockerfile now includes all dependencies and fine-tuning scripts
+    container_name: gr00t-finetune
+    runtime: nvidia  # Required for GPU access
+    volumes:
+      # Mount local directories for checkpoints and logs
+      - ./mock-efs:/mnt/efs
+      - ./datasets:/workspace/train
+    environment:
+      # ==========================================
+      # AUTHENTICATION (optional)
+      # ==========================================
+      # HF_TOKEN is only required if pulling dataset from HF or uploading model to HF
+      - HF_TOKEN=${HF_TOKEN}
+
+      # ==========================================
+      # DATASET SOURCE SELECTION (all optional)
+      # The entrypoint resolves in this order: local -> s3 -> hf -> sample
+      # ==========================================
+      - DATASET_LOCAL_DIR=${DATASET_LOCAL_DIR:-/workspace/train}
+      - DATASET_S3_URI=${DATASET_S3_URI}
+      - HF_DATASET_ID=${HF_DATASET_ID}
+
+      # ==========================================
+      # UPLOAD CONFIGURATION (optional)
+      # UPLOAD_TARGET: hf | s3 | none
+      # ==========================================
+      - UPLOAD_TARGET=${UPLOAD_TARGET:-none}
+      - HF_MODEL_REPO_ID=${HF_MODEL_REPO_ID}
+      - S3_UPLOAD_URI=${S3_UPLOAD_URI}
+
+      # ==========================================
+      # OUTPUT DIRECTORIES (optional)
+      # By default, the script writes to /mnt/efs/gr00t/checkpoints if mounted
+      # ==========================================
+      - OUTPUT_DIR=${OUTPUT_DIR}
+      
+      # ==========================================
+      # BASIC TRAINING PARAMETERS
+      # ==========================================
+      - MAX_STEPS=${MAX_STEPS:-6000}
+      - SAVE_STEPS=${SAVE_STEPS:-2000}
+      - NUM_GPUS=${NUM_GPUS:-1}
+      - BATCH_SIZE=${BATCH_SIZE:-32}
+      - LEARNING_RATE=${LEARNING_RATE:-1e-4}
+      - WEIGHT_DECAY=${WEIGHT_DECAY:-1e-5}
+      - WARMUP_RATIO=${WARMUP_RATIO:-0.05}
+      
+      # ==========================================
+      # MODEL AND DATA CONFIGURATION
+      # ==========================================
+      - BASE_MODEL_PATH=${BASE_MODEL_PATH:-nvidia/GR00T-N1.5-3B@3c235401cb51575b3f091e68de96dc0785de971d}
+      - DATA_CONFIG=${DATA_CONFIG:-so100_dualcam}
+      - VIDEO_BACKEND=${VIDEO_BACKEND:-torchvision_av}
+      - EMBODIMENT_TAG=${EMBODIMENT_TAG:-new_embodiment}
+      
+      # ==========================================
+      # FINE-TUNING CONFIGURATION
+      # ==========================================
+      - TUNE_LLM=${TUNE_LLM:-false}
+      - TUNE_VISUAL=${TUNE_VISUAL:-false}
+      - TUNE_PROJECTOR=${TUNE_PROJECTOR:-true}
+      - TUNE_DIFFUSION_MODEL=${TUNE_DIFFUSION_MODEL:-true}
+      
+      # ==========================================
+      # LORA CONFIGURATION
+      # ==========================================
+      - LORA_RANK=${LORA_RANK:-0}
+      - LORA_ALPHA=${LORA_ALPHA:-16}
+      - LORA_DROPOUT=${LORA_DROPOUT:-0.1}
+      - LORA_FULL_MODEL=${LORA_FULL_MODEL:-false}
+      
+      # ==========================================
+      # DATASET BALANCING
+      # ==========================================
+      - BALANCE_DATASET_WEIGHTS=${BALANCE_DATASET_WEIGHTS:-true}
+      - BALANCE_TRAJECTORY_WEIGHTS=${BALANCE_TRAJECTORY_WEIGHTS:-true}
+      
+      # ==========================================
+      # PERFORMANCE AND SYSTEM
+      # ==========================================
+      - DATALOADER_NUM_WORKERS=${DATALOADER_NUM_WORKERS:-8}
+      
+      # ==========================================
+      # WORKFLOW CONTROL
+      # ==========================================
+      - RESUME=${RESUME:-false}
+      - CLEANUP_DATASET=${CLEANUP_DATASET:-false}
+      - CLEANUP_CHECKPOINTS=${CLEANUP_CHECKPOINTS:-false}
+      
+      # ==========================================
+      # LOGGING AND MONITORING
+      # ==========================================
+      - REPORT_TO=${REPORT_TO:-tensorboard}
+      - WANDB_API_KEY=${WANDB_API_KEY}
+      - WANDB_PROJECT=${WANDB_PROJECT:-gr00t-finetune}
+      - WANDB_ENTITY=${WANDB_ENTITY}
+    
+    # Override the default command if needed
+    # command: ["/workspace/scripts/run_finetune_workflow.sh"]
+    
+    # Expose ports if needed for monitoring
+    ports:
+      - "8888:8888"  # For Jupyter if needed
+    
+    # Resource limits (adjust based on your system)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu] 
