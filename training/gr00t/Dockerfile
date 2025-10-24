@@ -82,7 +82,7 @@ ENV DATASET_LOCAL_DIR="/workspace/train"
 ENV OUTPUT_DIR="/workspace/checkpoints"
 
 # If there is issue with the latest version, use tested checkpoint as of 09 July 2025 by commenting out the following two lines
-# RUN huggingface-cli download nvidia/GR00T-N1.5-3B --revision 3c235401cb51575b3f091e68de96dc0785de971d --local-dir ./GR00T-N1.5-3B
+# RUN hf download nvidia/GR00T-N1.5-3B --revision 869830fc749c35f34771aa5209f923ac57e4564e --local-dir ./GR00T-N1.5-3B
 # ENV BASE_MODEL_PATH="./GR00T-N1.5-3B"
 
 # Create directories using environment variables

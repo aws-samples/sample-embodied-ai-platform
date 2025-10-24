@@ -1,6 +1,6 @@
 # GR00T Training Component
 
-Fine-tune NVIDIA Isaac GR00T VLA models using teleoperation/simulation datasets. Supports local GPU and AWS Batch training with NICE DCV for monitoring/evaluation. Use this README as a bridge: high-level usage and structure here; detailed infrastructure/deployment in `infra/README.md`.
+Fine-tune NVIDIA Isaac GR00T VLA models using teleoperation/simulation datasets. Supports AWS Batch training with GPU and NICE DCV for monitoring/evaluation. Use this README as a bridge: high-level usage and structure here; detailed infrastructure/deployment in `infra/README.md`.
 
 ## Links
 
@@ -19,7 +19,6 @@ training/gr00t/
 ├── README.md                  # GR00T training overview
 ├── Dockerfile                 # Training container
 ├── build_container.sh         # Build/test/push helper
-├── docker-compose.yml         # Sample docker compose file for training
 ├── env.example                # Example environment variables
 ├── finetune_gr00t.py          # GR00T training script
 ├── run_finetune_workflow.sh   # Entrypoint: dataset, auth, uploads
@@ -37,7 +36,7 @@ training/gr00t/
 
 ## Configuration (env vars)
 
-See `docker-compose.yml` and `env.example` for configurable environment variables:
+See `env.example` for configurable environment variables:
 - Dataset sources: `DATASET_LOCAL_DIR`, `DATASET_S3_URI`, `HF_DATASET_ID`
 - Uploads: `UPLOAD_TARGET` (hf|s3|none), `HF_TOKEN`, `HF_MODEL_REPO_ID`, `S3_UPLOAD_URI`
 - Training: `MAX_STEPS`, `SAVE_STEPS`, `NUM_GPUS`, `BATCH_SIZE`, `LEARNING_RATE`
