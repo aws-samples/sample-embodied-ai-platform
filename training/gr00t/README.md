@@ -1,4 +1,4 @@
-# GR00T Training Component
+# NVIDIA Isaac GR00T Training Component
 
 Fine-tune NVIDIA Isaac GR00T VLA models using teleoperation/simulation datasets. Supports AWS Batch training with GPU and NICE DCV for monitoring/evaluation. Use this README as a bridge: high-level usage and structure here; detailed infrastructure/deployment in `infra/README.md`.
 
@@ -36,7 +36,7 @@ training/gr00t/
 
 ## Configuration (env vars)
 
-See `env.example` for configurable environment variables:
+See [env.example](env.example) for configurable environment variables:
 - Dataset sources: `DATASET_LOCAL_DIR`, `DATASET_S3_URI`, `HF_DATASET_ID`
 - Uploads: `UPLOAD_TARGET` (hf|s3|none), `HF_TOKEN`, `HF_MODEL_REPO_ID`, `S3_UPLOAD_URI`
 - Training: `MAX_STEPS`, `SAVE_STEPS`, `NUM_GPUS`, `BATCH_SIZE`, `LEARNING_RATE`

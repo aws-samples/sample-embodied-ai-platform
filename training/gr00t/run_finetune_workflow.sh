@@ -13,7 +13,7 @@
 # 1) DATASET_LOCAL_DIR (use dataset bundled or pre-mounted)
 # 2) DATASET_S3_URI (sync from S3 URI s3://bucket/path)
 # 3) HF_DATASET_ID (download from Hugging Face Datasets)
-# 4) Sample dataset (git clone with Git LFS): /workspace/embodied-ai-platform-examples/training/gr00t/sample_dataset
+# 4) Sample dataset (git clone with Git LFS): /workspace/sample-embodied-ai-platform/training/gr00t/sample_dataset
 
 set -e  # Exit on any error
 
@@ -146,7 +146,7 @@ fi
 mkdir -p "$OUTPUT_DIR" || true
 
 # Resolve dataset source according to priority and ensure accessibility
-SAMPLE_REPO_DIR="/workspace/embodied-ai-platform-examples"
+SAMPLE_REPO_DIR="/workspace/sample-embodied-ai-platform"
 DEFAULT_SAMPLE_DATASET_DIR="$SAMPLE_REPO_DIR/training/gr00t/sample_dataset"
 RESOLVED_DATASET_DIR=""
 
@@ -225,7 +225,7 @@ else
         exit 1
     fi
     if [ ! -d "$SAMPLE_REPO_DIR/.git" ]; then
-        if ! git clone https://github.com/aws-samples/embodied-ai-platform-examples.git "$SAMPLE_REPO_DIR"; then
+        if ! git clone https://github.com/aws-samples/sample-embodied-ai-platform.git "$SAMPLE_REPO_DIR"; then
             echo "ERROR: Failed to clone sample repository to $SAMPLE_REPO_DIR"
             exit 1
         fi
@@ -320,11 +320,11 @@ esac
 # Cleanup
 if [ "${CLEANUP_DATASET}" = "true" ]; then
     echo "CLEANUP_DATASET=true set. Attempting to remove dataset directory: $DATASET_LOCAL_DIR"
-    if [[ "$DATASET_LOCAL_DIR" != /workspace/embodied-ai-platform-examples/* ]]; then
+    if [[ "$DATASET_LOCAL_DIR" != /workspace/sample-embodied-ai-platform/* ]]; then
         rm -rf "$DATASET_LOCAL_DIR" || true
         echo "Removed dataset directory $DATASET_LOCAL_DIR"
     else
-        echo "Skipping removal of sample dataset under /workspace/embodied-ai-platform-examples"
+        echo "Skipping removal of sample dataset under /workspace/sample-embodied-ai-platform"
     fi
 fi
 

@@ -1,8 +1,10 @@
 # Sample Embodied AI Platform
 
-A reference platform with components for building, training, evaluating, and deploying embodied AI systems on AWS. 
+A reference platform with components for collecting data, training, evaluating, and deploying embodied AI systems on AWS. 
 
-The first component demonstrates fine-tuning the NVIDIA Isaac GR00T vision-language-action (VLA) model via teleoperation and imitation learning, then deploying for inference on cost-effective robot hardware (e.g., SO-ARM100/101). The project is evolving to support additional VLAs, data generation approaches, simulators, and embodiments.
+## What's New
+
+* [October 2025] We added the first component that demonstrates the fine-tuning pipeline for NVIDIA Isaac GR00T vision-language-action (VLA) model via teleoperation and imitation learning, then deploying for inference on cost-effective SO-ARM100/101.
 
 ## Project goals
 
@@ -14,13 +16,13 @@ The first component demonstrates fine-tuning the NVIDIA Isaac GR00T vision-langu
 
 ## Component overview
 
-This repository is organized into modular components. Each component has its own README with setup, deployment, and usage instructions.
+This repository is organized into modular components. Each component has its own documentation with setup, deployment, and usage instructions.
 
 ### Available components
 
 | Component | Path | Purpose | Docs |
 | --- | --- | --- | --- |
-| GR00T Training | `training/gr00t/` | Fine-tune NVIDIA Isaac GR00T with teleop/sim data; reproducible workflow on AWS Batch; DCV workstation for monitoring/eval | [training/gr00t/README.md](training/gr00t/README.md) |
+| NVIDIA Isaac GR00T Training | `training/gr00t/` | Fine-tune NVIDIA Isaac GR00T with teleop/sim data; reproducible workflow on AWS Batch; DCV workstation for monitoring/eval | [training/gr00t/README.md](training/gr00t/README.md) |
 
 ## Roadmap
 

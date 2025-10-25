@@ -2,6 +2,10 @@
 # Optimized Dockerfile for Isaac-GR00T using UV package manager
 FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
 
+# Build argument to control GR00T version (stable vs latest)
+ARG USE_STABLE=true
+ARG STABLE_COMMIT=db107f03d165060998df166292578f1d7fb3c79a
+
 # Setting the frontend to be non-interactive
 # This is to avoid any user input required during the installation of packages
 ENV DEBIAN_FRONTEND=noninteractive
@@ -39,10 +43,6 @@ ENV PYTHONPATH=/workspace
 # Clone Isaac-GR00T repository
 # This layer changes when using --latest
 # ============================================================================
-# Build argument to control GR00T version (stable vs latest)
-ARG USE_STABLE=true
-ARG STABLE_COMMIT=db107f03d165060998df166292578f1d7fb3c79a
-
 RUN git clone https://github.com/NVIDIA/Isaac-GR00T.git /workspace && \
     cd /workspace && \
     if [ "${USE_STABLE}" = "true" ]; then \
