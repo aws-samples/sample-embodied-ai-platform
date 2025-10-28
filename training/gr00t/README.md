@@ -1,6 +1,6 @@
 # NVIDIA Isaac GR00T Training Component
 
-Fine-tune NVIDIA Isaac GR00T VLA models using teleoperation/simulation datasets. Supports AWS Batch training with GPU and NICE DCV for monitoring/evaluation. Use this README as a bridge: high-level usage and structure here; detailed infrastructure/deployment in `infra/README.md`.
+Fine-tune NVIDIA Isaac GR00T VLA models using teleoperation/simulation datasets. Supports AWS Batch training with GPU and Amazon DCV for monitoring/evaluation. Use this README as a bridge: high-level usage and structure here; detailed infrastructure/deployment in `infra/README.md`.
 
 ## Links
 
@@ -34,9 +34,53 @@ training/gr00t/
     └── architecture.drawio.png
 ```
 
+## Submitting Jobs
+
+After deploying the infrastructure (see [infra/README.md](infra/README.md)), submit training jobs to AWS Batch:
+
+**AWS CLI:**
+```bash
+aws batch submit-job \
+  --job-name "IsaacGr00tFinetuning" \
+  --job-queue "IsaacGr00tJobQueue" \
+  --job-definition "IsaacGr00tJobDefinition"
+```
+
+**With custom environment variables:**
+```bash
+aws batch submit-job \
+  --job-name "IsaacGr00tFinetuning" \
+  --job-queue "IsaacGr00tJobQueue" \
+  --job-definition "IsaacGr00tJobDefinition" \
+  --container-overrides 'environment=[
+    {name=HF_DATASET_ID,value=lerobot/your-dataset},
+    {name=MAX_STEPS,value=6000},
+    {name=SAVE_STEPS,value=2000}
+  ]'
+```
+
+**AWS Console:**
+1. Go to AWS Batch → Jobs → Submit new job
+2. Select `IsaacGr00tJobDefinition` and `IsaacGr00tJobQueue`
+3. Add environment variables as needed
+4. Submit
+
+**Monitor progress:**
+```bash
+# Check status
+aws batch describe-jobs --jobs <JOB_ID>
+
+# Stream logs (once RUNNING)
+aws logs tail /aws/batch/job --follow \
+  --log-stream-names "$(aws batch describe-jobs --jobs <JOB_ID> \
+  --query 'jobs[0].container.logStreamName' --output text)"
+```
+
+> Default: 6000 steps (~3 hours on g6e.4xlarge). Checkpoints saved every 2000 steps at `/mnt/efs/gr00t/checkpoints`.
+
 ## Configuration (env vars)
 
-See [env.example](env.example) for configurable environment variables:
+See [env.example](env.example) for configuring the training job parameters:
 - Dataset sources: `DATASET_LOCAL_DIR`, `DATASET_S3_URI`, `HF_DATASET_ID`
 - Uploads: `UPLOAD_TARGET` (hf|s3|none), `HF_TOKEN`, `HF_MODEL_REPO_ID`, `S3_UPLOAD_URI`
 - Training: `MAX_STEPS`, `SAVE_STEPS`, `NUM_GPUS`, `BATCH_SIZE`, `LEARNING_RATE`

@@ -7,10 +7,12 @@ from aws_cdk import (
     aws_iam as iam,
     aws_efs as efs,
     aws_ecs as ecs,
+    aws_s3 as s3,
     Stack,
     CfnOutput,
     Duration,
     Size,
+    RemovalPolicy,
 )
 from constructs import Construct
 
@@ -23,6 +25,9 @@ class BatchStack(Stack):
         vpc_id: str = None,
         efs_id: str = None,
         efs_sg_id: str = None,
+        ecr_image_uri: str = None,
+        dataset_bucket: str = None,
+        s3_upload_uri: str = None,
         **kwargs,
     ) -> None:
         """
@@ -37,11 +42,14 @@ class BatchStack(Stack):
         - 2.4 Create Compute Environment
         - 2.5 Create Job Queue and Job Definition
 
-        Notes on container image (Step 2.2 in blog):
-        - If you built and pushed the fine-tune image to ECR already, set env var
-          ECR_IMAGE_URI to the ECR image URI (e.g. 123456789012.dkr.ecr.us-west-2.amazonaws.com/gr00t-finetune:latest)
-          and this stack will reference that image directly.
-        - Otherwise, this stack will build an image from `training/gr00t/Dockerfile` at synth time using CDK assets.
+        Args:
+            vpc_id: Existing VPC ID to reuse (optional)
+            efs_id: Existing EFS file system ID to reuse (optional)
+            efs_sg_id: Existing EFS security group ID (required if efs_id is provided)
+            ecr_image_uri: Existing ECR image URI (e.g. 123456789012.dkr.ecr.us-west-2.amazonaws.com/gr00t-finetune:latest).
+                          If not provided, builds from local Dockerfile.
+            dataset_bucket: S3 bucket name for dataset read-only access (optional)
+            s3_upload_uri: S3 URI for checkpoint uploads (e.g., s3://bucket/path). If not provided, creates a new bucket.
         """
         super().__init__(scope, construct_id, **kwargs)
 
@@ -122,13 +130,12 @@ class BatchStack(Stack):
         # region 2.2 Build the fine-tuning container and push to ECR
         # ==============================================================
         # Container image selection strategy:
-        # - Prefer an existing ECR image in the same account via ECR_IMAGE_URI
+        # - Prefer an existing ECR image in the same account via ecr_image_uri
         # - Else build via CDK asset from local Dockerfile
-        image_uri = os.getenv("ECR_IMAGE_URI")
-        if image_uri:
+        if ecr_image_uri:
             # Prefer from_ecr_repository so execution role gets precise ECR permissions
             # Expected format: <account>.dkr.ecr.<region>.amazonaws.com/<repo>:<tag>
-            repo_and_tag = image_uri.split("/")[-1]
+            repo_and_tag = ecr_image_uri.split("/")[-1]
             if ":" in repo_and_tag:
                 repo_name, tag = repo_and_tag.split(":", 1)
             else:
@@ -147,6 +154,7 @@ class BatchStack(Stack):
                 file="Dockerfile",
             )
             container_image = ecs.ContainerImage.from_docker_image_asset(asset)
+            ecr_image_uri = asset.image_uri
         # endregion
 
         # ==============================================================
@@ -195,7 +203,6 @@ class BatchStack(Stack):
             instance_role=iam.Role(
                 self,
                 "BatchInstanceRole",
-                role_name="BatchInstanceRole",
                 assumed_by=iam.ServicePrincipal("ec2.amazonaws.com"),
                 managed_policies=[
                     iam.ManagedPolicy.from_aws_managed_policy_name(
@@ -233,19 +240,66 @@ class BatchStack(Stack):
         job_role = iam.Role(
             self,
             "JobRole",
-            role_name="IsaacGr00tJobRole",
             assumed_by=iam.ServicePrincipal("ecs-tasks.amazonaws.com"),
             managed_policies=[],
         )
 
-        # Prefer least-privilege S3 access if TRAINING_S3_BUCKET_NAME is provided; otherwise allow S3 read-only access for dataset download.
-        s3_bucket_name = os.getenv("TRAINING_S3_BUCKET_NAME")
-        if s3_bucket_name:
+        # Separate dataset bucket (read-only) from checkpoint upload bucket (read/write).
+        # 1) If dataset_bucket is provided, allow read-only on that bucket.
+        # 2) If s3_upload_uri is provided (e.g., s3://bucket/path), allow read/write to its bucket/prefix.
+        # 3) If s3_upload_uri is not provided, create a new checkpoint bucket and derive s3_upload_uri.
+        # 4) If neither dataset nor upload buckets are specified, fall back to S3 read-only (useful for dataset downloads).
+        if dataset_bucket:
             job_role.add_to_policy(
                 iam.PolicyStatement(
                     actions=["s3:ListBucket"],
-                    resources=[f"arn:aws:s3:::{s3_bucket_name}"],
+                    resources=[f"arn:aws:s3:::{dataset_bucket}"],
                 )
+            )
+            job_role.add_to_policy(
+                iam.PolicyStatement(
+                    actions=["s3:GetObject"],
+                    resources=[f"arn:aws:s3:::{dataset_bucket}/*"],
+                )
+            )
+
+        # Resolve or create checkpoint upload bucket/URI
+        checkpoint_bucket = None
+        original_s3_upload_uri = s3_upload_uri  # Track original state
+        if not s3_upload_uri:
+            # Create a new S3 bucket for checkpoints
+            checkpoint_bucket = s3.Bucket(
+                self,
+                "Gr00tCheckpointBucket",
+                block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+                encryption=s3.BucketEncryption.S3_MANAGED,
+                enforce_ssl=True,
+                versioned=True,
+                removal_policy=RemovalPolicy.RETAIN,
+                auto_delete_objects=False,
+            )
+            # Derive s3_upload_uri from the created bucket
+            s3_upload_uri = f"s3://{checkpoint_bucket.bucket_name}/gr00t/checkpoints"
+
+        if checkpoint_bucket is not None:
+            # Grant RW to the created checkpoint bucket
+            checkpoint_bucket.grant_read_write(job_role)
+        elif s3_upload_uri and s3_upload_uri.startswith("s3://"):
+            remainder = s3_upload_uri[5:]
+            if "/" in remainder:
+                upload_bucket, upload_prefix = remainder.split("/", 1)
+            else:
+                upload_bucket, upload_prefix = remainder, ""
+            job_role.add_to_policy(
+                iam.PolicyStatement(
+                    actions=["s3:ListBucket"],
+                    resources=[f"arn:aws:s3:::{upload_bucket}"],
+                )
+            )
+            object_resource = (
+                f"arn:aws:s3:::{upload_bucket}/{upload_prefix}*"
+                if upload_prefix
+                else f"arn:aws:s3:::{upload_bucket}/*"
             )
             job_role.add_to_policy(
                 iam.PolicyStatement(
@@ -256,10 +310,16 @@ class BatchStack(Stack):
                         "s3:AbortMultipartUpload",
                         "s3:ListMultipartUploadParts",
                     ],
-                    resources=[f"arn:aws:s3:::{s3_bucket_name}/*"],
+                    resources=[object_resource],
                 )
             )
-        else:
+
+        # Only grant general S3 read-only access if no buckets were originally specified
+        if (
+            not dataset_bucket
+            and not original_s3_upload_uri
+            and checkpoint_bucket is None
+        ):
             job_role.add_managed_policy(
                 iam.ManagedPolicy.from_aws_managed_policy_name("AmazonS3ReadOnlyAccess")
             )
@@ -269,6 +329,15 @@ class BatchStack(Stack):
         efs_volume = batch.EcsVolume.efs(
             name="BatchEFS", file_system=efs_fs, container_path="/mnt/efs"
         )
+
+        # Prepare container environment with defaults and optional S3 settings
+        container_environment = {
+            # Optional default locations on EFS. You can override at submit time.
+            "OUTPUT_DIR": "/mnt/efs/gr00t/checkpoints"
+        }
+        if s3_upload_uri:
+            container_environment["UPLOAD_TARGET"] = "s3"
+            container_environment["S3_UPLOAD_URI"] = s3_upload_uri
 
         job_def = batch.EcsJobDefinition(
             self,
@@ -282,10 +351,7 @@ class BatchStack(Stack):
                 cpu=8,
                 gpu=1,
                 job_role=job_role,
-                environment={
-                    # Optional default locations on EFS. You can override at submit time.
-                    "OUTPUT_DIR": "/mnt/efs/gr00t/checkpoints"
-                },
+                environment=container_environment,
                 volumes=[efs_volume],
                 linux_parameters=batch.LinuxParameters(
                     self,
@@ -305,7 +371,12 @@ class BatchStack(Stack):
         CfnOutput(self, "EFSSecurityGroupId", value=self.efs_sg_id)
 
         # Additional outputs for convenience when submitting jobs via CLI/Console
-        CfnOutput(self, "ComputeEnvironmentName", value="IsaacGr00tComputeEnvironment")
-        CfnOutput(self, "JobQueueName", value="IsaacGr00tJobQueue")
-        CfnOutput(self, "JobDefinitionName", value="IsaacGr00tJobDefinition")
+        CfnOutput(
+            self, "ComputeEnvironmentName", value=compute_env.compute_environment_name
+        )
+        CfnOutput(self, "JobQueueName", value=job_queue.job_queue_name)
+        CfnOutput(self, "JobDefinitionName", value=job_def.job_definition_name)
+        CfnOutput(self, "EcrImageUri", value=ecr_image_uri)
+        if s3_upload_uri:
+            CfnOutput(self, "CheckpointS3UploadUri", value=s3_upload_uri)
         # endregion

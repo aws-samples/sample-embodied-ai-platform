@@ -128,7 +128,7 @@ if [ -n "$HF_TOKEN" ] && { [ -n "$HF_DATASET_ID" ] || [ -n "$HF_MODEL_REPO_ID" ]
     fi
     
     if [ "$HF_CLI" = "hf" ]; then
-        hf login --token "$HF_TOKEN" --non-interactive || true
+        hf auth login --token "$HF_TOKEN" --non-interactive || true
     else
         huggingface-cli login --token "$HF_TOKEN" || true
     fi

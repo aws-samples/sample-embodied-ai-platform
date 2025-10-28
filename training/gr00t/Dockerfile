@@ -28,6 +28,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     vim less htop \
     && rm -rf /var/lib/apt/lists/*
 
+# Install AWS CLI v2 (official AWS method)
+RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" && \
+    unzip awscliv2.zip && \
+    ./aws/install && \
+    rm -rf awscliv2.zip aws && \
+    rm -rf /usr/local/aws-cli/v2/*/dist/awscli/examples
+
 # Set Python 3.10 as default
 RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.10 1 && \
     update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1

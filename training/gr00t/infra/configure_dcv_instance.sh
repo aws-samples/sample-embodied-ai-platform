@@ -1,5 +1,5 @@
 #!/bin/bash
-# Bootstrap script for NICE DCV on Ubuntu 22.04 with IsaacLab and EFS
+# Bootstrap script for Amazon DCV on Ubuntu 22.04 with IsaacLab and EFS
 # - Robust logging to /var/log/dcv-bootstrap.log and concise step summary
 # - Retries for apt and network operations
 # - Non-fatal GUI tweaks; separation of critical vs optional steps
@@ -16,7 +16,7 @@
 #   - Auto session service log: journalctl -u auto-dcv.service -e --no-pager
 #
 # How to interpret and fix:
-#   1) SSH/SSM/EC2 Instance Connect into the instance and review the summary:
+#   1) Session Manager/EC2 Instance Connect/SSH into the instance and review the summary:
 #        sudo cat /var/log/dcv-bootstrap.summary
 #   2) For each STEP_FAIL, open the detailed log around the time it ran:
 #        sudo less +G /var/log/dcv-bootstrap.log
@@ -184,7 +184,7 @@ EOF
 
   cat >/etc/systemd/system/auto-dcv.service <<'EOF'
 [Unit]
-Description=Auto-create NICE DCV virtual session
+Description=Auto-create Amazon DCV virtual session
 Wants=network-online.target
 After=dcvserver.service network-online.target
 
@@ -246,7 +246,7 @@ try_step "disable-gnome-initial-setup" '
   systemctl restart gdm3 || true
 '
 
-# 5) NICE DCV server (critical)
+# 5) Amazon DCV server (critical)
 must "install-nice-dcv" '
   DCV_URL="https://d1uj6qtbmh3dt5.cloudfront.net/2024.0/Servers/nice-dcv-2024.0-19030-ubuntu2204-x86_64.tgz"
   cd /tmp

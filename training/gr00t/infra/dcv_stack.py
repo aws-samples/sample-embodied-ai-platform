@@ -61,20 +61,20 @@ class DcvStack(Stack):
             )
 
         # 3. Security Group
-        # This controls access to the instance. It allows NICE DCV traffic by default.
+        # This controls access to the instance. It allows Amazon DCV traffic by default.
         # Optional: Allow SSH access from your IP for debugging purposes.
         # IMPORTANT: For production, you should restrict the source IP for all ports.
         sg = ec2.SecurityGroup(
             self,
             "DcvSecurityGroup",
             vpc=resolved_vpc,
-            description="Allow NICE DCV and optional TensorBoard access",
+            description="Allow Amazon DCV and optional TensorBoard access",
             allow_all_outbound=True,
         )
         sg.add_ingress_rule(
             ec2.Peer.any_ipv4(),
             ec2.Port.tcp(8443),
-            "Allow NICE DCV access from anywhere",
+            "Allow Amazon DCV access from anywhere",
         )
         # sg.add_ingress_rule(ec2.Peer.ipv4("<your_ip_address>"), ec2.Port.tcp(22), "Allow SSH access from your IP")
         sg.add_ingress_rule(
@@ -166,13 +166,13 @@ class DcvStack(Stack):
             self,
             "InstancePublicIP",
             value=eip.ref,
-            description="Public IP address of the NICE DCV instance. Connect to this IP.",
+            description="Public IP address of the Amazon DCV instance. Connect to this IP.",
         )
         CfnOutput(
             self,
             "DCVConnectionCommand",
             value=f"dcvviewer -hostname {eip.ref} -port 8443 -user ubuntu",
-            description="Command to connect using the NICE DCV client.",
+            description="Command to connect using the Amazon DCV client.",
         )
         CfnOutput(
             self,

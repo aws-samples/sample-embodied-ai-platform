@@ -1,4 +1,4 @@
-# AWS CDK for GR00T Fine-tuning
+# AWS CDK Stacks for GR00T Fine-tuning
 
 This directory contains AWS Cloud Development Kit (CDK) stacks to deploy infrastructure for fine-tuning and evaluating NVIDIA Isaac GR00T models on AWS.
 
@@ -8,8 +8,8 @@ This directory contains AWS Cloud Development Kit (CDK) stacks to deploy infrast
 
 The infrastructure consists of two independent but complementary CDK stacks:
 
-1. **BatchStack** (`batch_stack.py`) - Creates AWS Batch resources for distributed fine-tuning jobs
-2. **DcvStack** (`dcv_stack.py`) - Deploys an Amazon EC2 instance with NICE DCV for visualization and evaluation
+1. **BatchStack** (`batch_stack.py`) - Creates AWS Batch resources for scalable fine-tuning jobs
+2. **DcvStack** (`dcv_stack.py`) - Deploys an Amazon EC2 instance with Amazon DCV for visualization and evaluation
 
 Both stacks can share common resources (VPC, EFS, Security Groups) to enable seamless data flow between training and evaluation workflows.
 
@@ -31,7 +31,7 @@ Creates the following resources:
 ### DcvStack
 Creates the following resources:
 - Amazon EC2 instance (g6.4xlarge with GPU)
-- NICE DCV server for remote visualization
+- Amazon DCV server for remote visualization
 - Security group for DCV and TensorBoard access
 - Elastic IP for stable connectivity
 - IAM role for EC2 instance
@@ -54,22 +54,28 @@ Deploy both stacks automatically with CDK. This is ideal if you have a local x86
 cd training/gr00t/infra
 pip install -r requirements.txt
 
+# Set AWS region for deployment
+export AWS_REGION=us-west-2  # or your preferred region
+
 # Bootstrap CDK (one-time per account/region)
-cdk bootstrap --profile YOUR_AWS_PROFILE --region YOUR_AWS_REGION
+cdk bootstrap
 
-# Deploy Batch stack (creates VPC, EFS, and Batch resources)
-cdk deploy IsaacGr00tBatchStack --profile YOUR_AWS_PROFILE --region YOUR_AWS_REGION
+# Deploy Batch and DCV stacks (creates VPC, EFS, and Batch resources)
+cdk deploy IsaacGr00tBatchStack IsaacLabDcvStack
 
-# Deploy DCV stack (automatically imports VPC and EFS from Batch stack)
-cdk deploy IsaacLabDcvStack --profile YOUR_AWS_PROFILE --region YOUR_AWS_REGION
+# Or use existing resources via CDK context parameters (optional)
+cdk deploy IsaacGr00tBatchStack IsaacLabDcvStack \
+  --context vpc_id=vpc-12345 \
+  --context efs_id=fs-12345 \
+  --context efs_sg_id=sg-12345 \
+  --context ecr_image_uri=123456789012.dkr.ecr.us-west-2.amazonaws.com/gr00t-finetune:latest \
+  --context dataset_bucket=my-dataset-bucket \
+  --context s3_upload_uri=s3://my-checkpoint-bucket/gr00t/checkpoints
 ```
 
 **Notes**:
 - The Batch stack will build the container image from the Dockerfile, which can take 10-30 minutes
-- If you want to use a pre-built container image, set the `ECR_IMAGE_URI` environment variable:
-  ```bash
-  ECR_IMAGE_URI=<YOUR_ECR_IMAGE_URI> cdk deploy IsaacGr00tBatchStack
-  ```
+- If you want to use a pre-built container image, use the `ecr_image_uri` context parameter or `ECR_IMAGE_URI` environment variable
 
 ### Path 2: Manual Console + CDK for DCV
 
@@ -89,8 +95,11 @@ cat > cdk.json << EOF
 }
 EOF
 
+# Set AWS region for deployment
+export AWS_REGION=us-west-2  # or your preferred region
+
 # Deploy only the DCV stack
-cdk deploy IsaacLabDcvStack --profile YOUR_AWS_PROFILE --region YOUR_AWS_REGION
+cdk deploy IsaacLabDcvStack
 ```
 
 ### Path 3: DCV First, Then Batch (For ARM/Non-x86 Local Machines)
@@ -110,17 +119,23 @@ cat > cdk.json << EOF
 {
   "app": "python app.py",
   "context": {
-    "vpc_id": "vpc-xxxxxxxx",      // Your BatchVPC ID
-    "efs_id": "fs-xxxxxxxx",        // Your BatchEFS ID
-    "efs_sg_id": "sg-xxxxxxxx"      // Your BatchEFSSecurityGroup ID
+    "vpc_id": "vpc-xxxxxxxx",
+    "efs_id": "fs-xxxxxxxx",
+    "efs_sg_id": "sg-xxxxxxxx",
+    "dataset_bucket": "my-dataset-bucket",
+    "s3_upload_uri": "s3://my-checkpoint-bucket/gr00t/checkpoints"
   }
 }
 EOF
 
 # Step 3: Deploy DCV stack (imports VPC and EFS)
 pip install -r requirements.txt
-cdk bootstrap --profile YOUR_AWS_PROFILE --region YOUR_AWS_REGION  # if not done
-cdk deploy IsaacLabDcvStack --profile YOUR_AWS_PROFILE --region YOUR_AWS_REGION
+
+# Set AWS region for deployment
+export AWS_REGION=us-west-2  # or your preferred region
+
+cdk bootstrap  # if not done
+cdk deploy IsaacLabDcvStack
 
 # Step 4: Connect to the DCV instance via the web URL or DCV client
 # (Check stack outputs for connection details)
@@ -130,42 +145,72 @@ git clone https://github.com/aws-samples/sample-embodied-ai-platform.git
 cd sample-embodied-ai-platform/training/gr00t
 
 # Authenticate to ECR (create repository first in ECR console)
-aws ecr get-login-password --region YOUR_AWS_REGION | \
-  docker login --username AWS --password-stdin YOUR_ACCOUNT.dkr.ecr.YOUR_AWS_REGION.amazonaws.com
+export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+export AWS_REGION=us-west-2  # or your preferred region
+aws ecr get-login-password | \
+  docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
 
 # Build and push the container
-export DOCKER_REGISTRY=YOUR_ACCOUNT.dkr.ecr.YOUR_AWS_REGION.amazonaws.com
+export DOCKER_REGISTRY=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
 ./build_container.sh --test --push
 
 # Step 6: Deploy Batch stack from local or the DCV instance (imports same VPC and EFS)
 cd infra
 pip install -r requirements.txt
-# Use the same cdk.json context or set environment variables
-ECR_IMAGE_URI=YOUR_ACCOUNT.dkr.ecr.YOUR_AWS_REGION.amazonaws.com/gr00t-finetune:latest \
-  cdk deploy IsaacGr00tBatchStack --profile YOUR_AWS_PROFILE --region YOUR_AWS_REGION
+# Add ecr_image_uri to the cdk.json context or use --context ecr_image_uri flag
+cdk deploy IsaacGr00tBatchStack \
+  --context ecr_image_uri=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/gr00t-finetune:latest
 ```
 
 **Important**: Both stacks will import the same VPC, EFS, and Security Group via the context in `cdk.json`, ensuring they share resources for seamless data flow.
 
 ## Configuration Options
 
-### Environment Variables
+### Infrastructure Deployment
 
-- `ECR_IMAGE_URI`: Use an existing ECR image instead of building from Dockerfile
-- `TRAINING_S3_BUCKET_NAME`: S3 bucket for datasets and checkpoints (enables least-privilege IAM policies)
-- `AWS_DEFAULT_REGION`: Override the deployment region
+When deploying the CDK stack, you can configure infrastructure resources using CDK context parameters or environment variables:
+
+#### CDK Context Parameters (Recommended)
+
+Pass configuration via CDK context using `--context` flags:
+
+```bash
+cdk deploy IsaacGr00tBatchStack IsaacLabDcvStack \
+  --context vpc_id=vpc-12345 \
+  --context efs_id=fs-12345 \
+  --context efs_sg_id=sg-12345 \
+  --context ecr_image_uri=123456789012.dkr.ecr.us-west-2.amazonaws.com/gr00t-finetune:latest \
+  --context dataset_bucket=my-dataset-bucket \
+  --context s3_upload_uri=s3://my-checkpoint-bucket/gr00t/checkpoints
+```
+
+#### Configuration Options
+
+| Context Parameter | Env Variable | Description | Default |
+|------------------|--------------|-------------|---------|
+| `vpc_id` | `VPC_ID` | Existing VPC ID to reuse | Creates new VPC |
+| `efs_id` | `EFS_ID` | Existing EFS file system ID | Creates new EFS |
+| `efs_sg_id` | `EFS_SG_ID` | EFS security group ID (required if `efs_id` is set) | Creates new SG |
+| `ecr_image_uri` | `ECR_IMAGE_URI` | Pre-built ECR image URI (in the same region as the deployment) | Builds from local Dockerfile |
+| `dataset_bucket` | `DATASET_BUCKET` | S3 bucket name for dataset read-only access | No dataset bucket access |
+| `s3_upload_uri` | `S3_UPLOAD_URI` | S3 URI for checkpoint uploads | Creates new checkpoint bucket |
+
+**Note**: CDK context parameters take precedence over environment variables. This allows for flexible deployment configurations while maintaining consistency through context values in your `cdk.json` or CLI commands.
 
 ### CDK Context (cdk.json)
 
-You can provide existing resource IDs to import rather than create new ones:
+You can also use context in [cdk.json](cdk.json) to provide existing resource IDs to import rather than create new ones:
 
 ```json
 {
   "app": "python app.py",
   "context": {
-    "vpc_id": "vpc-xxxxxxxx",      // Import existing VPC
-    "efs_id": "fs-xxxxxxxx",        // Import existing EFS
-    "efs_sg_id": "sg-xxxxxxxx"      // Import existing Security Group
+    "vpc_id": "vpc-xxxxxxxx",
+    "efs_id": "fs-xxxxxxxx",
+    "efs_sg_id": "sg-xxxxxxxx",
+    "ecr_image_uri": "123456789012.dkr.ecr.us-west-2.amazonaws.com/gr00t-finetune:latest",
+    "dataset_bucket": "my-dataset-bucket",
+    "s3_upload_uri": "s3://my-checkpoint-bucket/gr00t/checkpoints"
   }
 }
 ```
@@ -196,7 +241,8 @@ This enables:
 
 - [ ] Install AWS CDK CLI: `npm install -g aws-cdk`
 - [ ] Install Python dependencies: `pip install -r requirements.txt`
-- [ ] Bootstrap CDK: `cdk bootstrap --profile YOUR_AWS_PROFILE --region YOUR_AWS_REGION`
+- [ ] Set AWS region: `export AWS_REGION=us-west-2`
+- [ ] Bootstrap CDK: `cdk bootstrap`
 - [ ] Request GPU instance quota (g6e.2xlarge or larger)
 - [ ] (Optional) Build and push container image to ECR
 - [ ] (Optional) Configure cdk.json with existing resource IDs
@@ -208,11 +254,14 @@ This enables:
 To avoid ongoing charges, destroy the stacks in reverse order:
 
 ```bash
+# Set AWS region for deployment
+export AWS_REGION=us-west-2  # or your preferred region
+
 # Destroy DCV stack first (terminates EC2 instance)
-cdk destroy IsaacLabDcvStack --force --profile YOUR_AWS_PROFILE --region YOUR_AWS_REGION
+cdk destroy IsaacLabDcvStack --force
 
 # Destroy Batch stack (removes Batch resources, EFS, VPC if created by CDK)
-cdk destroy IsaacGr00tBatchStack --force --profile YOUR_AWS_PROFILE --region YOUR_AWS_REGION
+cdk destroy IsaacGr00tBatchStack --force
 ```
 
 **Important**: If you manually created resources or imported existing ones via context, those resources will NOT be deleted by `cdk destroy`. Delete them manually if they were created specifically for this project.
@@ -237,7 +286,7 @@ cdk destroy IsaacGr00tBatchStack --force --profile YOUR_AWS_PROFILE --region YOU
 
 ### Permission Denied Errors
 - **Issue**: Job cannot access S3 or ECR
-- **Solution**: Verify IAM roles have appropriate policies. For S3, set `TRAINING_S3_BUCKET_NAME` environment variable
+- **Solution**: Verify IAM roles have appropriate policies. For S3, set `DATASET_BUCKET` environment variable
 
 ## Support and Contributions
 
