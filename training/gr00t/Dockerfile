@@ -13,7 +13,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # System dependencies - consolidated for better layer caching
 RUN apt-get update && apt-get install -y --no-install-recommends \
     # Core utilities
-    wget curl ca-certificates \
+    wget curl ca-certificates unzip \
     # Git and version control
     git git-lfs \
     # Build essentials

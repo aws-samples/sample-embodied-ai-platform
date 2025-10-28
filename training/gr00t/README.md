@@ -22,7 +22,6 @@ training/gr00t/
 ├── env.example                # Example environment variables
 ├── finetune_gr00t.py          # GR00T training script
 ├── run_finetune_workflow.sh   # Entrypoint: dataset, auth, uploads
-├── sample_dataset/            # Example data layout and samples
 └── infra/                     # AWS CDK stacks for Batch and DCV
     ├── README.md              # Deployment guide (paths 1–3, troubleshooting)
     ├── app.py

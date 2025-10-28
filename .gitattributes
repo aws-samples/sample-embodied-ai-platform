@@ -2,6 +2,6 @@
 # Only track large binary files in sample_dataset to allow selective downloads
 
 # Track specific file types in sample_dataset only
-training/gr00t/sample_dataset/**/*.mp4 filter=lfs diff=lfs merge=lfs -text
-training/gr00t/sample_dataset/**/*.parquet filter=lfs diff=lfs merge=lfs -text
-training/gr00t/sample_dataset/**/*.jsonl filter=lfs diff=lfs merge=lfs -text
+training/sample_dataset/**/*.mp4 filter=lfs diff=lfs merge=lfs -text
+training/sample_dataset/**/*.parquet filter=lfs diff=lfs merge=lfs -text
+training/sample_dataset/**/*.jsonl filter=lfs diff=lfs merge=lfs -text

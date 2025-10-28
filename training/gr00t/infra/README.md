@@ -164,15 +164,9 @@ cdk deploy IsaacGr00tBatchStack \
 
 **Important**: Both stacks will import the same VPC, EFS, and Security Group via the context in `cdk.json`, ensuring they share resources for seamless data flow.
 
-## Configuration Options
+## Deployment Context
 
-### Infrastructure Deployment
-
-When deploying the CDK stack, you can configure infrastructure resources using CDK context parameters or environment variables:
-
-#### CDK Context Parameters (Recommended)
-
-Pass configuration via CDK context using `--context` flags:
+When deploying the CDK stack, you can configure infrastructure resources using CDK context parameters.
 
 ```bash
 cdk deploy IsaacGr00tBatchStack IsaacLabDcvStack \
@@ -184,7 +178,7 @@ cdk deploy IsaacGr00tBatchStack IsaacLabDcvStack \
   --context s3_upload_uri=s3://my-checkpoint-bucket/gr00t/checkpoints
 ```
 
-#### Configuration Options
+### Configuration Options
 
 | Context Parameter | Env Variable | Description | Default |
 |------------------|--------------|-------------|---------|
@@ -197,7 +191,7 @@ cdk deploy IsaacGr00tBatchStack IsaacLabDcvStack \
 
 **Note**: CDK context parameters take precedence over environment variables. This allows for flexible deployment configurations while maintaining consistency through context values in your `cdk.json` or CLI commands.
 
-### CDK Context (cdk.json)
+### cdk.json
 
 You can also use context in [cdk.json](cdk.json) to provide existing resource IDs to import rather than create new ones:
 
