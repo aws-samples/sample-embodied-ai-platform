@@ -102,7 +102,9 @@ export AWS_REGION=us-west-2  # or your preferred region
 cdk deploy IsaacLabDcvStack
 ```
 
-### Path 3: DCV First, Then Batch (For ARM/Non-x86 Local Machines)
+### Path 3: DCV First, Then Batch (For ARM/Non-x86 Local Machines - Legacy)
+
+**Note**: Path 4 (CodeBuild) is now recommended over Path 3 for ARM users.
 
 If you cannot build x86 container images locally (e.g., using an ARM-based Mac), you can deploy the DCV stack first, then use that EC2 instance to build the container and deploy the Batch stack. To ensure both stacks share the same resources, you must manually create VPC, EFS, and Security Group first.
 
@@ -163,6 +165,55 @@ cdk deploy IsaacGr00tBatchStack \
 ```
 
 **Important**: Both stacks will import the same VPC, EFS, and Security Group via the context in `cdk.json`, ensuring they share resources for seamless data flow.
+
+### Path 4: Automated Container Building with CodeBuild (Recommended for ARM/Non-x86 Machines)
+
+**Best for**: ARM-based machines (Apple Silicon, ARM Linux) or teams wanting automated CI/CD for container builds.
+
+Use AWS CodeBuild to automatically build the GR00T container in the cloud with x86 architecture, eliminating the need for local x86 machines or early DCV deployment.
+
+```bash
+# Step 1: Deploy CodeBuild stack
+cd training/gr00t/infra/codebuild
+pip install -r requirements.txt
+
+# Set AWS region for deployment
+export AWS_REGION=us-west-2  # or your preferred region
+
+cdk bootstrap  # if not done
+cdk deploy Gr00tCodeBuildStack
+
+# Step 2: Trigger container build
+export PROJECT_NAME=$(aws cloudformation describe-stacks \
+  --stack-name Gr00tCodeBuildStack \
+  --query 'Stacks[0].Outputs[?OutputKey==`CodeBuildProjectName`].OutputValue' \
+  --output text)
+
+aws codebuild start-build --project-name $PROJECT_NAME
+
+# Step 3: Monitor build progress (takes ~15-25 minutes)
+aws logs tail /aws/codebuild/$PROJECT_NAME --follow
+
+# Step 4: Get ECR image URI after build completes
+export ECR_IMAGE_URI=$(aws cloudformation describe-stacks \
+  --stack-name Gr00tCodeBuildStack \
+  --query 'Stacks[0].Outputs[?OutputKey==`ImageUri`].OutputValue' \
+  --output text)
+
+echo "Container image ready: $ECR_IMAGE_URI"
+
+# Step 5: Deploy Batch stack with the built image
+cd ..  # Back to training/gr00t/infra
+cdk deploy IsaacGr00tBatchStack \
+  --context ecr_image_uri=$ECR_IMAGE_URI \
+  --context dataset_bucket=my-dataset-bucket \
+  --context s3_upload_uri=s3://my-checkpoint-bucket/gr00t/checkpoints
+
+# Step 6: (Optional) Deploy DCV stack for visualization
+cdk deploy IsaacLabDcvStack
+```
+
+**See detailed documentation**: [codebuild/README.md](codebuild/README.md)
 
 ## Deployment Context
 

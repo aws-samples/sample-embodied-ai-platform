@@ -1,0 +1,79 @@
+version: 0.2
+
+# Build specification for GR00T fine-tuning container
+# This buildspec is used by AWS CodeBuild to build and push the Docker image to ECR
+
+phases:
+  pre_build:
+    commands:
+      - echo "Starting pre-build phase..."
+      - echo "Build started on $(date)"
+      - echo "Logging in to Amazon ECR..."
+
+      # Configure Docker registry mirror to avoid rate limiting
+      - 'echo ''{"registry-mirrors": ["https://public-mirror.ratelimitshield.io"]}'' | tee /etc/docker/daemon.json'
+      - pkill -SIGHUP dockerd || echo "Docker daemon reload attempted"
+      - sleep 5
+      - echo "Docker daemon configured with RateLimitShield mirror."
+
+      # Get AWS account ID and region
+      - export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - "export AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-west-2}"
+      - 'echo "AWS Account ID: $AWS_ACCOUNT_ID"'
+      - 'echo "AWS Region: $AWS_DEFAULT_REGION"'
+
+      # Login to ECR
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+
+      # Set image variables
+      - "export IMAGE_REPO_NAME=${ECR_REPOSITORY_NAME:-gr00t-finetune}"
+      - "export IMAGE_TAG=${IMAGE_TAG:-latest}"
+      - "export IMAGE_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:$IMAGE_TAG"
+      - 'echo "Image URI: $IMAGE_URI"'
+
+      # Docker info
+      - docker --version
+      - docker info
+
+  build:
+    commands:
+      - echo "Starting build phase..."
+      - echo "Building Docker image using build_container.sh..."
+
+      # Use the existing build_container.sh script to maintain consistency with Path 3
+      # The script is in the root of the source directory
+      - cd $CODEBUILD_SRC_DIR
+      - chmod +x build_container.sh
+
+      # Build with the script, passing appropriate flags
+      - 'if [ "${USE_STABLE}" = "true" ]; then ./build_container.sh --test -n $IMAGE_REPO_NAME -t $IMAGE_TAG; else ./build_container.sh --test --latest -n $IMAGE_REPO_NAME -t $IMAGE_TAG; fi'
+
+      # Tag the image with build number for versioning
+      - "docker tag $IMAGE_REPO_NAME:$IMAGE_TAG $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:$CODEBUILD_BUILD_NUMBER"
+      - "docker tag $IMAGE_REPO_NAME:$IMAGE_TAG $IMAGE_URI"
+
+      - echo "Docker image built and tested successfully"
+      - docker images
+
+  post_build:
+    commands:
+      - echo "Starting post-build phase..."
+      - echo "Pushing Docker image to ECR..."
+
+      # Push the image with both tags (latest and build number)
+      - "docker push $IMAGE_URI"
+      - "docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:$CODEBUILD_BUILD_NUMBER"
+
+      - echo "Docker image pushed successfully"
+      - 'echo "Image URI: $IMAGE_URI"'
+      - 'echo "Build number tag: $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME:$CODEBUILD_BUILD_NUMBER"'
+
+      # Write image URI to file for easy retrieval
+      - echo $IMAGE_URI > image_uri.txt
+      - echo "Build completed on $(date)"
+
+# Artifacts to export (optional, for reference)
+artifacts:
+  files:
+    - image_uri.txt
+  name: gr00t-container-build-artifacts
