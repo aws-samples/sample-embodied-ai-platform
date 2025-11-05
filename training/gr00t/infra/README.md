@@ -45,9 +45,9 @@ Creates the following resources:
 
 Choose the path that best fits your environment and requirements:
 
-### Path 1: Fully Automated Deployment (Recommended for Quick Start)
+### Path 1: Fully Automated Deployment (Recommended)
 
-Deploy both stacks automatically with CDK. This is ideal if you have a local x86 machine or don't need to customize resources manually.
+Deploy both stacks automatically with CDK. Works on **any architecture** (x86 or ARM) - the infrastructure automatically handles container building in the cloud when needed.
 
 ```bash
 # Install dependencies
@@ -62,20 +62,59 @@ cdk bootstrap
 
 # Deploy Batch and DCV stacks (creates VPC, EFS, and Batch resources)
 cdk deploy IsaacGr00tBatchStack IsaacLabDcvStack
+```
 
-# Or use existing resources via CDK context parameters (optional)
+**What happens automatically:**
+- If you don't provide an `ecr_image_uri`, the stack will:
+  1. Create a CodeBuild project with x86 compute
+  2. Build the container image from the Dockerfile in the cloud
+  3. Push the image to ECR
+  4. Use the built image for Batch jobs
+- **Build time**: First deployment takes ~18 minutes for the container build. No need for local x86 Docker or early DCV deployment
+
+**Using an existing container image:**
+```bash
+# Skip automatic build by providing a pre-built image
+cdk deploy IsaacGr00tBatchStack IsaacLabDcvStack \
+  --context ecr_image_uri=123456789012.dkr.ecr.us-west-2.amazonaws.com/gr00t-finetune:latest
+```
+
+**Using existing AWS resources:**
+```bash
+# Import existing VPC, EFS, and other resources
 cdk deploy IsaacGr00tBatchStack IsaacLabDcvStack \
   --context vpc_id=vpc-12345 \
   --context efs_id=fs-12345 \
   --context efs_sg_id=sg-12345 \
-  --context ecr_image_uri=123456789012.dkr.ecr.us-west-2.amazonaws.com/gr00t-finetune:latest \
   --context dataset_bucket=my-dataset-bucket \
   --context s3_upload_uri=s3://my-checkpoint-bucket/gr00t/checkpoints
 ```
+#### Monitoring the Build
 
-**Notes**:
-- The Batch stack will build the container image from the Dockerfile, which can take 10-30 minutes
-- If you want to use a pre-built container image, use the `ecr_image_uri` context parameter or `ECR_IMAGE_URI` environment variable
+After deploying, you can monitor the build progress:
+
+```bash
+# Get the CodeBuild project name from stack outputs
+export PROJECT_NAME=$(aws cloudformation describe-stacks \
+  --stack-name IsaacGr00tBatchStack \
+  --query 'Stacks[0].Outputs[?OutputKey==`CodeBuildProjectName`].OutputValue' \
+  --output text)
+
+# Trigger a build (if not automatically triggered)
+aws codebuild start-build --project-name $PROJECT_NAME
+
+# Monitor build logs in real-time
+aws logs tail /aws/codebuild/$PROJECT_NAME --follow
+```
+
+#### Triggering Manual Rebuilds
+
+To rebuild the container after code changes:
+
+```bash
+# Use the build command from stack outputs
+aws codebuild start-build --project-name $PROJECT_NAME
+```
 
 ### Path 2: Manual Console + CDK for DCV
 
@@ -102,118 +141,9 @@ export AWS_REGION=us-west-2  # or your preferred region
 cdk deploy IsaacLabDcvStack
 ```
 
-### Path 3: DCV First, Then Batch (For ARM/Non-x86 Local Machines - Legacy)
 
-**Note**: Path 4 (CodeBuild) is now recommended over Path 3 for ARM users.
 
-If you cannot build x86 container images locally (e.g., using an ARM-based Mac), you can deploy the DCV stack first, then use that EC2 instance to build the container and deploy the Batch stack. To ensure both stacks share the same resources, you must manually create VPC, EFS, and Security Group first.
 
-```bash
-# Step 1: Manually create shared resources following blog section 2.1
-# - Create VPC (BatchVPC) with public and private subnets
-# - Create Security Group (BatchEFSSecurityGroup) with self-referencing NFS rule
-# - Create EFS (BatchEFS) and attach the security group to all mount targets
-# Note the VPC ID, EFS ID, and Security Group ID
-
-# Step 2: Configure cdk.json with the resource IDs
-cd training/gr00t/infra
-cat > cdk.json << EOF
-{
-  "app": "python app.py",
-  "context": {
-    "vpc_id": "vpc-xxxxxxxx",
-    "efs_id": "fs-xxxxxxxx",
-    "efs_sg_id": "sg-xxxxxxxx",
-    "dataset_bucket": "my-dataset-bucket",
-    "s3_upload_uri": "s3://my-checkpoint-bucket/gr00t/checkpoints"
-  }
-}
-EOF
-
-# Step 3: Deploy DCV stack (imports VPC and EFS)
-pip install -r requirements.txt
-
-# Set AWS region for deployment
-export AWS_REGION=us-west-2  # or your preferred region
-
-cdk bootstrap  # if not done
-cdk deploy IsaacLabDcvStack
-
-# Step 4: Connect to the DCV instance via the web URL or DCV client
-# (Check stack outputs for connection details)
-
-# Step 5: In the DCV instance terminal, clone the repo and build the container
-git clone https://github.com/aws-samples/sample-embodied-ai-platform.git
-cd sample-embodied-ai-platform/training/gr00t
-
-# Authenticate to ECR (create repository first in ECR console)
-export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-export AWS_REGION=us-west-2  # or your preferred region
-aws ecr get-login-password | \
-  docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
-
-# Build and push the container
-export DOCKER_REGISTRY=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
-./build_container.sh --test --push
-
-# Step 6: Deploy Batch stack from local or the DCV instance (imports same VPC and EFS)
-cd infra
-pip install -r requirements.txt
-# Add ecr_image_uri to the cdk.json context or use --context ecr_image_uri flag
-cdk deploy IsaacGr00tBatchStack \
-  --context ecr_image_uri=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/gr00t-finetune:latest
-```
-
-**Important**: Both stacks will import the same VPC, EFS, and Security Group via the context in `cdk.json`, ensuring they share resources for seamless data flow.
-
-### Path 4: Automated Container Building with CodeBuild (Recommended for ARM/Non-x86 Machines)
-
-**Best for**: ARM-based machines (Apple Silicon, ARM Linux) or teams wanting automated CI/CD for container builds.
-
-Use AWS CodeBuild to automatically build the GR00T container in the cloud with x86 architecture, eliminating the need for local x86 machines or early DCV deployment.
-
-```bash
-# Step 1: Deploy CodeBuild stack
-cd training/gr00t/infra/codebuild
-pip install -r requirements.txt
-
-# Set AWS region for deployment
-export AWS_REGION=us-west-2  # or your preferred region
-
-cdk bootstrap  # if not done
-cdk deploy Gr00tCodeBuildStack
-
-# Step 2: Trigger container build
-export PROJECT_NAME=$(aws cloudformation describe-stacks \
-  --stack-name Gr00tCodeBuildStack \
-  --query 'Stacks[0].Outputs[?OutputKey==`CodeBuildProjectName`].OutputValue' \
-  --output text)
-
-aws codebuild start-build --project-name $PROJECT_NAME
-
-# Step 3: Monitor build progress (takes ~15-25 minutes)
-aws logs tail /aws/codebuild/$PROJECT_NAME --follow
-
-# Step 4: Get ECR image URI after build completes
-export ECR_IMAGE_URI=$(aws cloudformation describe-stacks \
-  --stack-name Gr00tCodeBuildStack \
-  --query 'Stacks[0].Outputs[?OutputKey==`ImageUri`].OutputValue' \
-  --output text)
-
-echo "Container image ready: $ECR_IMAGE_URI"
-
-# Step 5: Deploy Batch stack with the built image
-cd ..  # Back to training/gr00t/infra
-cdk deploy IsaacGr00tBatchStack \
-  --context ecr_image_uri=$ECR_IMAGE_URI \
-  --context dataset_bucket=my-dataset-bucket \
-  --context s3_upload_uri=s3://my-checkpoint-bucket/gr00t/checkpoints
-
-# Step 6: (Optional) Deploy DCV stack for visualization
-cdk deploy IsaacLabDcvStack
-```
-
-**See detailed documentation**: [codebuild/README.md](codebuild/README.md)
 
 ## Deployment Context
 
@@ -236,7 +166,7 @@ cdk deploy IsaacGr00tBatchStack IsaacLabDcvStack \
 | `vpc_id` | `VPC_ID` | Existing VPC ID to reuse | Creates new VPC |
 | `efs_id` | `EFS_ID` | Existing EFS file system ID | Creates new EFS |
 | `efs_sg_id` | `EFS_SG_ID` | EFS security group ID (required if `efs_id` is set) | Creates new SG |
-| `ecr_image_uri` | `ECR_IMAGE_URI` | Pre-built ECR image URI (in the same region as the deployment) | Builds from local Dockerfile |
+| `ecr_image_uri` | `ECR_IMAGE_URI` | Pre-built ECR image URI (in the same region as the deployment) | Automatically builds via CodeBuild |
 | `dataset_bucket` | `DATASET_BUCKET` | S3 bucket name for dataset read-only access | No dataset bucket access |
 | `s3_upload_uri` | `S3_UPLOAD_URI` | S3 URI for checkpoint uploads | Creates new checkpoint bucket |
 
@@ -315,7 +245,19 @@ cdk destroy IsaacGr00tBatchStack --force
 
 ### Container Build Fails
 - **Issue**: Building flash-attn takes too long or fails on ARM machines
-- **Solution**: Use Path 3 (deploy DCV first, build on x86 EC2 instance)
+- **Solution**: The stack automatically uses CodeBuild for cloud-based x86 builds. Check CodeBuild logs for specific errors
+
+**Build fails with "Docker rate limit exceeded":**
+- The buildspec.yml includes a Docker registry mirror configuration to avoid rate limits
+- If issues persist, authenticate with Docker Hub or use AWS ECR Public
+
+**Build timeout:**
+- Default timeout is 2 hours, sufficient for most builds
+- Check CloudWatch Logs for specific error messages
+
+**Permission errors:**
+- Verify the CodeBuild role has ECR push permissions
+- Check that the ECR repository exists and is in the same region
 
 ### DCV Connection Issues
 - **Issue**: "No session found" error when connecting to DCV

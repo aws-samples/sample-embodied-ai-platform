@@ -63,3 +63,4 @@ training/**/infra/cdk.context.json
 
 # macOS files
 **/.DS_Store
+/training/gr00t/infra/.venv

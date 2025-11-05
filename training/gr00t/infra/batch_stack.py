@@ -2,7 +2,6 @@ import os
 from aws_cdk import (
     aws_ec2 as ec2,
     aws_batch as batch,
-    aws_ecr_assets as ecr_assets,
     aws_ecr as ecr,
     aws_iam as iam,
     aws_efs as efs,
@@ -15,6 +14,7 @@ from aws_cdk import (
     RemovalPolicy,
 )
 from constructs import Construct
+from codebuild_stack import CodeBuildStack
 
 
 class BatchStack(Stack):
@@ -131,9 +131,9 @@ class BatchStack(Stack):
         # ==============================================================
         # Container image selection strategy:
         # - Prefer an existing ECR image in the same account via ecr_image_uri
-        # - Else build via CDK asset from local Dockerfile
+        # - Else automatically build via CodeBuild (works on any architecture)
         if ecr_image_uri:
-            # Prefer from_ecr_repository so execution role gets precise ECR permissions
+            # Use provided ECR image
             # Expected format: <account>.dkr.ecr.<region>.amazonaws.com/<repo>:<tag>
             repo_and_tag = ecr_image_uri.split("/")[-1]
             if ":" in repo_and_tag:
@@ -146,15 +146,25 @@ class BatchStack(Stack):
             container_image = ecs.ContainerImage.from_ecr_repository(
                 repository=repo, tag=tag
             )
+            codebuild_stack = None  # No CodeBuild needed
         else:
-            asset = ecr_assets.DockerImageAsset(
+            # Automatically build container using CodeBuild
+            # This works on any architecture (x86, ARM) since build happens in the cloud
+            codebuild_stack = CodeBuildStack(
                 self,
-                "IsaacGr00tImage",
-                directory=os.path.join(os.path.dirname(__file__), ".."),
-                file="Dockerfile",
+                "CodeBuild",
+                ecr_repository_name="gr00t-finetune",
+                use_stable=True,
             )
-            container_image = ecs.ContainerImage.from_docker_image_asset(asset)
-            ecr_image_uri = asset.image_uri
+            # Use the built image
+            container_image = ecs.ContainerImage.from_ecr_repository(
+                repository=codebuild_stack.ecr_repository,
+                tag="latest"
+            )
+            ecr_image_uri = codebuild_stack.image_uri
+        
+        # Store codebuild_stack for conditional outputs later
+        self.codebuild_stack = codebuild_stack
         # endregion
 
         # ==============================================================
@@ -379,4 +389,25 @@ class BatchStack(Stack):
         CfnOutput(self, "EcrImageUri", value=ecr_image_uri)
         if s3_upload_uri:
             CfnOutput(self, "CheckpointS3UploadUri", value=s3_upload_uri)
+        
+        # CodeBuild outputs (only when CodeBuild is used)
+        if codebuild_stack:
+            CfnOutput(
+                self,
+                "CodeBuildProjectName",
+                value=codebuild_stack.build_project.project_name,
+                description="CodeBuild project name for building the container",
+            )
+            CfnOutput(
+                self,
+                "BuildCommand",
+                value=f"aws codebuild start-build --project-name {codebuild_stack.build_project.project_name}",
+                description="Command to trigger a container build",
+            )
+            CfnOutput(
+                self,
+                "EcrRepositoryName",
+                value=codebuild_stack.ecr_repository.repository_name,
+                description="ECR repository name",
+            )
         # endregion

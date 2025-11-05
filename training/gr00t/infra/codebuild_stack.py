@@ -5,7 +5,6 @@ from aws_cdk import (
     aws_iam as iam,
     aws_s3 as s3,
     aws_s3_assets as s3_assets,
-    Stack,
     CfnOutput,
     RemovalPolicy,
     Duration,
@@ -13,19 +12,18 @@ from aws_cdk import (
 from constructs import Construct
 
 
-class CodeBuildStack(Stack):
+class CodeBuildStack(Construct):
     def __init__(
         self,
         scope: Construct,
         construct_id: str,
         ecr_repository_name: str = "gr00t-finetune",
         use_stable: bool = True,
-        **kwargs,
     ) -> None:
         """
-        CDK stack for AWS CodeBuild project to build GR00T fine-tuning container.
+        CDK construct for AWS CodeBuild project to build GR00T fine-tuning container.
 
-        This stack creates:
+        This construct creates:
         - ECR repository for storing container images
         - CodeBuild project with x86 compute for building containers
         - IAM roles and permissions
@@ -35,7 +33,7 @@ class CodeBuildStack(Stack):
             ecr_repository_name: Name for the ECR repository (default: gr00t-finetune)
             use_stable: Use stable GR00T commit vs latest (default: True)
         """
-        super().__init__(scope, construct_id, **kwargs)
+        super().__init__(scope, construct_id)
 
         # ==============================================================
         # 1. ECR Repository
@@ -65,7 +63,7 @@ class CodeBuildStack(Stack):
         source_asset = s3_assets.Asset(
             self,
             "Gr00tSourceAsset",
-            path=os.path.join(os.path.dirname(__file__), "../.."),  # training/gr00t/
+            path=os.path.join(os.path.dirname(__file__), ".."),  # training/gr00t/
             exclude=[
                 ".git",
                 ".gitignore",
@@ -104,8 +102,8 @@ class CodeBuildStack(Stack):
                 compute_type=codebuild.ComputeType.LARGE,  # 8 vCPU, 15 GB RAM
                 privileged=True,  # Required for Docker builds
             ),
-            # Build specification (located in infra/codebuild/ subdirectory)
-            build_spec=codebuild.BuildSpec.from_source_filename("infra/codebuild/buildspec.yml"),
+            # Build specification (located in infra/ directory)
+            build_spec=codebuild.BuildSpec.from_source_filename("infra/buildspec.yml"),
             # Environment variables
             environment_variables={
                 "ECR_REPOSITORY_NAME": codebuild.BuildEnvironmentVariable(
@@ -183,3 +181,4 @@ class CodeBuildStack(Stack):
         # Store attributes for cross-stack references
         self.ecr_repository = ecr_repo
         self.build_project = build_project
+        self.image_uri = f"{ecr_repo.repository_uri}:latest"
