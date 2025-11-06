@@ -58,11 +58,32 @@ aws batch submit-job \
   ]'
 ```
 
+**Multi-GPU training (e.g. 4 GPUs with g6e.12xlarge):**
+```bash
+aws batch submit-job \
+  --job-name "IsaacGr00tFinetuning" \
+  --job-queue "IsaacGr00tJobQueue" \
+  --job-definition "IsaacGr00tJobDefinition" \
+  --container-overrides '{
+    "environment": [
+      {"name":"NUM_GPUS","value":"4"},
+      {"name":"DATALOADER_NUM_WORKERS","value":"2"}
+    ],
+    "resourceRequirements": [{"type":"GPU","value":"4"}]
+  }'
+```
+
+> [!IMPORTANT]
+> **Multi-GPU Shared Memory**: When using multiple GPUs, you may need to reduce `DATALOADER_NUM_WORKERS` to avoid shared memory exhaustion. In the provided batch stack, the job definition sets shared memory to 64GB, which is sufficient with reduced workers. Alternatively, you can set the shared memory size to a larger value that your selected instances can support in the job definition.
+
 **AWS Console:**
 1. Go to AWS Batch → Jobs → Submit new job
 2. Select `IsaacGr00tJobDefinition` and `IsaacGr00tJobQueue`
-3. Add environment variables as needed
-4. Submit
+3. Add environment variables and select the number of GPUs you want to use as needed 
+4. Submit the job
+
+> [!NOTE]
+> If you use a custom dataset in [LerobotDataset:v3.0 format](https://huggingface.co/blog/lerobot-datasets-v3), you need to first convert it back to v2.1. LerobotDataset:v3.0 support is coming soon.
 
 **Monitor progress:**
 ```bash

@@ -20,6 +20,8 @@ Creates the following resources:
 - Amazon VPC with public and private subnets (optional, can import existing)
 - Amazon EFS file system for shared storage (optional, can import existing)
 - Security group for EFS access
+- (Optional) Amazon S3 bucket for storing the model checkpoints
+- (Optional) AWS CodeBuild project for building the container image
 - Amazon ECR repository and container image (or references existing)
 - EC2 Launch Template with increased root volume
 - AWS Batch Compute Environment (EC2 with GPU instances)
@@ -30,8 +32,7 @@ Creates the following resources:
 
 ### DcvStack
 Creates the following resources:
-- Amazon EC2 instance (g6.4xlarge with GPU)
-- Amazon DCV server for remote visualization
+- Amazon EC2 instance (g6.4xlarge with GPU and Amazon DCV) for remote visualization
 - Security group for DCV and TensorBoard access
 - Elastic IP for stable connectivity
 - IAM role for EC2 instance
@@ -67,10 +68,10 @@ cdk deploy IsaacGr00tBatchStack IsaacLabDcvStack
 **What happens automatically:**
 - If you don't provide an `ecr_image_uri`, the stack will:
   1. Create a CodeBuild project with x86 compute
-  2. Build the container image from the Dockerfile in the cloud
+  2. Build the container image in the cloud from the Dockerfile 
   3. Push the image to ECR
   4. Use the built image for Batch jobs
-- **Build time**: First deployment takes ~18 minutes for the container build. No need for local x86 Docker or early DCV deployment
+- **Build time**: First deployment takes 10-20 minutes for the container build. No need for local x86 Docker or early DCV deployment
 
 **Using an existing container image:**
 ```bash
@@ -94,31 +95,28 @@ cdk deploy IsaacGr00tBatchStack IsaacLabDcvStack \
 After deploying, you can monitor the build progress:
 
 ```bash
-# Get the CodeBuild project name from stack outputs
-export PROJECT_NAME=$(aws cloudformation describe-stacks \
-  --stack-name IsaacGr00tBatchStack \
-  --query 'Stacks[0].Outputs[?OutputKey==`CodeBuildProjectName`].OutputValue' \
-  --output text)
-
-# Trigger a build (if not automatically triggered)
-aws codebuild start-build --project-name $PROJECT_NAME
-
 # Monitor build logs in real-time
 aws logs tail /aws/codebuild/$PROJECT_NAME --follow
 ```
 
 #### Triggering Manual Rebuilds
 
-To rebuild the container after code changes:
+You can customize the container build process by modifying the [CodeBuild CDK stack](codebuild_stack.py) and [buildspec.yml](buildspec.yml) file and rebuild the container with:
 
 ```bash
+# Get the CodeBuild project name from stack outputs
+export PROJECT_NAME=$(aws cloudformation describe-stacks \
+  --stack-name IsaacGr00tBatchStack \
+  --query 'Stacks[0].Outputs[?OutputKey==`CodeBuildProjectName`].OutputValue' \
+  --output text)
+  
 # Use the build command from stack outputs
 aws codebuild start-build --project-name $PROJECT_NAME
 ```
 
 ### Path 2: Manual Console + CDK for DCV
 
-Create AWS Batch resources manually via AWS Console (following the blog walkthrough), then deploy only the DCV stack with CDK.
+Create AWS Batch resources manually via AWS Console (following the [console walkthrough](batch_stack_console.md)), then deploy only the DCV stack with CDK.
 
 ```bash
 # After manually creating VPC, EFS, and Batch resources in the console,
@@ -140,10 +138,6 @@ export AWS_REGION=us-west-2  # or your preferred region
 # Deploy only the DCV stack
 cdk deploy IsaacLabDcvStack
 ```
-
-
-
-
 
 ## Deployment Context
 

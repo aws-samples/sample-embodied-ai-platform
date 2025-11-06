@@ -291,9 +291,9 @@ must "install-aws-cli-v2" '
 # 9) amazon-efs-utils (critical for EFS mount)
 must "install-efs-utils" '
   apt_update
-  apt_install git binutils rustc cargo pkg-config libssl-dev ca-certificates
+  apt_install git binutils rustc cargo pkg-config libssl-dev ca-certificates cmake golang-go
   rm -rf /tmp/efs-utils
-  git clone https://github.com/aws/efs-utils /tmp/efs-utils
+  git clone --branch v2.4.0 --single-branch https://github.com/aws/efs-utils /tmp/efs-utils
   cd /tmp/efs-utils
   ./build-deb.sh
   apt-get install -yq /tmp/efs-utils/build/amazon-efs-utils*deb

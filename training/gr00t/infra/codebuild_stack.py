@@ -3,8 +3,8 @@ from aws_cdk import (
     aws_codebuild as codebuild,
     aws_ecr as ecr,
     aws_iam as iam,
-    aws_s3 as s3,
     aws_s3_assets as s3_assets,
+    custom_resources as cr,
     CfnOutput,
     RemovalPolicy,
     Duration,
@@ -41,7 +41,7 @@ class CodeBuildStack(Construct):
         # Create ECR repository to store the built container images
         ecr_repo = ecr.Repository(
             self,
-            "Gr00tEcrRepository",
+            "IsaacGr00tEcrRepository",
             repository_name=ecr_repository_name,
             removal_policy=RemovalPolicy.RETAIN,  # Keep images after stack deletion
             image_scan_on_push=True,  # Scan for vulnerabilities
@@ -58,12 +58,15 @@ class CodeBuildStack(Construct):
         # ==============================================================
         # 2. Source Code Asset
         # ==============================================================
-        # Package the local source code (Dockerfile, scripts, etc.) and upload to S3
+        # Package the local source code and upload to a CDK managed S3 bucket
         # CodeBuild will download from S3 to build the container
+        asset_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..")
+        )  # training/gr00t/
         source_asset = s3_assets.Asset(
             self,
-            "Gr00tSourceAsset",
-            path=os.path.join(os.path.dirname(__file__), ".."),  # training/gr00t/
+            "IsaacGr00tSourceAsset",
+            path=asset_path,
             exclude=[
                 ".git",
                 ".gitignore",
@@ -87,17 +90,18 @@ class CodeBuildStack(Construct):
         # Create CodeBuild project to build the Docker image
         build_project = codebuild.Project(
             self,
-            "Gr00tContainerBuild",
-            project_name="Gr00tContainerBuild",
+            "IsaacGr00tContainerBuild",
+            project_name="IsaacGr00tContainerBuild",
             description="Build GR00T fine-tuning container and push to ECR",
             # Source: Use the S3 asset created above
+            # Customize the source to use your own Git repository
             source=codebuild.Source.s3(
                 bucket=source_asset.bucket,
                 path=source_asset.s3_object_key,
             ),
             # Build environment
             environment=codebuild.BuildEnvironment(
-                # Use x86_64 architecture (required for GR00T)
+                # Use x86_64 architecture (required for EC2 G6e, P4 and P5 instances)
                 build_image=codebuild.LinuxBuildImage.STANDARD_7_0,  # Ubuntu 22.04, Docker 24
                 compute_type=codebuild.ComputeType.LARGE,  # 8 vCPU, 15 GB RAM
                 privileged=True,  # Required for Docker builds
@@ -141,22 +145,43 @@ class CodeBuildStack(Construct):
         )
 
         # ==============================================================
-        # 5. Outputs
+        # 5. Auto-trigger Build on Stack Creation
         # ==============================================================
-        CfnOutput(
+        # Automatically trigger a CodeBuild build when the stack is created
+        # This ensures the container image is built immediately after deployment
+        trigger_build = cr.AwsCustomResource(
             self,
-            "EcrRepositoryUri",
-            value=ecr_repo.repository_uri,
-            description="ECR repository URI for the GR00T container image",
+            "AutoTriggerBuild",
+            # Use from_sdk_calls for simpler policy management
+            # This automatically grants the necessary permissions for the SDK call
+            policy=cr.AwsCustomResourcePolicy.from_sdk_calls(
+                resources=cr.AwsCustomResourcePolicy.ANY_RESOURCE
+            ),
+            # Lambda timeout should be minimal - it just triggers the build, doesn't wait for completion
+            timeout=Duration.minutes(5),
+            # Only trigger on CREATE (not UPDATE or DELETE)
+            # This ensures builds only happen on initial stack creation
+            on_create=cr.AwsSdkCall(
+                service="CodeBuild",
+                action="startBuild",
+                parameters={
+                    "projectName": build_project.project_name,
+                },
+                # Use a static physical resource ID to ensure idempotency
+                # This prevents re-triggering on stack updates
+                physical_resource_id=cr.PhysicalResourceId.of(
+                    f"{build_project.project_name}-initial-build"
+                ),
+            ),
+            # Install latest AWS SDK in Lambda runtime for latest API support
+            install_latest_aws_sdk=True,
         )
+        # Ensure the build project exists before triggering
+        trigger_build.node.add_dependency(build_project)
 
-        CfnOutput(
-            self,
-            "EcrRepositoryName",
-            value=ecr_repo.repository_name,
-            description="ECR repository name",
-        )
-
+        # ==============================================================
+        # 6. Outputs
+        # ==============================================================
         CfnOutput(
             self,
             "CodeBuildProjectName",
@@ -169,6 +194,13 @@ class CodeBuildStack(Construct):
             "BuildCommand",
             value=f"aws codebuild start-build --project-name {build_project.project_name}",
             description="Command to trigger a container build",
+        )
+
+        CfnOutput(
+            self,
+            "EcrRepositoryUri",
+            value=ecr_repo.repository_uri,
+            description="ECR repository URI for the GR00T container image",
         )
 
         CfnOutput(

@@ -158,11 +158,10 @@ class BatchStack(Stack):
             )
             # Use the built image
             container_image = ecs.ContainerImage.from_ecr_repository(
-                repository=codebuild_stack.ecr_repository,
-                tag="latest"
+                repository=codebuild_stack.ecr_repository, tag="latest"
             )
             ecr_image_uri = codebuild_stack.image_uri
-        
+
         # Store codebuild_stack for conditional outputs later
         self.codebuild_stack = codebuild_stack
         # endregion
@@ -203,13 +202,22 @@ class BatchStack(Stack):
             launch_template=launch_template,
             security_groups=[efs_sg],
             instance_types=[
-                # Limit to g6e family for 48GB vRAM
+                # By default, limit to g6e family for cost savings
+                # Single-GPU instances
                 ec2.InstanceType("g6e.2xlarge"),
                 ec2.InstanceType("g6e.4xlarge"),
                 ec2.InstanceType("g6e.8xlarge"),
+                ec2.InstanceType("g6e.16xlarge"),
+                # ec2.InstanceType("p5.4xlarge"),
+                # Multi-GPU instances
+                ec2.InstanceType("g6e.12xlarge"),  # 4 GPUs
+                ec2.InstanceType("g6e.24xlarge"),  # 4 GPUs
+                ec2.InstanceType("g6e.48xlarge"),  # 8 GPUs
+                # ec2.InstanceType("p4d.24xlarge"),  # 8 GPUs
+                # ec2.InstanceType("p5.48xlarge"),  # 8 GPUs
             ],
             minv_cpus=0,
-            maxv_cpus=64,
+            maxv_cpus=192,
             instance_role=iam.Role(
                 self,
                 "BatchInstanceRole",
@@ -280,7 +288,7 @@ class BatchStack(Stack):
             # Create a new S3 bucket for checkpoints
             checkpoint_bucket = s3.Bucket(
                 self,
-                "Gr00tCheckpointBucket",
+                "IsaacGr00tCheckpointBucket",
                 block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
                 encryption=s3.BucketEncryption.S3_MANAGED,
                 enforce_ssl=True,
@@ -389,7 +397,7 @@ class BatchStack(Stack):
         CfnOutput(self, "EcrImageUri", value=ecr_image_uri)
         if s3_upload_uri:
             CfnOutput(self, "CheckpointS3UploadUri", value=s3_upload_uri)
-        
+
         # CodeBuild outputs (only when CodeBuild is used)
         if codebuild_stack:
             CfnOutput(
@@ -397,17 +405,5 @@ class BatchStack(Stack):
                 "CodeBuildProjectName",
                 value=codebuild_stack.build_project.project_name,
                 description="CodeBuild project name for building the container",
-            )
-            CfnOutput(
-                self,
-                "BuildCommand",
-                value=f"aws codebuild start-build --project-name {codebuild_stack.build_project.project_name}",
-                description="Command to trigger a container build",
-            )
-            CfnOutput(
-                self,
-                "EcrRepositoryName",
-                value=codebuild_stack.ecr_repository.repository_name,
-                description="ECR repository name",
             )
         # endregion
