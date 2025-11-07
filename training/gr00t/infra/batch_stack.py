@@ -207,11 +207,11 @@ class BatchStack(Stack):
                 ec2.InstanceType("g6e.2xlarge"),
                 ec2.InstanceType("g6e.4xlarge"),
                 ec2.InstanceType("g6e.8xlarge"),
-                ec2.InstanceType("g6e.16xlarge"),
+                # ec2.InstanceType("g6e.16xlarge"),
                 # ec2.InstanceType("p5.4xlarge"),
                 # Multi-GPU instances
                 ec2.InstanceType("g6e.12xlarge"),  # 4 GPUs
-                ec2.InstanceType("g6e.24xlarge"),  # 4 GPUs
+                # ec2.InstanceType("g6e.24xlarge"),  # 4 GPUs
                 ec2.InstanceType("g6e.48xlarge"),  # 8 GPUs
                 # ec2.InstanceType("p4d.24xlarge"),  # 8 GPUs
                 # ec2.InstanceType("p5.48xlarge"),  # 8 GPUs

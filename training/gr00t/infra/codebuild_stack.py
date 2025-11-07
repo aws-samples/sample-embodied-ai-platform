@@ -72,15 +72,14 @@ class CodeBuildStack(Construct):
                 ".gitignore",
                 "*.pyc",
                 "__pycache__",
+                "cdk.context.json",
                 ".venv",
                 "venv",
                 "*.egg-info",
                 ".pytest_cache",
                 ".mypy_cache",
-                "infra/cdk.out",
+                "cdk.out",
                 "infra/.cdk.staging",
-                "infra/codebuild/cdk.out",
-                "infra/codebuild/.cdk.staging",
             ],
         )
 
@@ -145,10 +144,11 @@ class CodeBuildStack(Construct):
         )
 
         # ==============================================================
-        # 5. Auto-trigger Build on Stack Creation
+        # 5. Auto-trigger Build on Stack Creation/Update
         # ==============================================================
-        # Automatically trigger a CodeBuild build when the stack is created
-        # This ensures the container image is built immediately after deployment
+        # Automatically trigger a CodeBuild build when the stack is created or updated
+        # The build triggers when files in the asset path change because the physical
+        # resource ID includes the asset hash, which changes when source files change
         trigger_build = cr.AwsCustomResource(
             self,
             "AutoTriggerBuild",
@@ -159,18 +159,31 @@ class CodeBuildStack(Construct):
             ),
             # Lambda timeout should be minimal - it just triggers the build, doesn't wait for completion
             timeout=Duration.minutes(5),
-            # Only trigger on CREATE (not UPDATE or DELETE)
-            # This ensures builds only happen on initial stack creation
+            # Trigger on both CREATE and UPDATE
+            # The physical resource ID includes the asset's S3 object key hash, so it changes when files change
             on_create=cr.AwsSdkCall(
                 service="CodeBuild",
                 action="startBuild",
                 parameters={
                     "projectName": build_project.project_name,
                 },
-                # Use a static physical resource ID to ensure idempotency
-                # This prevents re-triggering on stack updates
+                # Use S3 object key hash in physical resource ID so it changes when files change
+                # The s3_object_key contains a hash that changes when asset contents change
+                # This ensures builds trigger on every deploy when source files are modified
                 physical_resource_id=cr.PhysicalResourceId.of(
-                    f"{build_project.project_name}-initial-build"
+                    f"{build_project.project_name}-build-{source_asset.s3_object_key}"
+                ),
+            ),
+            # Also trigger on UPDATE when the physical resource ID changes (i.e., when asset hash changes)
+            on_update=cr.AwsSdkCall(
+                service="CodeBuild",
+                action="startBuild",
+                parameters={
+                    "projectName": build_project.project_name,
+                },
+                # Use the same dynamic physical resource ID based on S3 object key hash
+                physical_resource_id=cr.PhysicalResourceId.of(
+                    f"{build_project.project_name}-build-{source_asset.s3_object_key}"
                 ),
             ),
             # Install latest AWS SDK in Lambda runtime for latest API support

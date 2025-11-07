@@ -67,14 +67,28 @@ aws batch submit-job \
   --container-overrides '{
     "environment": [
       {"name":"NUM_GPUS","value":"4"},
+      {"name":"BATCH_SIZE","value":"8"},
       {"name":"DATALOADER_NUM_WORKERS","value":"2"}
     ],
-    "resourceRequirements": [{"type":"GPU","value":"4"}]
+    "resourceRequirements": [
+      {"type":"GPU","value":"4"},
+      {"type":"VCPU","value":"48"},
+      {"type":"MEMORY","value":"393216"}
+    ]
   }'
 ```
 
 > [!IMPORTANT]
-> **Multi-GPU Shared Memory**: When using multiple GPUs, you may need to reduce `DATALOADER_NUM_WORKERS` to avoid shared memory exhaustion. In the provided batch stack, the job definition sets shared memory to 64GB, which is sufficient with reduced workers. Alternatively, you can set the shared memory size to a larger value that your selected instances can support in the job definition.
+> **Multi-GPU Shared Memory**: When using multiple GPUs, you may need to reduce `DATALOADER_NUM_WORKERS` (from default of 8) to avoid shared memory exhaustion. In the provided [batch stack](infra/batch_stack.py), the job definition sets shared memory to 64GB, which is sufficient with reduced workers. Alternatively, you can set the shared memory size to a larger value that your selected instances can support in the job definition. For example with a g6e.12xlarge instance:
+> ```python
+> ...
+> linux_parameters=batch.LinuxParameters(
+>     ...
+>     shared_memory_size=Size.gibibytes(384),
+>     ...
+> )
+> ...
+> ```
 
 **AWS Console:**
 1. Go to AWS Batch → Jobs → Submit new job
@@ -96,7 +110,7 @@ aws logs tail /aws/batch/job --follow \
   --query 'jobs[0].container.logStreamName' --output text)"
 ```
 
-> Default: 6000 steps (~3 hours on g6e.4xlarge). Checkpoints saved every 2000 steps at `/mnt/efs/gr00t/checkpoints`.
+> Default: 6000 steps (~2 hours on g6e.4xlarge using the provided dataset). Checkpoints saved every 2000 steps at `/mnt/efs/gr00t/checkpoints`.
 
 ## Configuration (env vars)
 
