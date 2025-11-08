@@ -291,9 +291,9 @@ must "install-aws-cli-v2" '
 # 9) amazon-efs-utils (critical for EFS mount)
 must "install-efs-utils" '
   apt_update
-  apt_install git binutils rustc cargo pkg-config libssl-dev ca-certificates
+  apt_install git binutils rustc cargo pkg-config libssl-dev ca-certificates cmake golang-go
   rm -rf /tmp/efs-utils
-  git clone https://github.com/aws/efs-utils /tmp/efs-utils
+  git clone --branch v2.4.0 --single-branch https://github.com/aws/efs-utils /tmp/efs-utils
   cd /tmp/efs-utils
   ./build-deb.sh
   apt-get install -yq /tmp/efs-utils/build/amazon-efs-utils*deb
@@ -334,9 +334,9 @@ must "create-conda-env-isaac" '
     su - ubuntu -c "/opt/conda/bin/conda create -y -n isaac python=3.10"
   fi
   /opt/conda/bin/conda config --system --set auto_activate_base false
-  su - ubuntu -c "/opt/conda/bin/conda init bash"
-  if ! su - ubuntu -c "grep -q 'conda activate isaac' ~/.bashrc"; then
-    echo "conda activate isaac" >> /home/ubuntu/.bashrc
+  su - ubuntu -c "touch ~/.bashrc"
+  if ! grep -q "conda activate isaac" /home/ubuntu/.bashrc; then
+    su - ubuntu -c "echo \"conda activate isaac\" >> ~/.bashrc"
   fi
 '
 
@@ -362,7 +362,7 @@ try_step "install-isaaclab" '
 '
 
 # 15) leisaac (install + assets, non-fatal)
-# by default use a stable version as of 1 Sep 2025, remove the git checkout line to use the latest version
+# by default use a stable version as of 10th Sep 2025, remove the git checkout line to use the latest version
 try_step "install-leisaac" '
   cd /home/ubuntu
   if [[ ! -d leisaac ]]; then
@@ -371,7 +371,8 @@ try_step "install-leisaac" '
   su - ubuntu -c "cd /home/ubuntu/leisaac && git fetch --tags || true"
   su - ubuntu -c "cd /home/ubuntu/leisaac && git checkout v0.2.0 || true"
   su - ubuntu -c "cd /home/ubuntu/leisaac && /opt/conda/bin/conda run -n isaac pip install -e \"source/leisaac[gr00t,lerobot-async]\" || true"
-  su - ubuntu -c "cd /home/ubuntu/leisaac && /opt/conda/bin/conda run -n isaac pip install pynput pyserial deepdiff feetech-servo-sdk || true"
+  su - ubuntu -c "/opt/conda/bin/conda run -n isaac pip install pynput pyserial deepdiff feetech-servo-sdk || true"
+  su - ubuntu -c "/opt/conda/bin/conda run -n isaac pip install tensorboard || true"
 
   mkdir -p /home/ubuntu/leisaac/assets/robots
   mkdir -p /home/ubuntu/leisaac/assets/scenes

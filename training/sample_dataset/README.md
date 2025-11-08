@@ -15,8 +15,7 @@ This dataset was created using [LeRobot](https://github.com/huggingface/lerobot)
 
 
 
-- **Homepage:** [More Information Needed]
-- **Paper:** [More Information Needed]
+- **Homepage:** https://github.com/aws-samples/sample-embodied-ai-platform
 - **License:** apache-2.0
 
 ## Dataset Structure
@@ -178,5 +177,12 @@ This dataset was created using [LeRobot](https://github.com/huggingface/lerobot)
 **BibTeX:**
 
 ```bibtex
-[More Information Needed]
+@misc{aws_sample_embodied_ai_dataset_2025,
+  title={Sample Embodied AI Dataset: SO-ARM101 Pick-and-Place},
+  author={{AWS Samples}},
+  year={2025},
+  url={https://github.com/aws-samples/sample-embodied-ai-platform},
+  note={LeRobot format dataset with 57 episodes (8240 frames) of teleoperated SO-ARM101 manipulation data. Contains dual-camera video observations (front and wrist views) and 6-DOF joint actions. License: Apache 2.0},
+  howpublished={\url{https://github.com/aws-samples/sample-embodied-ai-platform/tree/main/training/sample_dataset}}
+}
 ```
