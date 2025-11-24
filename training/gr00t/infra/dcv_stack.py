@@ -136,7 +136,7 @@ class DcvStack(Stack):
             # Recommended: 2xlarge for running simulation, 4xlarge if also running policy inference
             instance_type=ec2.InstanceType("g6.4xlarge"),
             machine_image=ec2.MachineImage.lookup(
-                name="ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*",
+                name="ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-20251111",
                 owners=["099720109477"],
             ),
             vpc=resolved_vpc,
