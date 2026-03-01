@@ -248,11 +248,11 @@ try_step "disable-gnome-initial-setup" '
 
 # 5) Amazon DCV server (critical)
 must "install-nice-dcv" '
-  DCV_URL="https://d1uj6qtbmh3dt5.cloudfront.net/2024.0/Servers/nice-dcv-2024.0-19030-ubuntu2204-x86_64.tgz"
+  DCV_URL="https://d1uj6qtbmh3dt5.cloudfront.net/__DCV_VERSION__/Servers/nice-dcv-__DCV_VERSION__-__DCV_BUILD__-ubuntu2204-x86_64.tgz"
   cd /tmp
   wget -q "$DCV_URL" -O /tmp/dcv.tgz
   tar -xzf /tmp/dcv.tgz -C /tmp
-  cd /tmp/nice-dcv-2024.0-19030-ubuntu2204-x86_64
+  cd /tmp/nice-dcv-__DCV_VERSION__-__DCV_BUILD__-ubuntu2204-x86_64
   apt_install libpulse-mainloop-glib0 libpulse0 libgstreamer-plugins-base1.0-0 libcrack2 libxcb-damage0 libxcb-xkb1 libxcb-xtest0 keyutils
   apt_install alsa-utils
   apt-get install -yq ./*.deb
@@ -331,7 +331,7 @@ must "install-miniforge" '
 must "create-conda-env-isaac" '
   /opt/conda/bin/conda info >/dev/null
   if ! /opt/conda/bin/conda env list | awk "{print $1}" | grep -q "^isaac$"; then
-    su - ubuntu -c "/opt/conda/bin/conda create -y -n isaac python=3.10"
+    su - ubuntu -c "/opt/conda/bin/conda create -y -n isaac python=__PYTHON_VERSION__"
   fi
   /opt/conda/bin/conda config --system --set auto_activate_base false
   su - ubuntu -c "touch ~/.bashrc"
@@ -342,11 +342,10 @@ must "create-conda-env-isaac" '
 
 # 13) PyTorch + IsaacSim via pip (non-fatal)
 try_step "install-pytorch-isaacsim" '
-  su - ubuntu -c "/opt/conda/bin/conda install -y -n isaac -c 'nvidia/label/cuda-11.8.0' cuda-toolkit"
   su - ubuntu -c "/opt/conda/bin/conda run -n isaac python -V"
   su - ubuntu -c "/opt/conda/bin/conda run -n isaac python -m pip install --upgrade pip"
-  su - ubuntu -c "/opt/conda/bin/conda run -n isaac pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu118"
-  su - ubuntu -c "/opt/conda/bin/conda run -n isaac pip install 'isaacsim[all,extscache]==4.5.0' --extra-index-url https://pypi.nvidia.com"
+  su - ubuntu -c "/opt/conda/bin/conda run -n isaac pip install torch==__PYTORCH_VERSION__ torchvision --index-url https://download.pytorch.org/whl/__CUDA_INDEX__"
+  su - ubuntu -c "/opt/conda/bin/conda run -n isaac pip install 'isaacsim[all,extscache]==__ISAAC_SIM_VERSION__' --extra-index-url https://pypi.nvidia.com"
 '
 
 # 14) Isaac Lab (non-fatal)
@@ -357,45 +356,49 @@ try_step "install-isaaclab" '
     su - ubuntu -c "git clone https://github.com/isaac-sim/IsaacLab.git"
   fi
   su - ubuntu -c "cd /home/ubuntu/IsaacLab && git fetch --tags || true"
-  su - ubuntu -c "cd /home/ubuntu/IsaacLab && git checkout v2.1.1 || true"
+  su - ubuntu -c "cd /home/ubuntu/IsaacLab && git checkout __ISAAC_LAB_VERSION__ || true"
   su - ubuntu -c "cd /home/ubuntu/IsaacLab && OMNI_KIT_ACCEPT_EULA=YES /opt/conda/bin/conda run -n isaac ./isaaclab.sh --install || true"
 '
 
 # 15) leisaac (install + assets, non-fatal)
-# by default use a stable version as of 10th Sep 2025, remove the git checkout line to use the latest version
-try_step "install-leisaac" '
-  cd /home/ubuntu
-  if [[ ! -d leisaac ]]; then
-    su - ubuntu -c "git clone https://github.com/LightwheelAI/leisaac.git"
-  fi 
-  su - ubuntu -c "cd /home/ubuntu/leisaac && git fetch --tags || true"
-  su - ubuntu -c "cd /home/ubuntu/leisaac && git checkout v0.2.0 || true"
-  su - ubuntu -c "cd /home/ubuntu/leisaac && /opt/conda/bin/conda run -n isaac pip install -e \"source/leisaac[gr00t,lerobot-async]\" || true"
-  su - ubuntu -c "/opt/conda/bin/conda run -n isaac pip install pynput pyserial deepdiff feetech-servo-sdk || true"
-  su - ubuntu -c "/opt/conda/bin/conda run -n isaac pip install tensorboard || true"
+# Only install if explicitly enabled via CDK parameter
+if [[ "__LEISAAC_ENABLED__" == "true" ]]; then
+  try_step "install-leisaac" '
+    cd /home/ubuntu
+    if [[ ! -d leisaac ]]; then
+      su - ubuntu -c "git clone https://github.com/LightwheelAI/leisaac.git"
+    fi
+    su - ubuntu -c "cd /home/ubuntu/leisaac && git fetch --tags || true"
+    su - ubuntu -c "cd /home/ubuntu/leisaac && git checkout __LEISAAC_VERSION__ || true"
+    su - ubuntu -c "cd /home/ubuntu/leisaac && /opt/conda/bin/conda run -n isaac pip install -e \"source/leisaac[gr00t,lerobot-async]\" || true"
+    su - ubuntu -c "/opt/conda/bin/conda run -n isaac pip install pynput pyserial deepdiff feetech-servo-sdk || true"
+    su - ubuntu -c "/opt/conda/bin/conda run -n isaac pip install tensorboard || true"
 
-  mkdir -p /home/ubuntu/leisaac/assets/robots
-  mkdir -p /home/ubuntu/leisaac/assets/scenes
+    mkdir -p /home/ubuntu/leisaac/assets/robots
+    mkdir -p /home/ubuntu/leisaac/assets/scenes
 
-  apt_update || true
-  apt_install unzip wget || true
+    apt_update || true
+    apt_install unzip wget || true
 
-  ROBOT_URL="https://github.com/LightwheelAI/leisaac/releases/download/v0.1.0/so101_follower.usd"
-  SCENE_ZIP_URL="https://github.com/LightwheelAI/leisaac/releases/download/v0.1.0/kitchen_with_orange.zip"
+    ROBOT_URL="https://github.com/LightwheelAI/leisaac/releases/download/v0.1.0/so101_follower.usd"
+    SCENE_ZIP_URL="https://github.com/LightwheelAI/leisaac/releases/download/v0.1.0/kitchen_with_orange.zip"
 
-  if [[ ! -f /home/ubuntu/leisaac/assets/robots/so101_follower.usd ]]; then
-    su - ubuntu -c "wget -qO /home/ubuntu/leisaac/assets/robots/so101_follower.usd \"${ROBOT_URL}\""
-  fi
+    if [[ ! -f /home/ubuntu/leisaac/assets/robots/so101_follower.usd ]]; then
+      su - ubuntu -c "wget -qO /home/ubuntu/leisaac/assets/robots/so101_follower.usd \"${ROBOT_URL}\""
+    fi
 
-  if [[ ! -d /home/ubuntu/leisaac/assets/scenes/kitchen_with_orange ]]; then
-    TMP_ZIP="$(mktemp -u /tmp/kitchen_with_orange.XXXXXX.zip)"
-    wget -qO "$TMP_ZIP" "${SCENE_ZIP_URL}"
-    unzip -oq "$TMP_ZIP" -d /home/ubuntu/leisaac/assets/scenes
-    rm -f "$TMP_ZIP"
-  fi
+    if [[ ! -d /home/ubuntu/leisaac/assets/scenes/kitchen_with_orange ]]; then
+      TMP_ZIP="$(mktemp -u /tmp/kitchen_with_orange.XXXXXX.zip)"
+      wget -qO "$TMP_ZIP" "${SCENE_ZIP_URL}"
+      unzip -oq "$TMP_ZIP" -d /home/ubuntu/leisaac/assets/scenes
+      rm -f "$TMP_ZIP"
+    fi
 
-  chown -R ubuntu:ubuntu /home/ubuntu/leisaac/assets
-'
+    chown -R ubuntu:ubuntu /home/ubuntu/leisaac/assets
+  '
+else
+  log "SKIP: leisaac installation (disabled via __LEISAAC_ENABLED__=false)"
+fi
 
 # 16) Firefox browser (non-fatal)
 try_step "install-firefox" '

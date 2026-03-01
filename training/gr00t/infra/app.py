@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
+import sys
 import os
-from aws_cdk import App, Environment
+
+# Add dcv module to Python path for import
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../.."))
+
+from aws_cdk import App, Environment, Stack
 from batch_stack import BatchStack
-from dcv_stack import DcvStack
+from dcv import DcvWorkstation, DcvWorkstationProps
 
 app = App()
 
@@ -38,18 +43,43 @@ batch_stack = BatchStack(
     s3_upload_uri=ctx_s3_upload_uri,  # Optional: S3 URI for checkpoint uploads
 )
 
-# The DCV stack for visualization. By default it consumes cross-stack refs from the Batch stack.
-# Pass the context values directly to the DCV stack and let it handle VPC lookup internally
-dcv_stack = DcvStack(
+
+class IsaacLabDcvStack(Stack):
+    """DCV stack for gr00t visualization, integrated with BatchStack.
+
+    Consumes the standalone DCV module from dcv/ and shares VPC/EFS
+    with the gr00t BatchStack.
+    """
+
+    def __init__(
+        self,
+        scope,
+        construct_id: str,
+        batch_stack: BatchStack,
+        **kwargs,
+    ) -> None:
+        super().__init__(scope, construct_id, **kwargs)
+
+        # Configure DCV workstation with gr00t-specific settings
+        # IMPORTANT: Use old versions to preserve exact behavior (zero regression)
+        props = DcvWorkstationProps(
+            vpc=batch_stack.vpc,              # Share VPC with Batch
+            efs_id=batch_stack.efs_id,        # Share EFS with Batch
+            efs_sg_id=batch_stack.efs_sg_id,  # Share security group
+            instance_type="g6.4xlarge",       # Same as before
+            isaac_sim_version="4.5.0",        # OLD version (preserve behavior)
+            isaac_lab_version="v2.1.1",       # OLD version (preserve behavior)
+            leisaac_enabled=True,             # Required for gr00t
+        )
+
+        self.dcv_workstation = DcvWorkstation(self, "DCV", props)
+
+
+# DCV stack consumes shared infrastructure from BatchStack
+dcv_stack = IsaacLabDcvStack(
     app,
-    "IsaacLabDcvStack",
+    "IsaacLabDcvStack",  # ✅ Same stack ID as before
     env=env,
-    # Share the same EFS created/managed by the Batch stack by default.
-    # If context values are provided, they will override these.
-    efs_id=ctx_efs_id or batch_stack.efs_id,
-    efs_sg_id=ctx_efs_sg_id or batch_stack.efs_sg_id,
-    # Consume the VPC from the Batch stack to ensure both stacks land in the same network
-    # (avoids needing to pass vpc_id explicitly).
     batch_stack=batch_stack,
 )
 
