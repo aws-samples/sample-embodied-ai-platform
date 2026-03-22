@@ -9,21 +9,12 @@ from typing import Dict, List, Any
 SUPPORTED_CONFIGS: Dict[str, Dict[str, Any]] = {
     "5.1.0": {
         "python": "3.11",
-        "pytorch": "2.10.0",
+        "pytorch": "2.7.0",
         "cuda_index": "cu128",
         "cuda_toolkit": "12.8",
         "compatible_isaaclab": ["v2.3.0", "v2.3.1", "v2.3.2"],
         "dcv": "2025.0-20103",
-        "leisaac": "v0.2.0",
-    },
-    "5.0.0": {
-        "python": "3.10",
-        "pytorch": "2.7.0",
-        "cuda_index": "cu128",
-        "cuda_toolkit": "12.8",
-        "compatible_isaaclab": ["v2.2.0", "v2.2.1", "v2.2.2"],
-        "dcv": "2024.0-19030",
-        "leisaac": "v0.2.0",
+        "leisaac": "v0.3.0",
     },
     "4.5.0": {
         "python": "3.10",
@@ -55,7 +46,7 @@ def validate_version_config(isaac_sim_version: str, isaac_lab_version: str) -> D
         >>> config["python"]
         '3.11'
         >>> config["pytorch"]
-        '2.10.0'
+        '2.7.0'
     """
     # Check if IsaacSim version is supported
     if isaac_sim_version not in SUPPORTED_CONFIGS:

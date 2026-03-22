@@ -69,3 +69,7 @@ dcv/cdk.out/*
 **/.venv
 **/venv
 **/env
+
+# agents settings
+.mcp.json
+CLAUDE.md
