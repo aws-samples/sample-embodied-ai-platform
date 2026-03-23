@@ -191,22 +191,26 @@ docker pull <ACCOUNT_ID>.dkr.ecr.us-west-2.amazonaws.com/gr00t-finetune:latest
 
 # Start the policy server
 CHECKPOINT_PATH=/mnt/efs/gr00t/checkpoints/<JOB_ID>/checkpoint-6000
-docker run --gpus all --rm \
-  -v "$CHECKPOINT_PATH:$CHECKPOINT_PATH:ro" \
-  -p 5555:5555 \
-  --shm-size=8g \
+ECR_URI=<ACCOUNT_ID>.dkr.ecr.us-west-2.amazonaws.com/gr00t-finetune:latest
+docker run --gpus all -d \
   --name gr00t-policy-server \
-  --entrypoint /workspace/gr00t-repo/.venv/bin/python \
-  <ACCOUNT_ID>.dkr.ecr.us-west-2.amazonaws.com/gr00t-finetune:latest \
-  gr00t/eval/run_gr00t_server.py \
-    --embodiment-tag new_embodiment \
-    --model-path "$CHECKPOINT_PATH" \
-    --device cuda:0 \
-    --host 0.0.0.0 \
-    --port 5555
+  --shm-size=8g \
+  --network host \
+  --entrypoint /bin/sh \
+  -v "$CHECKPOINT_PATH:/workspace/checkpoint" \
+  $ECR_URI \
+  -c '/workspace/gr00t-repo/.venv/bin/python gr00t/eval/run_gr00t_server.py \
+    --model_path /workspace/checkpoint \
+    --embodiment_tag NEW_EMBODIMENT \
+    --host 0.0.0.0'
 ```
 
-To connect a client over port 5555, stream observations and receive actions, ensure the DCV security group allows inbound TCP 5555 from the client IP.
+> [!IMPORTANT]
+> - Use `--entrypoint /bin/sh` — the NGC base image's `/usr/bin/bash` is broken.
+> - The server CLI expects **uppercase** `NEW_EMBODIMENT` (tyro parses enum names, not values).
+> - Pass `--host 0.0.0.0` to allow remote clients. The default is `127.0.0.1` (localhost only).
+
+Ensure the DCV security group allows inbound TCP 5555 from the client IP. Clients send observations as msgpack-serialized numpy arrays over ZMQ REQ/REP. See the [SKILL.md](SKILL.md) evaluation section for the full observation/response format specification.
 
 ## Configuration (env vars)
 

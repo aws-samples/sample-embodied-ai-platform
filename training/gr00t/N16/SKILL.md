@@ -287,26 +287,50 @@ simulation testing. The server accepts observations and returns action predictio
 TCP port 5555.
 
 ```bash
-CHECKPOINT=/mnt/efs/gr00t/checkpoints/<JOB_ID>/checkpoint-6000
+CHECKPOINT=/mnt/efs/gr00t/checkpoints/<checkpoint-dir>
+ECR_URI=<account-id>.dkr.ecr.us-west-2.amazonaws.com/gr00t-finetune:latest
 
-ssh dcv-isaac "docker run --gpus all --rm -d \
-  -v $CHECKPOINT:$CHECKPOINT:ro \
-  -p 5555:5555 \
-  --shm-size=8g \
+ssh dcv-isaac "docker run --gpus all -d \
   --name gr00t-policy-server \
-  --entrypoint /workspace/gr00t-repo/.venv/bin/python \
+  --shm-size=8g \
+  --network host \
+  --entrypoint /bin/sh \
+  -v $CHECKPOINT:/workspace/checkpoint \
   $ECR_URI \
-  gr00t/eval/run_gr00t_server.py \
-    --embodiment-tag new_embodiment \
-    --model-path $CHECKPOINT \
-    --device cuda:0 \
-    --host 0.0.0.0 \
-    --port 5555"
+  -c '/workspace/gr00t-repo/.venv/bin/python gr00t/eval/run_gr00t_server.py \
+    --model_path /workspace/checkpoint \
+    --embodiment_tag NEW_EMBODIMENT \
+    --host 0.0.0.0'"
 ```
+
+> **Important:**
+> - Use `--entrypoint /bin/sh -c '...'` — the NGC base image's `/usr/bin/bash` is broken
+>   (cannot execute binary file). `/bin/sh` works fine.
+> - The server CLI expects **uppercase** enum names: `NEW_EMBODIMENT`, not `new_embodiment`.
+>   (The training API's `EmbodimentTag` uses lowercase values, but the `tyro` CLI parser for
+>   `run_gr00t_server.py` expects the enum *name*.)
+> - Use `--network host` instead of `-p 5555:5555` for simplicity.
+> - Pass `--host 0.0.0.0` to allow remote clients. The default is `127.0.0.1` (localhost only).
 
 To connect a client (robot or sim), send observations as msgpack-serialized numpy arrays
 over ZMQ REQ/REP on `tcp://<elastic-ip>:5555`. The server returns 16 action steps;
-clients typically use an action horizon of 8 for responsiveness.
+clients typically use an action horizon of 16 for responsiveness.
+
+**Client-side observation format (N1.6):**
+
+Observations are a nested dict with these keys:
+- `video`: dict of camera arrays, each shape `(B, T, H, W, C)` uint8 — e.g. `video.front`, `video.wrist`
+- `state`: dict of state arrays, each shape `(B, T, D)` float32 — e.g. `state.single_arm` (D=5), `state.gripper` (D=1)
+- `language`: dict with key `annotation.human.action.task_description` as `list[list[str]]` (batch x time)
+
+Numpy arrays must be serialized using the `MsgSerializer` protocol (np.save to BytesIO,
+wrapped in `{"__ndarray_class__": True, "as_npy": bytes}`). See `gr00t/policy/server_client.py`.
+
+**Client-side response format (N1.6):**
+- The server returns `list[action_dict, info_dict]` via msgpack.
+- `action_dict` contains `single_arm` shape `(1, 16, 5)` and `gripper` shape `(1, 16, 1)` as numpy arrays.
+- The language instruction key is `annotation.human.action.task_description` (N1.5 used
+  `annotation.human.task_description` — note the extra `.action.` segment).
 
 Ensure the DCV security group allows inbound TCP 5555 from the client IP:
 ```bash
@@ -381,3 +405,11 @@ Always destroy DCV first.
 
 **`--shm-size=8g` required:** Both open-loop eval and policy server need this flag or
 DataLoader workers crash with a bus error.
+
+**NGC base image bash broken:** The `nvcr.io/nvidia/pytorch:25.04-py3` base image ships a
+`/usr/bin/bash` that fails with "cannot execute binary file". Use `--entrypoint /bin/sh`
+when running `docker run` commands against the `gr00t-finetune:latest` image.
+
+**Uppercase embodiment tag in server CLI:** The `run_gr00t_server.py` CLI (via `tyro`)
+expects the `EmbodimentTag` enum **name** in uppercase (`NEW_EMBODIMENT`), not the enum
+**value** in lowercase (`new_embodiment`). The training script uses the value form.
