@@ -202,12 +202,16 @@ class DcvWorkstation(Construct):
         )
 
         # Create /usr/local/bin/run-isaaclab.sh helper script
-        # This script wraps `docker run` with GPU, X11, EULA, and cache volume mounts
+        # This script wraps `docker run` with GPU, X11, EULA, cache volume mounts,
+        # persistent package volume, and leisaac auto-install
         helper_script = f"""cat > /usr/local/bin/run-isaaclab.sh << 'HELPER_EOF'
 #!/bin/bash
 set -euo pipefail
 CONTAINER_IMAGE="{container_image}"
 SESSION_NAME="isaac-lab"
+LEISAAC_VERSION="{leisaac_version}"
+PKGS_DIR="/home/ubuntu/isaaclab-pkgs"
+MARKER="$PKGS_DIR/.leisaac-installed"
 
 # Create cache directories for persistent NVIDIA/Isaac caches
 mkdir -p ~/docker/isaac-sim/cache/kit
@@ -218,6 +222,20 @@ mkdir -p ~/docker/isaac-sim/cache/computecache
 mkdir -p ~/docker/isaac-sim/logs
 mkdir -p ~/docker/isaac-sim/data
 
+# Create persistent package directory
+mkdir -p "$PKGS_DIR"
+
+# Auto-install leisaac on first launch (skips if already installed)
+if [[ ! -f "$MARKER" ]]; then
+  echo "Installing leisaac $LEISAAC_VERSION to persistent volume..."
+  docker run --rm --gpus all \\
+    -e ACCEPT_EULA=Y \\
+    -e PYTHONPATH=/workspace/isaaclab-pkgs \\
+    -v "$PKGS_DIR":/workspace/isaaclab-pkgs:rw \\
+    "$CONTAINER_IMAGE" \\
+    -c "pip install --target /workspace/isaaclab-pkgs 'leisaac[gr00t]==$LEISAAC_VERSION' && touch /workspace/isaaclab-pkgs/.leisaac-installed"
+fi
+
 docker run \\
   --name "$SESSION_NAME" \\
   --entrypoint bash \\
@@ -226,6 +244,7 @@ docker run \\
   -e "ACCEPT_EULA=Y" \\
   -e "PRIVACY_CONSENT=Y" \\
   -e DISPLAY \\
+  -e PYTHONPATH=/workspace/isaaclab-pkgs:$PYTHONPATH \\
   -v $HOME/.Xauthority:/root/.Xauthority \\
   -v ~/docker/isaac-sim/cache/kit:/isaac-sim/kit/cache:rw \\
   -v ~/docker/isaac-sim/cache/ov:/root/.cache/ov:rw \\
@@ -234,6 +253,7 @@ docker run \\
   -v ~/docker/isaac-sim/cache/computecache:/root/.nv/ComputeCache:rw \\
   -v ~/docker/isaac-sim/logs:/root/.nvidia-omniverse/logs:rw \\
   -v ~/docker/isaac-sim/data:/root/.local/share/ov/data:rw \\
+  -v "$PKGS_DIR":/workspace/isaaclab-pkgs:rw \\
   --rm \\
   --network=host \\
   "$CONTAINER_IMAGE" \\
@@ -243,17 +263,6 @@ chmod +x /usr/local/bin/run-isaaclab.sh"""
         self._user_data.add_commands(
             f'must "create-helper-script" \'{helper_script}\'',
         )
-
-        # leisaac installation inside the container (conditional)
-        if props.leisaac_enabled:
-            self._user_data.add_commands(
-                '# === leisaac Installation (dynamic, from CDK) ===',
-                f'try_step "install-leisaac-in-container" "docker run --rm --gpus all'
-                f' -e ACCEPT_EULA=Y'
-                f' -v /home/ubuntu/leisaac:/workspace/leisaac'
-                f' {container_image}'
-                f' -c \'cd /workspace/leisaac && pip install -e source/leisaac[gr00t] || true\'"',
-            )
 
         # EFS mount — lives in UserData so CloudFormation resolves the
         # cross-stack EFS ID token at deploy time.
