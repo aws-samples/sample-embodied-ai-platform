@@ -264,6 +264,31 @@ chmod +x /usr/local/bin/run-isaaclab.sh"""
             f'must "create-helper-script" \'{helper_script}\'',
         )
 
+        # Create persistent package directory for container volume mount
+        self._user_data.add_commands(
+            '# === Persistent Package Volume (Phase 2) ===',
+            'mkdir -p /home/ubuntu/isaaclab-pkgs',
+            'chown ubuntu:ubuntu /home/ubuntu/isaaclab-pkgs',
+        )
+
+        # Install uv package manager for ubuntu user
+        self._user_data.add_commands(
+            '# === Host Utilities (Phase 2) ===',
+            'su - ubuntu -c "curl -LsSf https://astral.sh/uv/install.sh | sh"',
+        )
+
+        # Create host venv with tensorboard and wandb
+        self._user_data.add_commands(
+            'su - ubuntu -c "/home/ubuntu/.local/bin/uv venv /home/ubuntu/.venv"',
+            'su - ubuntu -c "/home/ubuntu/.local/bin/uv pip install --python /home/ubuntu/.venv/bin/python tensorboard wandb"',
+        )
+
+        # Add host venv to ubuntu user's PATH
+        self._user_data.add_commands(
+            "grep -q '/home/ubuntu/.venv/bin' /home/ubuntu/.bashrc || "
+            "echo 'export PATH=\"/home/ubuntu/.venv/bin:$PATH\"' >> /home/ubuntu/.bashrc",
+        )
+
         # EFS mount — lives in UserData so CloudFormation resolves the
         # cross-stack EFS ID token at deploy time.
         if props.efs_id:
