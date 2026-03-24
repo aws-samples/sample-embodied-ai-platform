@@ -71,7 +71,10 @@ Plans:
 4. User can re-run bootstrap script (simulating instance restart) and all idempotent state markers prevent duplicate work
 5. User who logs into DCV for the first time sees a fully configured environment with no reboot required
 
-**Plans**: TBD
+**Plans:** 1 plan
+
+Plans:
+- [ ] 03-01-PLAN.md — Reorder bootstrap, add DCV to add_commands, cfn-signal, CreationPolicy, ALL_DONE marker
 
 **UI hint**: yes
 
@@ -83,8 +86,8 @@ Plans:
 |-------|----------------|--------|-----------|
 | 1. Container Foundation | 0/2 | Planning complete | - |
 | 2. Persistence & Tooling | 0/1 | Planning complete | - |
-| 3. Bootstrap Orchestration | 0/TBD | Not started | - |
+| 3. Bootstrap Orchestration | 0/1 | Planning complete | - |
 
 ---
 *Roadmap created: 2026-03-23*
-*Last updated: 2026-03-24 after Phase 2 planning*
+*Last updated: 2026-03-24 after Phase 3 planning*

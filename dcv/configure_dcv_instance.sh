@@ -1,7 +1,7 @@
 #!/bin/bash
 # Bootstrap script for Amazon DCV on Ubuntu 22.04 — static infrastructure steps.
-# Installs: NVIDIA drivers, desktop, DCV server, Docker, AWS CLI, EFS utils.
-# Container/IsaacLab setup is handled dynamically by dcv_construct.py add_commands.
+# Installs: NVIDIA drivers, Docker+toolkit, AWS CLI, EFS utils, cfn-bootstrap.
+# DCV desktop is installed by dcv_construct.py add_commands.
 #
 # TROUBLESHOOTING
 # ============================================================
@@ -205,75 +205,21 @@ must "install-nvidia-driver" '
   ubuntu-drivers autoinstall
 '
 
-# 3) Desktop + GDM (Wayland off) (critical)
-must "install-desktop" '
-  apt_install ubuntu-desktop gdm3 dbus-x11
-  sed -i "s/^#\\(WaylandEnable=false\\)/\\1/" /etc/gdm3/custom.conf || true
-'
-
-# 4) Remove GNOME first-run wizard (non-fatal)
-try_step "disable-gnome-initial-setup" '
-  apt-get remove --purge -yq gnome-initial-setup || true
-  sed -i "s/^X-GNOME-Autostart-enabled=true/X-GNOME-Autostart-enabled=false/" /etc/xdg/autostart/gnome-initial-setup-first-login.desktop || true
-  systemctl restart gdm3 || true
-'
-
-# 5) Amazon DCV server (critical)
-must "install-nice-dcv" '
-  DCV_URL="https://d1uj6qtbmh3dt5.cloudfront.net/__DCV_VERSION__/Servers/nice-dcv-__DCV_VERSION__-__DCV_BUILD__-ubuntu2204-x86_64.tgz"
-  cd /tmp
-  wget -q "$DCV_URL" -O /tmp/dcv.tgz
-  tar -xzf /tmp/dcv.tgz -C /tmp
-  cd /tmp/nice-dcv-__DCV_VERSION__-__DCV_BUILD__-ubuntu2204-x86_64
-  apt_install libpulse-mainloop-glib0 libpulse0 libgstreamer-plugins-base1.0-0 libcrack2 libxcb-damage0 libxcb-xkb1 libxcb-xtest0 keyutils
-  apt_install alsa-utils
-  apt-get install -yq ./*.deb
-  usermod -aG video dcv || true
-  systemctl enable dcvserver
-  systemctl restart dcvserver
-'
-
-# 6) DCV config (non-fatal)
-try_step "configure-dcv" '
-  sed -i "/^\\[display\\]/a max-head-resolution = \"(4096, 2160)\"\\nweb-client-max-head-resolution = \"(4096, 4096)\"" /etc/dcv/dcv.conf || true
-  if ! grep -q "\\[display/linux\\]" /etc/dcv/dcv.conf; then
-    cat <<EOF >>/etc/dcv/dcv.conf
-[display/linux]
-disable-local-console=false
-EOF
+# Conditional reboot: NVIDIA driver may need reboot to load kernel modules
+if ! is_done "nvidia-driver-loaded"; then
+  if nvidia-smi > /dev/null 2>&1; then
+    log "nvidia-smi OK -- driver loaded without reboot"
+    mark_done "nvidia-driver-loaded"
+  else
+    log "nvidia-smi failed -- rebooting to load kernel modules"
+    echo "REBOOT:nvidia-driver-load" >> "$SUMMARY"
+    shutdown -r now
+    exit 0
   fi
-  systemctl restart dcvserver || true
-'
+fi
 
-# 7) Auto-create DCV virtual session service (critical)
-must "install-auto-dcv-service" install_auto_dcv_service
-
-# 8) AWS CLI v2 (critical)
-must "install-aws-cli-v2" '
-  apt_update
-  apt_install unzip
-  TMP_DIR="$(mktemp -d)"
-  cd "$TMP_DIR"
-  curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-  unzip -q awscliv2.zip
-  ./aws/install --update
-  aws --version
-'
-
-# 9) amazon-efs-utils (critical for EFS mount)
-must "install-efs-utils" '
-  apt_update
-  apt_install git binutils rustc cargo pkg-config libssl-dev ca-certificates cmake golang-go build-essential
-  rm -rf /tmp/efs-utils
-  git clone --branch v2.4.0 --single-branch https://github.com/aws/efs-utils /tmp/efs-utils
-  cd /tmp/efs-utils
-  ./build-deb.sh
-  apt-get install -yq /tmp/efs-utils/build/amazon-efs-utils*deb
-'
-
-# For using IsaacSim/Lab in a container
-# 10) Docker + NVIDIA Container Toolkit (non-fatal)
-try_step "install-docker-nvidia-toolkit" '
+# 3) Docker + NVIDIA Container Toolkit (critical for container-based workflow)
+must "install-docker-nvidia-toolkit" '
   curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
   sh /tmp/get-docker.sh
   systemctl enable docker
@@ -287,26 +233,41 @@ try_step "install-docker-nvidia-toolkit" '
   systemctl restart docker
 '
 
-# Steps 11-15 (host IsaacSim/Lab, leisaac, wandb) are now container-based.
-# See dcv_construct.py add_commands for container pull, helper script, and leisaac.
+# 4) AWS CLI v2 (critical)
+must "install-aws-cli-v2" '
+  apt_update
+  apt_install unzip
+  TMP_DIR="$(mktemp -d)"
+  cd "$TMP_DIR"
+  curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+  unzip -q awscliv2.zip
+  ./aws/install --update
+  aws --version
+'
 
-# 16) Firefox browser (non-fatal)
+# 5) amazon-efs-utils (critical for EFS mount)
+must "install-efs-utils" '
+  apt_update
+  apt_install git binutils rustc cargo pkg-config libssl-dev ca-certificates cmake golang-go build-essential
+  rm -rf /tmp/efs-utils
+  git clone --branch v2.4.0 --single-branch https://github.com/aws/efs-utils /tmp/efs-utils
+  cd /tmp/efs-utils
+  ./build-deb.sh
+  apt-get install -yq /tmp/efs-utils/build/amazon-efs-utils*deb
+'
+
+# 6) Firefox browser (non-fatal)
 try_step "install-firefox" '
   apt_update
   apt_install firefox
 '
 
-# 17) EFS mount — handled in UserData (not here) because the EFS ID is a
-# cross-stack CDK token that only resolves at CloudFormation deploy time,
-# after this S3 asset has already been baked at synth time.
+# 7) cfn-bootstrap (critical for CloudFormation signaling)
+must "install-cfn-bootstrap" '
+  apt_install python3-pip
+  pip3 install https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-py3-latest.tar.gz
+  /usr/local/bin/cfn-signal --version
+'
 
-# Final: summary and optional reboot
-log "==== SUMMARY (also in $SUMMARY) ===="
-cat "$SUMMARY" || true
-
-if [[ $FAILURES -gt 0 ]]; then
-  log "One or more critical steps failed ($FAILURES). Not rebooting automatically."
-else
-  log "All critical steps OK. Scheduling a reboot to finalize configuration."
-  nohup shutdown -r +1 "Rebooting to finalize configuration" >/dev/null 2>&1 &
-fi
+# DCV desktop, container pull, host tools, EFS mount, cfn-signal, and ALL_DONE
+# are handled dynamically by dcv_construct.py add_commands.
