@@ -1,8 +1,13 @@
-"""L3 construct for GPU-accelerated DCV workstation with containerized IsaacLab."""
+"""L3 construct for GPU-accelerated DCV workstation with containerized IsaacLab.
+
+Bootstrap flow (Phase 3):
+- Static prerequisites (drivers, Docker, CLI, EFS, cfn-bootstrap) from configure_dcv_instance.sh
+- Dynamic application steps (container, tools, EFS mount, DCV, cfn-signal) via add_commands
+"""
 import os
 import re
 from typing import Optional
-from aws_cdk import aws_ec2 as ec2, aws_iam as iam, Stack, CfnOutput
+from aws_cdk import aws_ec2 as ec2, aws_iam as iam, Stack, CfnOutput, CfnCreationPolicy, CfnResourceSignal
 from constructs import Construct
 try:
     from .versions import validate_version_config
@@ -59,8 +64,9 @@ class DcvWorkstation(Construct):
     2. Integrated: Import into another CDK app and provide VPC reference
 
     Bootstrap flow:
-    - Static steps (drivers, DCV, Docker, etc.) come from configure_dcv_instance.sh
-    - Dynamic steps (container pull, helper script, leisaac) are added via add_commands
+    - Static prerequisites (drivers, Docker, CLI, EFS, cfn-bootstrap) from configure_dcv_instance.sh
+    - Dynamic application steps (container, tools, EFS mount, DCV, cfn-signal) via add_commands
+    - CloudFormation CreationPolicy waits for cfn-signal before marking stack CREATE_COMPLETE
     """
 
     def __init__(
@@ -300,6 +306,61 @@ chmod +x /usr/local/bin/run-isaaclab.sh"""
                 "chown ubuntu:ubuntu /mnt/efs || true",
             )
 
+        # ================================================================
+        # DCV Desktop Installation (Phase 3 — runs AFTER all other steps)
+        # These call must/try_step/install_auto_dcv_service defined in the
+        # static .sh file inlined above.
+        # ================================================================
+
+        self._user_data.add_commands(
+            '# === DCV Desktop (Phase 3 — last application installed) ===',
+            'must "install-desktop" \'',
+            '  apt_install ubuntu-desktop gdm3 dbus-x11',
+            '  sed -i "s/^#\\(WaylandEnable=false\\)/\\1/" /etc/gdm3/custom.conf || true',
+            "'",
+        )
+
+        self._user_data.add_commands(
+            'try_step "disable-gnome-initial-setup" \'',
+            '  apt-get remove --purge -yq gnome-initial-setup || true',
+            '  sed -i "s/^X-GNOME-Autostart-enabled=true/X-GNOME-Autostart-enabled=false/" /etc/xdg/autostart/gnome-initial-setup-first-login.desktop || true',
+            '  systemctl restart gdm3 || true',
+            "'",
+        )
+
+        self._user_data.add_commands(
+            f'must "install-nice-dcv" \'',
+            f'  DCV_URL="https://d1uj6qtbmh3dt5.cloudfront.net/{dcv_version}/Servers/nice-dcv-{dcv_version}-{dcv_build}-ubuntu2204-x86_64.tgz"',
+            '  cd /tmp',
+            '  wget -q "$DCV_URL" -O /tmp/dcv.tgz',
+            '  tar -xzf /tmp/dcv.tgz -C /tmp',
+            f'  cd /tmp/nice-dcv-{dcv_version}-{dcv_build}-ubuntu2204-x86_64',
+            '  apt_install libpulse-mainloop-glib0 libpulse0 libgstreamer-plugins-base1.0-0 libcrack2 libxcb-damage0 libxcb-xkb1 libxcb-xtest0 keyutils',
+            '  apt_install alsa-utils',
+            '  apt-get install -yq ./*.deb',
+            '  usermod -aG video dcv || true',
+            '  systemctl enable dcvserver',
+            '  systemctl restart dcvserver',
+            "'",
+        )
+
+        self._user_data.add_commands(
+            'try_step "configure-dcv" \'',
+            '  sed -i "/^\\[display\\]/a max-head-resolution = \\"(4096, 2160)\\"\\nweb-client-max-head-resolution = \\"(4096, 4096)\\"" /etc/dcv/dcv.conf || true',
+            '  if ! grep -q "\\[display/linux\\]" /etc/dcv/dcv.conf; then',
+            '    cat <<DCVEOF >>/etc/dcv/dcv.conf',
+            '[display/linux]',
+            'disable-local-console=false',
+            'DCVEOF',
+            '  fi',
+            '  systemctl restart dcvserver || true',
+            "'",
+        )
+
+        self._user_data.add_commands(
+            'must "install-auto-dcv-service" install_auto_dcv_service',
+        )
+
         # Security Group
         # Controls network access to the instance
         self._security_group = ec2.SecurityGroup(
@@ -360,6 +421,40 @@ chmod +x /usr/local/bin/run-isaaclab.sh"""
             self, "EIPAssociation",
             allocation_id=self._eip.attr_allocation_id,
             instance_id=self._instance.instance_id,
+        )
+
+        # ================================================================
+        # CreationPolicy: CloudFormation waits for bootstrap signal (D-04)
+        # ================================================================
+        cfn_instance = self._instance.node.default_child
+        cfn_instance.cfn_options.creation_policy = CfnCreationPolicy(
+            resource_signal=CfnResourceSignal(
+                count=1,
+                timeout="PT30M"  # D-05: 30 min timeout
+            )
+        )
+
+        # cfn-signal command in UserData (must reference logical_id token)
+        logical_id = cfn_instance.logical_id
+        stack_name = Stack.of(self).stack_name
+        region = Stack.of(self).region
+
+        self._user_data.add_commands(
+            '# === CloudFormation Signal (Phase 3) ===',
+            f'/usr/local/bin/cfn-signal --stack {stack_name} --resource {logical_id} --region {region} -e 0 || true',
+            'echo "STEP_OK:cfn-signal" >> "$SUMMARY"',
+        )
+
+        self._user_data.add_commands(
+            '# === ALL_DONE Marker (Phase 3) ===',
+            'date -Iseconds > /var/lib/dcv-bootstrap/ALL_DONE',
+            'log "Bootstrap complete. ALL_DONE marker written."',
+        )
+
+        self._user_data.add_commands(
+            '# === Final Summary ===',
+            'log "==== SUMMARY (also in $SUMMARY) ===="',
+            'cat "$SUMMARY" || true',
         )
 
         # CloudFormation Outputs
