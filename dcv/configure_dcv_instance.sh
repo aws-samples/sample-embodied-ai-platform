@@ -1,60 +1,32 @@
 #!/bin/bash
-# Bootstrap script for Amazon DCV on Ubuntu 22.04 with IsaacLab and EFS
-# - Robust logging to /var/log/dcv-bootstrap.log and concise step summary
-# - Retries for apt and network operations
-# - Non-fatal GUI tweaks; separation of critical vs optional steps
+# Bootstrap script for Amazon DCV on Ubuntu 22.04 — static infrastructure steps.
+# Installs: NVIDIA drivers, desktop, DCV server, Docker, AWS CLI, EFS utils.
+# Container/IsaacLab setup is handled dynamically by dcv_construct.py add_commands.
 #
-# USAGE GUIDE (read this if something failed)
+# TROUBLESHOOTING
 # ============================================================
-# Where to look:
-#   - Summary (quick, one line per step): /var/log/dcv-bootstrap.summary
-#       Entries are prefixed with one of: STEP_OK, STEP_WARN, STEP_FAIL
-#         * STEP_OK  : step completed successfully
-#         * STEP_WARN: step failed but was non-fatal and intentionally ignored
-#         * STEP_FAIL: critical step failed; see detailed log
-#   - Detailed log: /var/log/dcv-bootstrap.log
-#   - Auto session service log: journalctl -u auto-dcv.service -e --no-pager
+# Logs:
+#   Summary (one line per step):  sudo cat /var/log/dcv-bootstrap.summary
+#     Prefixes: STEP_OK (success), STEP_WARN (non-fatal), STEP_FAIL (critical)
+#   Detailed log:                 sudo less +G /var/log/dcv-bootstrap.log
+#   Auto-DCV session service:     sudo journalctl -u auto-dcv.service -e --no-pager
 #
-# How to interpret and fix:
-#   1) Session Manager/EC2 Instance Connect/SSH into the instance and review the summary:
-#        sudo cat /var/log/dcv-bootstrap.summary
-#   2) For each STEP_FAIL, open the detailed log around the time it ran:
-#        sudo less +G /var/log/dcv-bootstrap.log
-#   3) Fix the underlying issue (e.g., networking, package mirror, permissions).
+# Step-specific debugging:
+#   View logs for a step:         sudo grep -A 50 "== START: <step-name> ==" /var/log/dcv-bootstrap.log
+#   View failure context:         sudo grep -A 100 -B 10 "== FAIL: <step-name> ==" /var/log/dcv-bootstrap.log
+#   Check step completion:        ls -la /var/lib/dcv-bootstrap/
+#   Check specific step state:    test -f "/var/lib/dcv-bootstrap/<step-name>.done" && echo "done"
 #
-# Step-specific log viewing commands:
-#   - View logs for a specific step:
-#        sudo grep -A 50 "== START: <step-name> ==" /var/log/dcv-bootstrap.log
-#        sudo grep -A 100 -B 10 "== FAIL: <step-name> ==" /var/log/dcv-bootstrap.log
-#   - Examples:
-#        sudo grep -A 50 "== START: install-nice-dcv ==" /var/log/dcv-bootstrap.log
-#   - View step completion status:
-#        ls -la /var/lib/dcv-bootstrap/
-#   - Check specific step state:
-#        test -f "/var/lib/dcv-bootstrap/<step-name>.done" && echo "Step completed" || echo "Step not done"
-#
-# Re-running only the failed steps (idempotent):
-#   - This script creates state markers in: /var/lib/dcv-bootstrap/<step-name>.done
-#   - Re-running the entire script will SKIP steps already marked done.
-#   - To force re-run a specific step, delete its marker and re-run the script:
-#        sudo rm "/var/lib/dcv-bootstrap/<step-name>.done"
-#        sudo bash /var/lib/cloud/instance/scripts/part-001
-#     Examples:
-#        sudo rm "/var/lib/dcv-bootstrap/install-nice-dcv.done" && \
-#          sudo bash /var/lib/cloud/instance/scripts/part-001
-#        sudo rm "/var/lib/dcv-bootstrap/install-desktop.done" && \
-#          sudo bash /var/lib/cloud/instance/scripts/part-001
-#   - Note: The path /var/lib/cloud/instance/scripts/part-001 is the cloud-init
-#           copy of this user-data. If unavailable, paste the script or
-#           store it as /usr/local/sbin/dcv-bootstrap.sh and execute that.
+# Re-running failed steps (idempotent):
+#   State markers live in /var/lib/dcv-bootstrap/<step>.done — completed steps are skipped.
+#   To force re-run a step:
+#     sudo rm "/var/lib/dcv-bootstrap/<step-name>.done"
+#     sudo bash /var/lib/cloud/instance/scripts/part-001
 #
 # Common checks:
-#   - DCV server status:    sudo systemctl status dcvserver --no-pager
-#   - DCV sessions:         sudo dcv list-sessions
-#   - Auto session service: sudo systemctl status auto-dcv.service --no-pager
-#                           sudo journalctl -u auto-dcv.service -e --no-pager
-#   - EFS mount:            mount | grep ' /mnt/efs '  (should show type efs,tls)
-#                           sudo tail -n 200 /var/log/amazon/efs/mount.log
+#   DCV server:    sudo systemctl status dcvserver --no-pager
+#   DCV sessions:  sudo dcv list-sessions
+#   EFS mount:     mount | grep ' /mnt/efs '
 # ============================================================
 
 set -Eeuo pipefail
@@ -315,96 +287,18 @@ try_step "install-docker-nvidia-toolkit" '
   systemctl restart docker
 '
 
-# Alternatively, steps 11-15 for using IsaacSim/Lab on host
-# 11) Miniforge (critical for Python/pip)
-must "install-miniforge" '
-  if [[ ! -x /opt/conda/bin/conda ]]; then
-    TMP_INSTALLER="/tmp/Miniforge3.sh"
-    curl -fsSL https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh -o "$TMP_INSTALLER"
-    bash "$TMP_INSTALLER" -b -p /opt/conda
-    ln -sf /opt/conda/bin/conda /usr/local/bin/conda
-  fi
-  chown -R ubuntu:ubuntu /opt/conda
-'
-
-# 12) Create conda env and configure default activation (critical for Python/pip)
-must "create-conda-env-isaac" '
-  /opt/conda/bin/conda info >/dev/null
-  if ! /opt/conda/bin/conda env list | awk "{print $1}" | grep -q "^isaac$"; then
-    su - ubuntu -c "/opt/conda/bin/conda create -y -n isaac python=__PYTHON_VERSION__"
-  fi
-  /opt/conda/bin/conda config --system --set auto_activate_base false
-  su - ubuntu -c "touch ~/.bashrc"
-  if ! grep -q "conda activate isaac" /home/ubuntu/.bashrc; then
-    su - ubuntu -c "echo \"conda activate isaac\" >> ~/.bashrc"
-  fi
-'
-
-# 13) PyTorch + IsaacSim via pip (non-fatal)
-try_step "install-pytorch-isaacsim" '
-  su - ubuntu -c "/opt/conda/bin/conda run -n isaac python -V"
-  su - ubuntu -c "/opt/conda/bin/conda run -n isaac python -m pip install --upgrade pip"
-  su - ubuntu -c "/opt/conda/bin/conda run -n isaac pip install torch==__PYTORCH_VERSION__ torchvision --index-url https://download.pytorch.org/whl/__CUDA_INDEX__"
-  su - ubuntu -c "/opt/conda/bin/conda run -n isaac pip install 'isaacsim[all,extscache]==__ISAAC_SIM_VERSION__' --extra-index-url https://pypi.nvidia.com"
-'
-
-# 14) Isaac Lab (non-fatal)
-try_step "install-isaaclab" '
-  apt_install cmake build-essential
-  cd /home/ubuntu
-  if [[ ! -d IsaacLab ]]; then
-    su - ubuntu -c "git clone https://github.com/isaac-sim/IsaacLab.git"
-  fi
-  su - ubuntu -c "cd /home/ubuntu/IsaacLab && git fetch --tags || true"
-  su - ubuntu -c "cd /home/ubuntu/IsaacLab && git checkout __ISAAC_LAB_VERSION__ || true"
-  su - ubuntu -c "cd /home/ubuntu/IsaacLab && OMNI_KIT_ACCEPT_EULA=YES /opt/conda/bin/conda run -n isaac ./isaaclab.sh --install || true"
-'
-
-# 15) leisaac (install + assets, non-fatal)
-# Only install if explicitly enabled via CDK parameter
-if [[ "__LEISAAC_ENABLED__" == "true" ]]; then
-  try_step "install-leisaac" '
-    cd /home/ubuntu
-    if [[ ! -d leisaac ]]; then
-      su - ubuntu -c "git clone https://github.com/LightwheelAI/leisaac.git"
-    fi
-    su - ubuntu -c "cd /home/ubuntu/leisaac && git fetch --tags || true"
-    su - ubuntu -c "cd /home/ubuntu/leisaac && git checkout __LEISAAC_VERSION__ || true"
-    su - ubuntu -c "cd /home/ubuntu/leisaac && /opt/conda/bin/conda run -n isaac pip install -e \"source/leisaac[gr00t,lerobot-async]\" || true"
-    su - ubuntu -c "/opt/conda/bin/conda run -n isaac pip install pynput pyserial deepdiff feetech-servo-sdk || true"
-    su - ubuntu -c "/opt/conda/bin/conda run -n isaac pip install tensorboard || true"
-
-    mkdir -p /home/ubuntu/leisaac/assets/robots
-    mkdir -p /home/ubuntu/leisaac/assets/scenes
-
-    apt_update || true
-    apt_install unzip wget || true
-
-    ROBOT_URL="https://github.com/LightwheelAI/leisaac/releases/download/v0.1.0/so101_follower.usd"
-    SCENE_ZIP_URL="https://github.com/LightwheelAI/leisaac/releases/download/v0.1.0/kitchen_with_orange.zip"
-
-    if [[ ! -f /home/ubuntu/leisaac/assets/robots/so101_follower.usd ]]; then
-      su - ubuntu -c "wget -qO /home/ubuntu/leisaac/assets/robots/so101_follower.usd \"${ROBOT_URL}\""
-    fi
-
-    if [[ ! -d /home/ubuntu/leisaac/assets/scenes/kitchen_with_orange ]]; then
-      TMP_ZIP="$(mktemp -u /tmp/kitchen_with_orange.XXXXXX.zip)"
-      wget -qO "$TMP_ZIP" "${SCENE_ZIP_URL}"
-      unzip -oq "$TMP_ZIP" -d /home/ubuntu/leisaac/assets/scenes
-      rm -f "$TMP_ZIP"
-    fi
-
-    chown -R ubuntu:ubuntu /home/ubuntu/leisaac/assets
-  '
-else
-  log "SKIP: leisaac installation (disabled via __LEISAAC_ENABLED__=false)"
-fi
+# Steps 11-15 (host IsaacSim/Lab, leisaac, wandb) are now container-based.
+# See dcv_construct.py add_commands for container pull, helper script, and leisaac.
 
 # 16) Firefox browser (non-fatal)
 try_step "install-firefox" '
   apt_update
   apt_install firefox
 '
+
+# 17) EFS mount — handled in UserData (not here) because the EFS ID is a
+# cross-stack CDK token that only resolves at CloudFormation deploy time,
+# after this S3 asset has already been baked at synth time.
 
 # Final: summary and optional reboot
 log "==== SUMMARY (also in $SUMMARY) ===="

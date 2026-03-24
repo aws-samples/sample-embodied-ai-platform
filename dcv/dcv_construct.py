@@ -1,4 +1,4 @@
-"""L3 construct for GPU-accelerated DCV workstation. Phase 1: Skeleton with VPC resolution only."""
+"""L3 construct for GPU-accelerated DCV workstation with containerized IsaacLab."""
 import os
 import re
 from typing import Optional
@@ -18,11 +18,12 @@ class DcvWorkstationProps:
         vpc_id: Optional VPC ID for lookup (for standalone mode)
         instance_type: EC2 instance type (default: g6.4xlarge). Must be a GPU instance type.
         isaac_sim_version: IsaacSim version (default: 5.1.0)
-        isaac_lab_version: IsaacLab version (default: v2.3.2)
-        python_version: Python version (default: auto-derived from IsaacSim version)
+        isaac_lab_version: IsaacLab version (default: v2.3.0)
+        python_version: Python version (kept for backwards compatibility, unused)
         efs_id: Optional EFS file system ID (for persistent storage mode)
         efs_sg_id: Optional EFS security group ID (required with efs_id)
         leisaac_enabled: Enable leisaac installation (default: False)
+        availability_zone: Optional AZ to constrain subnet selection (e.g. "us-west-2b")
     """
 
     def __init__(
@@ -31,11 +32,12 @@ class DcvWorkstationProps:
         vpc_id: Optional[str] = None,
         instance_type: str = "g6.4xlarge",
         isaac_sim_version: str = "5.1.0",
-        isaac_lab_version: str = "v2.3.2",
+        isaac_lab_version: str = "v2.3.0",
         python_version: Optional[str] = None,
         efs_id: Optional[str] = None,
         efs_sg_id: Optional[str] = None,
         leisaac_enabled: bool = False,
+        availability_zone: Optional[str] = None,
     ):
         self.vpc = vpc
         self.vpc_id = vpc_id
@@ -46,17 +48,19 @@ class DcvWorkstationProps:
         self.efs_id = efs_id
         self.efs_sg_id = efs_sg_id
         self.leisaac_enabled = leisaac_enabled
+        self.availability_zone = availability_zone
 
 
 class DcvWorkstation(Construct):
-    """L3 construct for GPU-accelerated DCV workstation. Phase 1: Skeleton with VPC resolution only.
+    """L3 construct for GPU-accelerated DCV workstation.
 
     This construct provides a reusable DCV workstation that can be used in two modes:
     1. Standalone: Deploy independently with auto-created or looked-up VPC
     2. Integrated: Import into another CDK app and provide VPC reference
 
-    Phase 1 implements only VPC resolution to validate the architecture.
-    Full DCV instance infrastructure will be added in Phase 2.
+    Bootstrap flow:
+    - Static steps (drivers, DCV, Docker, etc.) come from configure_dcv_instance.sh
+    - Dynamic steps (container pull, helper script, leisaac) are added via add_commands
     """
 
     def __init__(
@@ -86,15 +90,11 @@ class DcvWorkstation(Construct):
                 f"Got efs_id={props.efs_id}, efs_sg_id={props.efs_sg_id}"
             )
 
-        # Resolve Python version (use explicit or derive from matrix)
-        python_version = props.python_version or version_config["python"]
-
-        # Extract derived versions from compatibility matrix
-        pytorch_version = version_config["pytorch"]
-        cuda_index = version_config["cuda_index"]
+        # Extract version config fields
+        container_image = version_config["container_image"]
         dcv_version_build = version_config["dcv"]
         dcv_version, dcv_build = dcv_version_build.split("-")
-        leisaac_version = version_config.get("leisaac", "v0.2.0")
+        leisaac_version = version_config.get("leisaac", "v0.3.0")
 
         # Import EFS file system if provided
         efs_fs = None
@@ -158,70 +158,121 @@ class DcvWorkstation(Construct):
             ],
         )
 
-        # UserData Script
-        # Load bootstrap script and inject all version parameters
+        # ================================================================
+        # UserData: Static bootstrap from .sh file + dynamic add_commands
+        # ================================================================
+
+        # Read the static bootstrap script and inject parameters
         user_data_path = os.path.join(os.path.dirname(__file__), "configure_dcv_instance.sh")
         with open(user_data_path, "r") as f:
-            user_data_script = f.read()
+            bootstrap_script = f.read()
 
-        # Generate password using account ID (alphanumeric only, safe for bash)
         password = f"dcv{Stack.of(self).account}"
+        bootstrap_script = bootstrap_script.replace("__PASSWORD__", password)
+        bootstrap_script = bootstrap_script.replace("__DCV_VERSION__", dcv_version)
+        bootstrap_script = bootstrap_script.replace("__DCV_BUILD__", dcv_build)
 
-        # Inject all parameters using string replacement
-        user_data_script = user_data_script.replace("__PASSWORD__", password)
-        user_data_script = user_data_script.replace("__PYTHON_VERSION__", python_version)
-        user_data_script = user_data_script.replace("__ISAAC_SIM_VERSION__", props.isaac_sim_version)
-        user_data_script = user_data_script.replace("__ISAAC_LAB_VERSION__", props.isaac_lab_version)
-        user_data_script = user_data_script.replace("__PYTORCH_VERSION__", pytorch_version)
-        user_data_script = user_data_script.replace("__CUDA_INDEX__", cuda_index)
-        user_data_script = user_data_script.replace("__DCV_VERSION__", dcv_version)
-        user_data_script = user_data_script.replace("__DCV_BUILD__", dcv_build)
-        user_data_script = user_data_script.replace(
-            "__LEISAAC_ENABLED__",
-            "true" if props.leisaac_enabled else "false"
-        )
-        user_data_script = user_data_script.replace("__LEISAAC_VERSION__", leisaac_version)
-
-        # Validate no unresolved placeholders (catches bugs in replacement logic)
-        unresolved = re.findall(r'__[A-Z_]+__', user_data_script)
+        # Validate no unresolved placeholders
+        unresolved = re.findall(r'__[A-Z_]+__', bootstrap_script)
         if unresolved:
             raise ValueError(
                 f"Unresolved placeholders in UserData script: {unresolved}. "
                 "This indicates a bug in version replacement logic."
             )
 
-        # Create UserData object
+        # Inline the bootstrap script directly into UserData (no S3 asset needed —
+        # the trimmed script fits within the 16KB UserData limit)
         self._user_data = ec2.UserData.for_linux()
-        self._user_data.add_commands(user_data_script)
+        # Skip the shebang — CDK's for_linux() already adds #!/bin/bash
+        lines = bootstrap_script.split('\n')
+        if lines and lines[0].startswith('#!'):
+            lines = lines[1:]
+        self._user_data.add_commands(*lines)
 
-        # Add EFS mounting commands (only if EFS is provided)
-        if efs_fs is not None:
+        # ================================================================
+        # Dynamic steps: container pull, helper script, leisaac
+        # These use CDK token resolution (f-strings with props) so they
+        # must be in add_commands, not in the static .sh file.
+        # ================================================================
+
+        # Pull the NVIDIA IsaacLab container from NGC
+        self._user_data.add_commands(
+            '# === Container Setup (dynamic, from CDK) ===',
+            f'must "pull-isaaclab-container" "docker pull {container_image}"',
+        )
+
+        # Create /usr/local/bin/run-isaaclab.sh helper script
+        # This script wraps `docker run` with GPU, X11, EULA, and cache volume mounts
+        helper_script = f"""cat > /usr/local/bin/run-isaaclab.sh << 'HELPER_EOF'
+#!/bin/bash
+set -euo pipefail
+CONTAINER_IMAGE="{container_image}"
+SESSION_NAME="isaac-lab"
+
+# Create cache directories for persistent NVIDIA/Isaac caches
+mkdir -p ~/docker/isaac-sim/cache/kit
+mkdir -p ~/docker/isaac-sim/cache/ov
+mkdir -p ~/docker/isaac-sim/cache/pip
+mkdir -p ~/docker/isaac-sim/cache/glcache
+mkdir -p ~/docker/isaac-sim/cache/computecache
+mkdir -p ~/docker/isaac-sim/logs
+mkdir -p ~/docker/isaac-sim/data
+
+docker run \\
+  --name "$SESSION_NAME" \\
+  --entrypoint bash \\
+  -it \\
+  --gpus all \\
+  -e "ACCEPT_EULA=Y" \\
+  -e "PRIVACY_CONSENT=Y" \\
+  -e DISPLAY \\
+  -v $HOME/.Xauthority:/root/.Xauthority \\
+  -v ~/docker/isaac-sim/cache/kit:/isaac-sim/kit/cache:rw \\
+  -v ~/docker/isaac-sim/cache/ov:/root/.cache/ov:rw \\
+  -v ~/docker/isaac-sim/cache/pip:/root/.cache/pip:rw \\
+  -v ~/docker/isaac-sim/cache/glcache:/root/.cache/nvidia/GLCache:rw \\
+  -v ~/docker/isaac-sim/cache/computecache:/root/.nv/ComputeCache:rw \\
+  -v ~/docker/isaac-sim/logs:/root/.nvidia-omniverse/logs:rw \\
+  -v ~/docker/isaac-sim/data:/root/.local/share/ov/data:rw \\
+  --rm \\
+  --network=host \\
+  "$CONTAINER_IMAGE" \\
+  "$@"
+HELPER_EOF
+chmod +x /usr/local/bin/run-isaaclab.sh"""
+        self._user_data.add_commands(
+            f'must "create-helper-script" \'{helper_script}\'',
+        )
+
+        # leisaac installation inside the container (conditional)
+        if props.leisaac_enabled:
             self._user_data.add_commands(
-                "# Mount EFS file system with TLS",
-                "echo 'Setting up EFS mount with TLS...'",
-                "echo 'STEP_INFO:EFS:Configuring fstab and mounting' >> /var/log/dcv-bootstrap.summary || true",
+                '# === leisaac Installation (dynamic, from CDK) ===',
+                f'try_step "install-leisaac-in-container" "docker run --rm --gpus all'
+                f' -e ACCEPT_EULA=Y'
+                f' -v /home/ubuntu/leisaac:/workspace/leisaac'
+                f' {container_image}'
+                f' -c \'cd /workspace/leisaac && pip install -e source/leisaac[gr00t] || true\'"',
+            )
+
+        # EFS mount — lives in UserData so CloudFormation resolves the
+        # cross-stack EFS ID token at deploy time.
+        if props.efs_id:
+            self._user_data.add_commands(
+                "apt-get install -y -qq amazon-efs-utils || true",
                 "mkdir -p /mnt/efs",
-                f"echo '{efs_fs.file_system_id}:/ /mnt/efs efs _netdev,tls 0 0' >> /etc/fstab",
-                (
-                    "if mount -a; then\n"
-                    "  echo 'STEP_OK:EFS mount' >> /var/log/dcv-bootstrap.summary;\n"
-                    "  echo 'EFS mounted at /mnt/efs' | tee -a /var/log/dcv-bootstrap.log;\n"
-                    "else\n"
-                    "  echo 'STEP_FAIL:EFS mount' >> /var/log/dcv-bootstrap.summary;\n"
-                    "fi"
-                ),
+                f"grep -q '{props.efs_id}' /etc/fstab || echo '{props.efs_id}:/ /mnt/efs efs _netdev,tls 0 0' >> /etc/fstab",
+                "mount -a",
                 "chown ubuntu:ubuntu /mnt/efs || true",
             )
 
         # Security Group
         # Controls network access to the instance
-        # Allows DCV (8443) and TensorBoard (6006) from any IP for development
-        # Production deployments should restrict source IPs
         self._security_group = ec2.SecurityGroup(
             self, "SecurityGroup",
             vpc=self._vpc,
-            description="Allow DCV and TensorBoard access",
-            allow_all_outbound=True,
+            description="Allow DCV, TensorBoard, and W&B access",
+            allow_all_outbound=True, # Do not allow all outbound traffic in production
         )
         self._security_group.add_ingress_rule(
             ec2.Peer.any_ipv4(),
@@ -230,8 +281,8 @@ class DcvWorkstation(Construct):
         )
         self._security_group.add_ingress_rule(
             ec2.Peer.any_ipv4(),
-            ec2.Port.tcp(6006),
-            "Allow TensorBoard access",
+            ec2.Port.tcp(8080),
+            "Allow W&B local server access",
         )
 
         # Allow EFS access from DCV instance (only if EFS provided)
@@ -240,6 +291,14 @@ class DcvWorkstation(Construct):
 
         # EC2 Instance
         # GPU-accelerated instance for Isaac Sim and DCV visualization
+        if props.availability_zone:
+            subnet_selection = ec2.SubnetSelection(
+                subnet_type=ec2.SubnetType.PUBLIC,
+                availability_zones=[props.availability_zone],
+            )
+        else:
+            subnet_selection = ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC)
+
         self._instance = ec2.Instance(
             self, "Instance",
             instance_type=ec2.InstanceType(props.instance_type),
@@ -248,14 +307,14 @@ class DcvWorkstation(Construct):
                 owners=["099720109477"],  # Canonical
             ),
             vpc=self._vpc,
-            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC),
+            vpc_subnets=subnet_selection,
             role=self._instance_role,
             security_group=self._security_group,
             user_data=self._user_data,
             block_devices=[
                 ec2.BlockDevice(
                     device_name="/dev/sda1",
-                    volume=ec2.BlockDeviceVolume.ebs(100, delete_on_termination=True),
+                    volume=ec2.BlockDeviceVolume.ebs(150, delete_on_termination=True),
                 )
             ],
         )
@@ -270,7 +329,6 @@ class DcvWorkstation(Construct):
         )
 
         # CloudFormation Outputs
-        # Expose connection details to users
         password = f"dcv{Stack.of(self).account}"
 
         CfnOutput(
@@ -296,11 +354,7 @@ class DcvWorkstation(Construct):
 
     @property
     def vpc(self) -> ec2.IVpc:
-        """VPC where the DCV workstation is deployed.
-
-        Returns:
-            The resolved VPC (provided, looked-up, or auto-created)
-        """
+        """VPC where the DCV workstation is deployed."""
         return self._vpc
 
     @property
