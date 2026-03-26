@@ -73,4 +73,4 @@ dcv/cdk.out/*
 # agents settings
 .mcp.json
 CLAUDE.md
-.planning/
+.planning

@@ -2,13 +2,13 @@
 gsd_state_version: 1.0
 milestone: v2.1.1
 milestone_name: milestone
-status: Phase complete — ready for verification
-last_updated: "2026-03-24T04:29:42.785Z"
+status: Milestone complete
+last_updated: "2026-03-24T06:19:11.249Z"
 progress:
   total_phases: 3
-  completed_phases: 2
-  total_plans: 3
-  completed_plans: 3
+  completed_phases: 3
+  total_plans: 4
+  completed_plans: 4
 ---
 
 # State: DCV Workstation Containerization
@@ -20,12 +20,12 @@ progress:
 
 **Core Value:** DCV workstation boots to a fully-configured, ready-to-use IsaacLab environment with minimal setup time and zero manual intervention — container-based, GPU-accelerated, with persistent leisaac packages across restarts.
 
-**Current Focus:** Phase 02 — persistence-tooling
+**Current Focus:** Phase 03 — bootstrap-orchestration
 
 ## Current Position
 
-Phase: 02 (persistence-tooling) — EXECUTING
-Plan: 1 of 1
+Phase: 03
+Plan: Not started
 
 ## Performance Metrics
 
@@ -37,6 +37,7 @@ Plan: 1 of 1
 | Current velocity | N/A (no plans executed) |
 | Phase 01-container-foundation P01 | 1 | 1 tasks | 1 files |
 | Phase 02 P01 | 2min | 2 tasks | 1 files |
+| Phase 03 P01 | 3min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -48,6 +49,9 @@ Plan: 1 of 1
 - **01-02:** EBS root volume bumped to 150 GiB for NVIDIA container image accommodation.
 - **02-01:** leisaac auto-install uses marker file in persistent volume; old props.leisaac_enabled block removed.
 - **02-01:** Host utilities (uv, tensorboard, wandb) installed as ubuntu user in /home/ubuntu/.venv with idempotent PATH update.
+- **03-01:** Manual cfn-signal instead of add_signal_on_exit_command to avoid premature signal on conditional reboot.
+- **03-01:** DCV steps moved from .sh to add_commands; Docker promoted from try_step to must.
+- **03-01:** Bootstrap split: .sh = prerequisites (drivers, Docker, CLI, EFS, cfn-bootstrap), add_commands = app layer (container, tools, DCV, signaling).
 
 ### Open Questions
 
@@ -69,11 +73,11 @@ Plan: 1 of 1
 
 **What I'm doing now:**
 
-- Completed 02-01-PLAN.md (persistence & tooling)
+- Completed 03-01-PLAN.md (bootstrap orchestration)
 
 **Next action:**
 
-- Phase 02 complete; ready for Phase 03 (bootstrap orchestration)
+- All 3 phases complete; ready for verification
 
 **If context is lost:**
 

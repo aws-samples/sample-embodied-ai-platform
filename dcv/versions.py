@@ -11,11 +11,13 @@ SUPPORTED_CONFIGS: Dict[str, Dict[str, Any]] = {
         "container_image": "nvcr.io/nvidia/isaac-lab:2.3.0",
         "compatible_isaaclab": ["v2.3.0", "v2.3.1", "v2.3.2"],
         "dcv": "2025.0-20103",
-        "leisaac": "v0.3.0",
+        # Gr00t16ServicePolicyClient was added after the v0.3.0 tag; pin to the
+        # commit that introduced it so `pip install leisaac @ git+...` is reproducible.
+        "leisaac": "d2cbfd2e33517f2094e1904ff817aa17de6e8939",
     },
     "4.5.0": {
-        "container_image": "nvcr.io/nvidia/isaac-lab:2.1.1",
-        "compatible_isaaclab": ["v2.1.0", "v2.1.1"],
+        "container_image": "nvcr.io/nvidia/isaac-lab:2.2.0",
+        "compatible_isaaclab": ["v2.2.0", "v2.2.1"],
         "dcv": "2024.0-19030",
         "leisaac": "v0.2.0",
     },

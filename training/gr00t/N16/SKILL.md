@@ -36,10 +36,10 @@ aws sts get-caller-identity --query '[Account, Arn]' --output text
 npx cdk --version
 
 # Python venv exists at repo root
-ls -la /path/to/repo/.venv/bin/python
+ls -la <repo-root>/.venv/bin/python
 
 # If venv is missing, create it:
-cd /path/to/repo && python3 -m venv .venv
+cd <repo-root> && python3 -m venv .venv
 source .venv/bin/activate
 pip install -r training/gr00t/infra/requirements.txt
 pip install -r dcv/requirements.txt
@@ -77,7 +77,7 @@ cd training/gr00t/infra
 # Step 1: Batch stack (VPC, EFS, ECR, Batch — ~3 min)
 npx cdk deploy IsaacGr00tBatchStack --require-approval=never
 
-# Step 2: DCV stack (GPU instance — ~3 min)
+# Step 2: DCV stack (GPU instance — ~3 min for CFN, then ~15 min bootstrap)
 npx cdk deploy IsaacLabDcvStack --require-approval=never
 ```
 
@@ -87,8 +87,10 @@ path, and DCV credentials.
 
 ## Phase 4: Monitor Bootstrap Completion
 
-The DCV instance runs a ~15-minute bootstrap script that installs NVIDIA drivers, DCV,
-conda, IsaacSim, IsaacLab, and mounts EFS. Monitor it via SSM (no SSH needed yet).
+The DCV instance runs a container-based bootstrap script that installs NVIDIA drivers,
+Docker, pulls the IsaacLab container from NGC, installs DCV, and mounts EFS. The
+CloudFormation stack waits for a cfn-signal before marking CREATE_COMPLETE. Monitor
+progress via SSM (no SSH needed yet).
 
 ```bash
 INSTANCE_ID=<instance-id-from-stack-outputs>
@@ -106,16 +108,26 @@ CMD_ID=$(aws ssm send-command \
   --query 'StandardOutputContent' --output text
 ```
 
-Steps appear one by one as `STEP_OK` entries. The full sequence (19 steps):
-`baseline-update` → `set-ubuntu-password` → `disable-nouveau` → `install-nvidia-driver` →
-`install-desktop` → `disable-gnome-initial-setup` → `install-nice-dcv` → `configure-dcv` →
-`install-auto-dcv-service` → `install-aws-cli-v2` → `install-efs-utils` →
-`install-docker-nvidia-toolkit` → `install-miniforge` → `create-conda-env-isaac` →
-`install-pytorch-isaacsim` (slowest, ~5 min) → `install-isaaclab` → `install-leisaac` →
-`install-wandb` → `install-firefox`
+Steps appear one by one as `STEP_OK` entries. The full sequence (16 named steps):
 
-After the last step, the instance **reboots automatically**. Wait ~60 seconds before
-attempting SSH. If any step shows `STEP_FAIL`, check the detailed log:
+**Prerequisites (configure_dcv_instance.sh):**
+`baseline-update` → `set-ubuntu-password` → `disable-nouveau` (non-fatal) →
+`install-nvidia-driver` → `install-docker-nvidia-toolkit` → `install-aws-cli-v2` →
+`install-efs-utils` → `install-firefox` (non-fatal) → `install-cfn-bootstrap`
+
+**Container + DCV layer (dcv_construct.py):**
+`pull-isaaclab-container` (~3-5 min) → `create-helper-script` → `install-desktop` (~3 min) →
+`disable-gnome-initial-setup` (non-fatal) → `install-nice-dcv` → `configure-dcv` (non-fatal) →
+`install-auto-dcv-service`
+
+After all steps, the script sends cfn-signal and writes an ALL_DONE marker. The instance
+does **not** reboot — bootstrap completes in-place. Total time: ~15-20 minutes.
+
+You may also see `STEP_WARN:nvidia-driver-loaded` — this is expected on first boot (the
+NVIDIA kernel module loads after the next reboot). GPU containers will work after a manual
+`sudo reboot`.
+
+If any step shows `STEP_FAIL`, check the detailed log:
 
 ```bash
 CMD_ID=$(aws ssm send-command \
@@ -181,24 +193,101 @@ If this prints `SSH OK`, subsequent connections just need `ssh dcv-isaac`.
 ## Phase 6: Verify Everything Works
 
 ```bash
-# 1. Bootstrap summary — all steps should be STEP_OK
+# 1. Bootstrap summary — all named steps should be STEP_OK
 ssh dcv-isaac "cat /var/log/dcv-bootstrap.summary"
 
 # 2. EFS mounted
 ssh dcv-isaac "mount | grep efs"
 # Expected: 127.0.0.1:/ on /mnt/efs type nfs4 ...
 
-# 3. Conda env exists with correct Python
-ssh dcv-isaac "conda run -n isaac python --version"
-# Expected: Python 3.11.x
+# 3. Container image pulled
+ssh dcv-isaac "docker images | grep isaac-lab"
+# Expected: nvcr.io/nvidia/isaac-lab   2.3.0   ...
 
-# 4. NVIDIA GPU detected
+# 4. Helper script installed
+ssh dcv-isaac "test -x /usr/local/bin/run-isaaclab.sh && echo 'Helper script OK'"
+# Expected: Helper script OK
+
+# 5. Host venv with tensorboard/wandb
+ssh dcv-isaac "/home/ubuntu/.venv/bin/tensorboard --version"
+# Expected: TensorBoard X.Y.Z
+
+# 6. Persistent package directory exists
+ssh dcv-isaac "ls -d /home/ubuntu/isaaclab-pkgs"
+# Expected: /home/ubuntu/isaaclab-pkgs
+
+# 7. NVIDIA GPU detected (requires reboot after first deploy)
 ssh dcv-isaac "nvidia-smi --query-gpu=name --format=csv,noheader"
-# Expected: NVIDIA L4 (or similar)
+# Expected: NVIDIA L4 (or similar). If "failed to initialize", run: sudo reboot
 ```
 
 The DCV web console is also available at `https://<elastic-ip>:8443` (accept the
 self-signed certificate warning).
+
+## Phase 6a: Container and LeIsaac Testing
+
+Before running evaluations, verify the containerized IsaacLab environment works.
+
+### 6a.1 Launch IsaacLab Container
+
+The helper script wraps `docker run` with GPU access, X11 forwarding, cache volumes, and
+persistent package mounts. On first launch, it auto-installs leisaac to the persistent
+volume (~30 seconds).
+
+```bash
+ssh dcv-isaac
+run-isaaclab.sh
+```
+
+**Expected:** First run prints `Installing leisaac @<commit> to persistent volume...`, then
+drops into a container shell. Subsequent runs skip the install step.
+
+> **Note:** The container Python is at `/workspace/isaaclab/_isaac_sim/python.sh` (an Isaac
+> Sim wrapper, not on `$PATH` as `python`). All Python commands below use this wrapper.
+> `import leisaac` requires the full IsaacSim runtime (omni.physics) to be initialised —
+> use it only inside `policy_inference.py` or a full sim launch, not bare `python -c`.
+
+### 6a.2 Verify IsaacLab Python Wrapper
+
+```bash
+/workspace/isaaclab/_isaac_sim/python.sh --version
+# Expected: Python 3.10.x
+
+/workspace/isaaclab/_isaac_sim/python.sh -c "import torch; print(f'torch {torch.__version__}')"
+# Expected: torch 2.x.x
+```
+
+### 6a.3 Verify LeIsaac Installation
+
+LeIsaac is installed to `/workspace/isaaclab-pkgs` (mounted from host). Verify the dist-info
+and that the N1.6 policy client class is present:
+
+```bash
+grep "^Version" /workspace/isaaclab-pkgs/leisaac-*.dist-info/METADATA
+# Expected: Version: 0.3.0
+
+grep "class Gr00t16ServicePolicyClient" /workspace/isaaclab-pkgs/leisaac/policy/service_policy_clients.py
+# Expected: class Gr00t16ServicePolicyClient(ZMQServicePolicy):
+```
+
+> **Why not `import leisaac`?** The `leisaac.__init__` imports `leisaac.tasks` which imports
+> `isaaclab` which imports `omni.physics.tensors` — a Kit runtime extension. It is only
+> available inside a running IsaacSim process (e.g. `policy_inference.py`). The policy
+> *client* classes are self-contained and do not need the sim runtime.
+
+### 6a.4 Test GPU Access Inside Container
+
+```bash
+nvidia-smi
+# Expected: GPU table showing NVIDIA L4 or g6-series GPU
+
+/workspace/isaaclab/_isaac_sim/python.sh -c "import torch; print(f'CUDA: {torch.cuda.is_available()}, Devices: {torch.cuda.device_count()}')"
+# Expected: CUDA: True, Devices: 1
+```
+
+Exit the container with `exit` or Ctrl-D. The leisaac packages persist at
+`/home/ubuntu/isaaclab-pkgs/` on the host — subsequent `run-isaaclab.sh` invocations skip
+the installation step.
 
 ## Phase 7: Visualize Training Metrics (W&B)
 
@@ -221,10 +310,9 @@ key from Settings → API Keys.
 
 ```bash
 ssh dcv-isaac "bash -l -c '
-  conda activate isaac
   export WANDB_BASE_URL=http://localhost:8080
   export WANDB_API_KEY=<your-local-api-key>
-  wandb sync /mnt/efs/gr00t/checkpoints/<JOB_ID>/wandb/offline-run-*
+  /home/ubuntu/.venv/bin/wandb sync /mnt/efs/gr00t/checkpoints/<JOB_ID>/wandb/offline-run-*
 '"
 ```
 
@@ -286,8 +374,15 @@ Serves a trained checkpoint as a ZMQ policy server for real-time robot control o
 simulation testing. The server accepts observations and returns action predictions over
 TCP port 5555.
 
+**Prerequisites:** Verify you have a trained checkpoint on EFS:
 ```bash
-CHECKPOINT=/mnt/efs/gr00t/checkpoints/<checkpoint-dir>
+ssh dcv-isaac "ls /mnt/efs/gr00t/checkpoints/"
+# Expected: one or more job directories containing checkpoint-<step> subdirs
+```
+
+**Start the policy server:**
+```bash
+CHECKPOINT=/mnt/efs/gr00t/checkpoints/<JOB_ID>/checkpoint-<step>
 ECR_URI=<account-id>.dkr.ecr.us-west-2.amazonaws.com/gr00t-finetune:latest
 
 ssh dcv-isaac "docker run --gpus all -d \
@@ -312,11 +407,28 @@ ssh dcv-isaac "docker run --gpus all -d \
 > - Use `--network host` instead of `-p 5555:5555` for simplicity.
 > - Pass `--host 0.0.0.0` to allow remote clients. The default is `127.0.0.1` (localhost only).
 
-To connect a client (robot or sim), send observations as msgpack-serialized numpy arrays
-over ZMQ REQ/REP on `tcp://<elastic-ip>:5555`. The server returns 16 action steps;
-clients typically use an action horizon of 16 for responsiveness.
+### Verify the server is running
 
-**Client-side observation format (N1.6):**
+```bash
+# Check container status
+ssh dcv-isaac "docker ps | grep gr00t-policy-server"
+# Expected: UP status
+
+# Check server logs for startup confirmation
+ssh dcv-isaac "docker logs gr00t-policy-server 2>&1 | tail -20"
+# Expected: "ZMQ server listening on 0.0.0.0:5555" or similar
+
+# Test port is open
+ssh dcv-isaac "ss -tlnp | grep 5555"
+# Expected: LISTEN on *:5555
+```
+
+If the container exits immediately, check `docker logs gr00t-policy-server`. Common issues:
+- Missing checkpoint files — verify the CHECKPOINT path exists and contains model files
+- GPU not available — check `nvidia-smi` works (may need `sudo reboot` after first deploy)
+- Insufficient shared memory — ensure `--shm-size=8g` is set
+
+### Client-side observation format (N1.6)
 
 Observations are a nested dict with these keys:
 - `video`: dict of camera arrays, each shape `(B, T, H, W, C)` uint8 — e.g. `video.front`, `video.wrist`
@@ -332,16 +444,225 @@ wrapped in `{"__ndarray_class__": True, "as_npy": bytes}`). See `gr00t/policy/se
 - The language instruction key is `annotation.human.action.task_description` (N1.5 used
   `annotation.human.task_description` — note the extra `.action.` segment).
 
-Ensure the DCV security group allows inbound TCP 5555 from the client IP:
+### Enable remote client access
+
+The DCV security group does **not** open port 5555 by default. If your client is outside
+the VPC, add an ingress rule:
+
 ```bash
-SG_ID=<dcv-security-group-id>
+# Look up the security group from the instance
+SG_ID=$(aws ec2 describe-instances \
+  --instance-ids <instance-id> \
+  --query 'Reservations[0].Instances[0].SecurityGroups[0].GroupId' \
+  --output text)
+
+# Allow access from your client IP
 aws ec2 authorize-security-group-ingress \
   --group-id $SG_ID \
   --protocol tcp --port 5555 \
-  --cidr <client-ip>/32
+  --cidr <client-ip>/32 \
+  --description "GR00T policy server access"
+
+# Verify
+aws ec2 describe-security-groups --group-ids $SG_ID \
+  --query 'SecurityGroups[0].IpPermissions[?ToPort==`5555`]'
 ```
 
+**Connectivity notes:**
+- From within the VPC (Batch jobs, other EC2): use the DCV instance's **private IP**
+- From outside the VPC: use the **Elastic IP** and ensure the security group rule is in place
+- Test connectivity: `nc -zv <dcv-ip> 5555`
+
 Stop the server: `ssh dcv-isaac "docker stop gr00t-policy-server"`
+
+## Phase 8a: LeIsaac Policy Inference Verification
+
+Test the full inference loop: checkpoint → policy server → leisaac client → action output.
+This requires the policy server to be running (Phase 8).
+
+### 8a.1 Launch IsaacLab Container
+
+```bash
+ssh dcv-isaac
+run-isaaclab.sh
+```
+
+The container uses `--network=host`, so it can reach the policy server on `localhost:5555`.
+
+### 8a.2 Test Policy Server Connection
+
+Inside the container (using the Isaac Sim Python wrapper):
+
+```bash
+/workspace/isaaclab/_isaac_sim/python.sh -c "
+import socket
+sock = socket.create_connection(('localhost', 5555), timeout=5)
+print(f'Connected to policy server on port 5555')
+sock.close()
+"
+# Expected: Connected to policy server on port 5555
+```
+
+### 8a.3 Verify LeIsaac Policy Client Instantiation
+
+The leisaac policy client for N1.6 is `Gr00t16ServicePolicyClient`. Import it directly
+from `leisaac.policy` — **do not use bare `import leisaac`** as that triggers the tasks
+subpackage which requires the full IsaacSim runtime.
+
+```bash
+/workspace/isaaclab/_isaac_sim/python.sh << 'PYEOF'
+# Import directly from the policy subpackage (avoids leisaac.__init__ sim deps)
+import sys
+sys.path.insert(0, '/workspace/isaaclab-pkgs')
+from leisaac.policy.service_policy_clients import Gr00t16ServicePolicyClient
+
+# Instantiate the N1.6 policy client
+policy = Gr00t16ServicePolicyClient(
+    host="localhost",
+    port=5555,
+    timeout_ms=5000,
+    camera_keys=["front", "wrist"],       # Must match your env camera names
+    modality_keys=["single_arm", "gripper"],  # Must match your modality config
+)
+print(f"Policy client created: {type(policy).__name__}")
+print("Gr00t16ServicePolicyClient instantiation OK")
+PYEOF
+# Expected: Gr00t16ServicePolicyClient instantiation OK
+```
+
+> **API reference** (`leisaac.policy.service_policy_clients`):
+> - `Gr00t16ServicePolicyClient` — N1.6 policy client (ZMQ, requires `main` branch commit)
+> - `Gr00tServicePolicyClient` — N1.5 policy client (ZMQ, in v0.3.0 tag)
+> - `LeRobotServicePolicyClient` — LeRobot policy client (gRPC)
+> - `OpenPIServicePolicyClient` — OpenPI policy client (WebSocket)
+
+### 8a.4 Send Test Observation
+
+The `get_action()` method accepts an IsaacLab-style observation dict and returns a
+`torch.Tensor` of actions. The installed `Gr00t16ServicePolicyClient` uses
+`annotation.human.action.task_description` (N1.6 key) internally.
+
+```bash
+/workspace/isaaclab/_isaac_sim/python.sh << 'PYEOF'
+import sys, torch, numpy as np
+sys.path.insert(0, '/workspace/isaaclab-pkgs')
+from leisaac.policy.service_policy_clients import Gr00t16ServicePolicyClient
+
+policy = Gr00t16ServicePolicyClient(
+    host="localhost",
+    port=5555,
+    timeout_ms=10000,
+    camera_keys=["front", "wrist"],
+    modality_keys=["single_arm", "gripper"],
+)
+
+# Camera: (1, H, W, C) uint8 numpy arrays (client wraps as video.<key>)
+# State: (1, D) float64 numpy arrays (client wraps as state.<key>)
+# joint_pos: (1, 6) float64 — single_arm (5) + gripper (1), converted internally
+obs = {
+    "front": np.random.randint(0, 255, (1, 224, 224, 3), dtype=np.uint8),
+    "wrist": np.random.randint(0, 255, (1, 224, 224, 3), dtype=np.uint8),
+    "joint_pos": np.zeros((1, 6), dtype=np.float64),
+    "task_description": "pick up the orange and place it on the plate",
+}
+
+# get_action returns torch.Tensor shape (action_horizon, 1, action_dim)
+actions = policy.get_action(obs)
+print(f"Action tensor shape: {actions.shape}")
+print(f"Action dtype: {actions.dtype}")
+print("Policy inference test PASSED")
+PYEOF
+```
+
+> **Note:** If you see a timeout error, the policy server may still be loading the model.
+> Check `docker logs gr00t-policy-server` for progress. First inference is slower due to
+> model warm-up.
+
+### 8a.5 Closed-Loop Simulation Evaluation (LeIsaac)
+
+For proper closed-loop evaluation, leisaac provides `policy_inference.py` which drives
+an IsaacSim environment and feeds observations to the policy server in a loop. This
+requires a running X11 display (the DCV session provides this).
+
+Inside the IsaacLab container:
+
+```bash
+# Ensure DISPLAY is set (should be inherited from run-isaaclab.sh)
+echo $DISPLAY
+# Expected: :1 or similar
+
+# Run closed-loop evaluation with the N1.6 policy
+python scripts/evaluation/policy_inference.py \
+    --task=LeIsaac-SO101-PickOrange-v0 \
+    --eval_rounds=10 \
+    --policy_type=gr00tn1.6 \
+    --policy_host=localhost \
+    --policy_port=5555 \
+    --policy_timeout_ms=5000 \
+    --policy_action_horizon=16 \
+    --policy_language_instruction="Pick up the orange and place it on the plate" \
+    --device=cuda \
+    --enable_cameras
+```
+
+**Expected output:** Per-episode success/failure and a final success rate:
+```
+[Evaluation] Evaluating episode 1...
+[Evaluation] Episode 1 is successful!
+...
+[Evaluation] Final success rate: 0.700 [7/10]
+```
+
+**Key parameters:**
+- `--task`: LeIsaac task name (see `leisaac` docs for available tasks)
+- `--eval_rounds`: Number of episodes (0 = run indefinitely, press R to reset)
+- `--policy_type`: `gr00tn1.6` for N1.6, `gr00tn1.5` for N1.5
+- `--policy_action_horizon`: Number of action steps per inference (16 for GR00T)
+- `--enable_cameras`: Required for vision-based policies
+
+### 8a.6 Performance Smoke Test
+
+```bash
+/workspace/isaaclab/_isaac_sim/python.sh << 'PYEOF'
+import sys, time, numpy as np
+sys.path.insert(0, '/workspace/isaaclab-pkgs')
+from leisaac.policy.service_policy_clients import Gr00t16ServicePolicyClient
+
+policy = Gr00t16ServicePolicyClient(
+    host="localhost", port=5555, timeout_ms=5000,
+    camera_keys=["front", "wrist"], modality_keys=["single_arm", "gripper"],
+)
+obs = {
+    "front": np.random.randint(0, 255, (1, 224, 224, 3), dtype=np.uint8),
+    "wrist": np.random.randint(0, 255, (1, 224, 224, 3), dtype=np.uint8),
+    "joint_pos": np.zeros((1, 6), dtype=np.float64),
+    "task_description": "pick up the object",
+}
+
+# Warm-up
+policy.get_action(obs)
+
+# Timed inference
+start = time.perf_counter()
+actions = policy.get_action(obs)
+elapsed = time.perf_counter() - start
+print(f"Inference latency: {elapsed*1000:.1f} ms")
+# Expected: 50-200ms depending on GPU and model size
+PYEOF
+```
+
+**Notes:**
+- Use `from leisaac.policy.service_policy_clients import Gr00t16ServicePolicyClient`
+  (not `from leisaac.policy import ...`) to avoid triggering `leisaac.__init__` which
+  pulls in simulation-only dependencies (`omni.physics`).
+- The `Gr00t16ServicePolicyClient` uses `joint_pos` (shape `(1,6)`) internally,
+  converting it to `state.single_arm` (5D) + `state.gripper` (1D) for the server.
+- **N1.6 vs N1.5 key difference**: N1.6 uses `annotation.human.action.task_description`
+  internally (N1.5 used `annotation.human.task_description`). The leisaac client abstracts
+  this — just pass `task_description` in the obs dict.
+- For remote testing, replace `localhost` with the DCV instance's private IP.
+- The `policy_inference.py` script is the recommended way to run full closed-loop
+  evaluation. Manual `get_action()` calls are useful for debugging and latency testing.
 
 ## Cleanup: Tearing Down Stacks
 
@@ -394,11 +715,10 @@ aws efs delete-file-system --file-system-id $EFS_ID
 ## Troubleshooting
 
 **Bootstrap failed partway:** The script is idempotent — re-running skips completed steps.
-SSH in and run `sudo bash /tmp/dcv_bootstrap.sh`. If `/tmp` was cleared after reboot,
-check `sudo cat /var/lib/cloud/instance/scripts/part-001` for the S3 asset URL to
-re-download the script.
+SSH in and check `sudo cat /var/lib/cloud/instance/scripts/part-001` for the full script.
+Re-run with `sudo bash /var/lib/cloud/instance/scripts/part-001`.
 
-**SSM "TargetNotConnected":** The instance is booting or rebooting. Wait 60-90 seconds.
+**SSM "TargetNotConnected":** The instance is booting. Wait 60-90 seconds and retry.
 
 **CDK destroy "Cannot delete export":** Happens when destroying Batch before DCV.
 Always destroy DCV first.
@@ -413,3 +733,15 @@ when running `docker run` commands against the `gr00t-finetune:latest` image.
 **Uppercase embodiment tag in server CLI:** The `run_gr00t_server.py` CLI (via `tyro`)
 expects the `EmbodimentTag` enum **name** in uppercase (`NEW_EMBODIMENT`), not the enum
 **value** in lowercase (`new_embodiment`). The training script uses the value form.
+
+**nvidia-smi fails after first deploy:** The NVIDIA kernel module can't load via `modprobe`
+on the same boot that installs the driver. Run `sudo reboot` and reconnect after ~60
+seconds. This only affects the first deploy.
+
+**Helper script not found:** If `run-isaaclab.sh` doesn't exist, check the bootstrap
+summary for `create-helper-script` status. If missing, the container setup step failed —
+check detailed logs: `grep -A 50 "pull-isaaclab-container" /var/log/dcv-bootstrap.log`.
+
+**LeIsaac import fails inside container:** Verify the persistent package dir is mounted:
+`ls /workspace/isaaclab-pkgs/.leisaac-installed`. If missing, the auto-install didn't run —
+exit the container and run `run-isaaclab.sh` again (it retries on each launch).

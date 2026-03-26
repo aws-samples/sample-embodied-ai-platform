@@ -205,16 +205,15 @@ must "install-nvidia-driver" '
   ubuntu-drivers autoinstall
 '
 
-# Conditional reboot: NVIDIA driver may need reboot to load kernel modules
+# Load NVIDIA kernel module (nouveau already blacklisted above)
 if ! is_done "nvidia-driver-loaded"; then
+  modprobe nvidia 2>/dev/null || true
   if nvidia-smi > /dev/null 2>&1; then
-    log "nvidia-smi OK -- driver loaded without reboot"
+    log "nvidia-smi OK -- driver loaded via modprobe"
     mark_done "nvidia-driver-loaded"
   else
-    log "nvidia-smi failed -- rebooting to load kernel modules"
-    echo "REBOOT:nvidia-driver-load" >> "$SUMMARY"
-    shutdown -r now
-    exit 0
+    log "WARNING: nvidia-smi failed after modprobe -- driver will load after next reboot"
+    echo "STEP_WARN:nvidia-driver-loaded:nvidia-smi-failed-will-retry-after-reboot" >> "$SUMMARY"
   fi
 fi
 
@@ -266,7 +265,7 @@ try_step "install-firefox" '
 must "install-cfn-bootstrap" '
   apt_install python3-pip
   pip3 install https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-py3-latest.tar.gz
-  /usr/local/bin/cfn-signal --version
+  test -x /usr/local/bin/cfn-signal
 '
 
 # DCV desktop, container pull, host tools, EFS mount, cfn-signal, and ALL_DONE

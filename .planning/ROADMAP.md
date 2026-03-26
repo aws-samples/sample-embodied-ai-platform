@@ -74,7 +74,7 @@ Plans:
 **Plans:** 1 plan
 
 Plans:
-- [ ] 03-01-PLAN.md — Reorder bootstrap, add DCV to add_commands, cfn-signal, CreationPolicy, ALL_DONE marker
+- [x] 03-01-PLAN.md — Reorder bootstrap, add DCV to add_commands, cfn-signal, CreationPolicy, ALL_DONE marker
 
 **UI hint**: yes
 

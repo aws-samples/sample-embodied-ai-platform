@@ -31,10 +31,10 @@
 
 ### Bootstrap Ordering & Monitoring
 
-- [ ] **ORCH-01**: Bootstrap executes in order: NVIDIA driver → Docker+toolkit → container pull → EFS mount → uv/tools → DCV desktop (last)
-- [ ] **ORCH-02**: Bootstrap sends cfn-signal to CloudFormation on completion (success or failure)
-- [ ] **ORCH-03**: Bootstrap writes marker file `/var/lib/dcv-bootstrap/ALL_DONE` on successful completion
-- [ ] **ORCH-04**: Existing idempotent state markers (`/var/lib/dcv-bootstrap/*.done`) are preserved for re-run safety
+- [x] **ORCH-01**: Bootstrap executes in order: NVIDIA driver → Docker+toolkit → container pull → EFS mount → uv/tools → DCV desktop (last)
+- [x] **ORCH-02**: Bootstrap sends cfn-signal to CloudFormation on completion (success or failure)
+- [x] **ORCH-03**: Bootstrap writes marker file `/var/lib/dcv-bootstrap/ALL_DONE` on successful completion
+- [x] **ORCH-04**: Existing idempotent state markers (`/var/lib/dcv-bootstrap/*.done`) are preserved for re-run safety
 
 ## v2 Requirements
 
@@ -74,10 +74,10 @@
 | PKGS-03 | Phase 2 | Complete |
 | HOST-01 | Phase 2 | Complete |
 | HOST-02 | Phase 2 | Complete |
-| ORCH-01 | Phase 3 | Pending |
-| ORCH-02 | Phase 3 | Pending |
-| ORCH-03 | Phase 3 | Pending |
-| ORCH-04 | Phase 3 | Pending |
+| ORCH-01 | Phase 3 | Complete |
+| ORCH-02 | Phase 3 | Complete |
+| ORCH-03 | Phase 3 | Complete |
+| ORCH-04 | Phase 3 | Complete |
 
 **Coverage:**
 - v1 requirements: 16 total

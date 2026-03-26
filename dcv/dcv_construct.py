@@ -100,7 +100,7 @@ class DcvWorkstation(Construct):
         container_image = version_config["container_image"]
         dcv_version_build = version_config["dcv"]
         dcv_version, dcv_build = dcv_version_build.split("-")
-        leisaac_version = version_config.get("leisaac", "v0.3.0")
+        leisaac_commit = version_config.get("leisaac", "d2cbfd2e33517f2094e1904ff817aa17de6e8939")
 
         # Import EFS file system if provided
         efs_fs = None
@@ -209,65 +209,70 @@ class DcvWorkstation(Construct):
 
         # Create /usr/local/bin/run-isaaclab.sh helper script
         # This script wraps `docker run` with GPU, X11, EULA, cache volume mounts,
-        # persistent package volume, and leisaac auto-install
-        helper_script = f"""cat > /usr/local/bin/run-isaaclab.sh << 'HELPER_EOF'
-#!/bin/bash
-set -euo pipefail
-CONTAINER_IMAGE="{container_image}"
-SESSION_NAME="isaac-lab"
-LEISAAC_VERSION="{leisaac_version}"
-PKGS_DIR="/home/ubuntu/isaaclab-pkgs"
-MARKER="$PKGS_DIR/.leisaac-installed"
-
-# Create cache directories for persistent NVIDIA/Isaac caches
-mkdir -p ~/docker/isaac-sim/cache/kit
-mkdir -p ~/docker/isaac-sim/cache/ov
-mkdir -p ~/docker/isaac-sim/cache/pip
-mkdir -p ~/docker/isaac-sim/cache/glcache
-mkdir -p ~/docker/isaac-sim/cache/computecache
-mkdir -p ~/docker/isaac-sim/logs
-mkdir -p ~/docker/isaac-sim/data
-
-# Create persistent package directory
-mkdir -p "$PKGS_DIR"
-
-# Auto-install leisaac on first launch (skips if already installed)
-if [[ ! -f "$MARKER" ]]; then
-  echo "Installing leisaac $LEISAAC_VERSION to persistent volume..."
-  docker run --rm --gpus all \\
-    -e ACCEPT_EULA=Y \\
-    -e PYTHONPATH=/workspace/isaaclab-pkgs \\
-    -v "$PKGS_DIR":/workspace/isaaclab-pkgs:rw \\
-    "$CONTAINER_IMAGE" \\
-    -c "pip install --target /workspace/isaaclab-pkgs 'leisaac[gr00t]==$LEISAAC_VERSION' && touch /workspace/isaaclab-pkgs/.leisaac-installed"
-fi
-
-docker run \\
-  --name "$SESSION_NAME" \\
-  --entrypoint bash \\
-  -it \\
-  --gpus all \\
-  -e "ACCEPT_EULA=Y" \\
-  -e "PRIVACY_CONSENT=Y" \\
-  -e DISPLAY \\
-  -e PYTHONPATH=/workspace/isaaclab-pkgs:$PYTHONPATH \\
-  -v $HOME/.Xauthority:/root/.Xauthority \\
-  -v ~/docker/isaac-sim/cache/kit:/isaac-sim/kit/cache:rw \\
-  -v ~/docker/isaac-sim/cache/ov:/root/.cache/ov:rw \\
-  -v ~/docker/isaac-sim/cache/pip:/root/.cache/pip:rw \\
-  -v ~/docker/isaac-sim/cache/glcache:/root/.cache/nvidia/GLCache:rw \\
-  -v ~/docker/isaac-sim/cache/computecache:/root/.nv/ComputeCache:rw \\
-  -v ~/docker/isaac-sim/logs:/root/.nvidia-omniverse/logs:rw \\
-  -v ~/docker/isaac-sim/data:/root/.local/share/ov/data:rw \\
-  -v "$PKGS_DIR":/workspace/isaaclab-pkgs:rw \\
-  --rm \\
-  --network=host \\
-  "$CONTAINER_IMAGE" \\
-  "$@"
-HELPER_EOF
-chmod +x /usr/local/bin/run-isaaclab.sh"""
+        # persistent package volume, and leisaac auto-install.
+        # NOTE: The heredoc is emitted directly (not inside must '...') because
+        # nested single quotes break shell parsing and cause $VAR expansion
+        # under set -u from the outer bootstrap script.
         self._user_data.add_commands(
-            f'must "create-helper-script" \'{helper_script}\'',
+            f"cat > /usr/local/bin/run-isaaclab.sh << 'HELPER_EOF'",
+            '#!/bin/bash',
+            'set -euo pipefail',
+            f'CONTAINER_IMAGE="{container_image}"',
+            'SESSION_NAME="isaac-lab"',
+            f'LEISAAC_COMMIT="{leisaac_commit}"',
+            'PKGS_DIR="/home/ubuntu/isaaclab-pkgs"',
+            'MARKER="$PKGS_DIR/.leisaac-installed"',
+            '',
+            '# Create cache directories for persistent NVIDIA/Isaac caches',
+            'mkdir -p ~/docker/isaac-sim/cache/kit',
+            'mkdir -p ~/docker/isaac-sim/cache/ov',
+            'mkdir -p ~/docker/isaac-sim/cache/pip',
+            'mkdir -p ~/docker/isaac-sim/cache/glcache',
+            'mkdir -p ~/docker/isaac-sim/cache/computecache',
+            'mkdir -p ~/docker/isaac-sim/logs',
+            'mkdir -p ~/docker/isaac-sim/data',
+            '',
+            '# Create persistent package directory',
+            'mkdir -p "$PKGS_DIR"',
+            '',
+            '# Auto-install leisaac on first launch (skips if already installed)',
+            '# Uses git commit SHA (not PyPI tag) — Gr00t16ServicePolicyClient was added',
+            '# after the v0.3.0 release tag. Uses the Isaac Sim python.sh pip wrapper.',
+            'if [[ ! -f "$MARKER" ]]; then',
+            '  echo "Installing leisaac @${LEISAAC_COMMIT} to persistent volume..."',
+            '  docker run --rm --gpus all \\',
+            '    -e ACCEPT_EULA=Y \\',
+            '    -e PYTHONPATH=/workspace/isaaclab-pkgs \\',
+            '    -v "$PKGS_DIR":/workspace/isaaclab-pkgs:rw \\',
+            '    "$CONTAINER_IMAGE" \\',
+            '    -c "/workspace/isaaclab/_isaac_sim/python.sh -m pip install --target /workspace/isaaclab-pkgs \'leisaac[gr00t] @ git+https://github.com/LightwheelAI/leisaac.git@${LEISAAC_COMMIT}#subdirectory=source/leisaac\' && touch /workspace/isaaclab-pkgs/.leisaac-installed"',
+            'fi',
+            '',
+            'docker run \\',
+            '  --name "$SESSION_NAME" \\',
+            '  --entrypoint bash \\',
+            '  -it \\',
+            '  --gpus all \\',
+            '  -e "ACCEPT_EULA=Y" \\',
+            '  -e "PRIVACY_CONSENT=Y" \\',
+            '  -e DISPLAY \\',
+            '  -e PYTHONPATH=/workspace/isaaclab-pkgs:$PYTHONPATH \\',
+            '  -v $HOME/.Xauthority:/root/.Xauthority \\',
+            '  -v ~/docker/isaac-sim/cache/kit:/isaac-sim/kit/cache:rw \\',
+            '  -v ~/docker/isaac-sim/cache/ov:/root/.cache/ov:rw \\',
+            '  -v ~/docker/isaac-sim/cache/pip:/root/.cache/pip:rw \\',
+            '  -v ~/docker/isaac-sim/cache/glcache:/root/.cache/nvidia/GLCache:rw \\',
+            '  -v ~/docker/isaac-sim/cache/computecache:/root/.nv/ComputeCache:rw \\',
+            '  -v ~/docker/isaac-sim/logs:/root/.nvidia-omniverse/logs:rw \\',
+            '  -v ~/docker/isaac-sim/data:/root/.local/share/ov/data:rw \\',
+            '  -v "$PKGS_DIR":/workspace/isaaclab-pkgs:rw \\',
+            '  --rm \\',
+            '  --network=host \\',
+            '  "$CONTAINER_IMAGE" \\',
+            '  "$@"',
+            'HELPER_EOF',
+            'chmod +x /usr/local/bin/run-isaaclab.sh',
+            'must "create-helper-script" "test -x /usr/local/bin/run-isaaclab.sh"',
         )
 
         # Create persistent package directory for container volume mount
@@ -430,7 +435,7 @@ chmod +x /usr/local/bin/run-isaaclab.sh"""
         cfn_instance.cfn_options.creation_policy = CfnCreationPolicy(
             resource_signal=CfnResourceSignal(
                 count=1,
-                timeout="PT30M"  # D-05: 30 min timeout
+                timeout="PT60M"  # D-05: 60 min timeout (container pull + DCV desktop install)
             )
         )
 

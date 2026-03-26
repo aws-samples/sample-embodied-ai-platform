@@ -66,9 +66,9 @@ class IsaacLabDcvStack(Stack):
             vpc=batch_stack.vpc,              # Share VPC with Batch
             efs_id=batch_stack.efs_id,        # Share EFS with Batch
             efs_sg_id=batch_stack.efs_sg_id,  # Share security group
-            instance_type="g6.4xlarge",       # Same as before
-            isaac_sim_version="4.5.0",        # OLD version (preserve behavior)
-            isaac_lab_version="v2.1.1",       # OLD version (preserve behavior)
+            instance_type="g6.2xlarge",       # g6.4xlarge has capacity issues in us-west-2a
+            isaac_sim_version="5.1.0",        # Latest version with valid NGC container
+            isaac_lab_version="v2.3.0",       # Matches isaac-lab:2.3.0 on NGC
             leisaac_enabled=True,             # Required for gr00t
         )
 
