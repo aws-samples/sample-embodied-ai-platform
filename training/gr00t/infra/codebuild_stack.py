@@ -19,6 +19,7 @@ class CodeBuildStack(Construct):
         construct_id: str,
         ecr_repository_name: str = "gr00t-finetune",
         use_stable: bool = True,
+        build_target: str = "n15",
     ) -> None:
         """
         CDK construct for AWS CodeBuild project to build GR00T fine-tuning container.
@@ -32,6 +33,7 @@ class CodeBuildStack(Construct):
         Args:
             ecr_repository_name: Name for the ECR repository (default: gr00t-finetune)
             use_stable: Use stable GR00T commit vs latest (default: True)
+            build_target: "n15" for N1.5 Dockerfile, "n16" for N16/Dockerfile (default: n15)
         """
         super().__init__(scope, construct_id)
 
@@ -116,6 +118,7 @@ class CodeBuildStack(Construct):
                     value="true" if use_stable else "false"
                 ),
                 "IMAGE_TAG": codebuild.BuildEnvironmentVariable(value="latest"),
+                "BUILD_TARGET": codebuild.BuildEnvironmentVariable(value=build_target),
             },
             # Timeout (building flash-attn takes time)
             timeout=Duration.hours(2),
