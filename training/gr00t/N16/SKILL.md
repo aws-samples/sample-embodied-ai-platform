@@ -475,124 +475,151 @@ aws ec2 describe-security-groups --group-ids $SG_ID \
 
 Stop the server: `ssh dcv-isaac "docker stop gr00t-policy-server"`
 
-## Phase 8a: LeIsaac Policy Inference Verification
+## Phase 8a: LeIsaac Closed-Loop Evaluation
 
-Test the full inference loop: checkpoint → policy server → leisaac client → action output.
-This requires the policy server to be running (Phase 8).
+Test trained N1.6 policies in simulation using [LeIsaac](https://github.com/LightwheelAI/leisaac),
+which drives an IsaacSim environment and feeds observations to the policy server in a
+closed loop. This requires the policy server to be running (Phase 8) and a DCV desktop
+session for the IsaacSim GUI.
 
-### 8a.1 Launch IsaacLab Container
+### 8a.1 Set Up LeIsaac on the DCV Instance
 
+LeIsaac is **not** installed by default — set it up when you need to run evaluations.
+There are two parts: the Python package (policy client library) and the evaluation
+scripts (from the git repo).
+
+**SSH into the DCV instance:**
 ```bash
 ssh dcv-isaac
+```
+
+**Step 1 — Clone the leisaac repo** (provides `scripts/evaluation/policy_inference.py`):
+```bash
+LEISAAC_COMMIT=d2cbfd2e33517f2094e1904ff817aa17de6e8939
+git clone https://github.com/LightwheelAI/leisaac.git ~/leisaac-repo
+cd ~/leisaac-repo && git checkout $LEISAAC_COMMIT
+```
+
+> The commit SHA must match the version pinned in `dcv/versions.py` for your IsaacSim
+> version. The `Gr00t16ServicePolicyClient` (N1.6) was added after the `v0.3.0` tag and
+> only exists on `main`.
+
+**Step 2 — Install the leisaac Python package** to a persistent directory that gets
+mounted into the IsaacLab container:
+```bash
+mkdir -p ~/isaaclab-pkgs
+docker run --rm --gpus all \
+  -e ACCEPT_EULA=Y \
+  -v ~/isaaclab-pkgs:/workspace/isaaclab-pkgs:rw \
+  nvcr.io/nvidia/isaac-lab:2.3.0 \
+  -c "/workspace/isaaclab/_isaac_sim/python.sh -m pip install \
+    --target /workspace/isaaclab-pkgs \
+    'leisaac[gr00t] @ git+https://github.com/LightwheelAI/leisaac.git@${LEISAAC_COMMIT}#subdirectory=source/leisaac'"
+```
+
+> **Why `python.sh`?** The IsaacLab container's Python is at
+> `/workspace/isaaclab/_isaac_sim/python.sh` (an Isaac Sim wrapper). It is not on `$PATH`
+> as `python`. All pip/python commands inside this container must use this wrapper.
+
+**Step 3 — Update `run-isaaclab.sh`** to mount the evaluation scripts and fix
+an unbound variable:
+```bash
+# Mount leisaac scripts into the container
+sudo sed -i '/--network=host/a\  -v $HOME/leisaac-repo/scripts:/workspace/scripts:ro \\' \
+  /usr/local/bin/run-isaaclab.sh
+
+# Fix PYTHONPATH unbound variable (set -u trips on empty PYTHONPATH)
+sudo sed -i 's|-e PYTHONPATH=/workspace/isaaclab-pkgs:$PYTHONPATH|-e PYTHONPATH=/workspace/isaaclab-pkgs:${PYTHONPATH:-}|' \
+  /usr/local/bin/run-isaaclab.sh
+```
+
+**Verify the setup:**
+```bash
+grep 'leisaac-repo/scripts' /usr/local/bin/run-isaaclab.sh
+# Expected: -v $HOME/leisaac-repo/scripts:/workspace/scripts:ro \
+
+grep 'PYTHONPATH:-' /usr/local/bin/run-isaaclab.sh
+# Expected: -e PYTHONPATH=/workspace/isaaclab-pkgs:${PYTHONPATH:-}
+
+grep "class Gr00t16ServicePolicyClient" ~/isaaclab-pkgs/leisaac/policy/service_policy_clients.py
+# Expected: class Gr00t16ServicePolicyClient(ZMQServicePolicy):
+```
+
+### 8a.2 Verify the Policy Server (Direct Test)
+
+Before launching the full sim, verify the policy server responds to inference requests.
+This uses GR00T's own `PolicyClient` from the training container (not the leisaac client,
+which requires a running IsaacSim process to import — see note below).
+
+```bash
+ECR_URI=<account-id>.dkr.ecr.us-west-2.amazonaws.com/gr00t-finetune:latest
+
+ssh dcv-isaac "docker run --rm --network=host \
+  --entrypoint /bin/sh \
+  $ECR_URI \
+  -c 'cd /workspace/gr00t-repo && /workspace/gr00t-repo/.venv/bin/python -c \"
+import sys, numpy as np
+sys.path.insert(0, \\\"/workspace/gr00t-repo\\\")
+from gr00t.policy.server_client import PolicyClient
+
+client = PolicyClient(host=\\\"localhost\\\", port=5555)
+obs = {
+    \\\"video\\\": {
+        \\\"front\\\": np.random.randint(0, 255, (1, 1, 224, 224, 3), dtype=np.uint8),
+        \\\"wrist\\\": np.random.randint(0, 255, (1, 1, 224, 224, 3), dtype=np.uint8),
+    },
+    \\\"state\\\": {
+        \\\"single_arm\\\": np.zeros((1, 1, 5), dtype=np.float32),
+        \\\"gripper\\\": np.zeros((1, 1, 1), dtype=np.float32),
+    },
+    \\\"language\\\": {
+        \\\"annotation.human.action.task_description\\\": [[\\\"pick up the orange\\\"]],
+    },
+}
+result = client.get_action(obs)
+for k, v in result[0].items():
+    print(f\\\"{k}: shape={v.shape}, dtype={v.dtype}\\\")
+print(\\\"Policy server test PASSED\\\")
+\"'"
+```
+
+**Expected:**
+```
+single_arm: shape=(1, 16, 5), dtype=float32
+gripper: shape=(1, 16, 1), dtype=float32
+Policy server test PASSED
+```
+
+> **Why not use the leisaac `Gr00t16ServicePolicyClient` for this test?**
+> `leisaac.__init__` eagerly imports `leisaac.tasks` → `isaaclab_tasks` → `isaaclab` →
+> `omni.physics.tensors`, which is a Kit runtime extension only available inside a
+> running IsaacSim process. Even `from leisaac.policy.service_policy_clients import ...`
+> triggers this chain because `service_policy_clients.py` imports `leisaac.utils.constant`.
+> The leisaac client works correctly inside `policy_inference.py` (which runs under
+> IsaacSim), but cannot be imported in a standalone Python script.
+
+### 8a.3 Run Closed-Loop Simulation Evaluation
+
+This requires the DCV desktop — open a terminal from the DCV web console
+(`https://<elastic-ip>:8443`) or via `ssh dcv-isaac`.
+
+**Launch the IsaacLab container:**
+```bash
 run-isaaclab.sh
 ```
 
-The container uses `--network=host`, so it can reach the policy server on `localhost:5555`.
-
-### 8a.2 Test Policy Server Connection
-
-Inside the container (using the Isaac Sim Python wrapper):
-
+**Inside the container, run the evaluation:**
 ```bash
-/workspace/isaaclab/_isaac_sim/python.sh -c "
-import socket
-sock = socket.create_connection(('localhost', 5555), timeout=5)
-print(f'Connected to policy server on port 5555')
-sock.close()
-"
-# Expected: Connected to policy server on port 5555
-```
-
-### 8a.3 Verify LeIsaac Policy Client Instantiation
-
-The leisaac policy client for N1.6 is `Gr00t16ServicePolicyClient`. Import it directly
-from `leisaac.policy` — **do not use bare `import leisaac`** as that triggers the tasks
-subpackage which requires the full IsaacSim runtime.
-
-```bash
-/workspace/isaaclab/_isaac_sim/python.sh << 'PYEOF'
-# Import directly from the policy subpackage (avoids leisaac.__init__ sim deps)
-import sys
-sys.path.insert(0, '/workspace/isaaclab-pkgs')
-from leisaac.policy.service_policy_clients import Gr00t16ServicePolicyClient
-
-# Instantiate the N1.6 policy client
-policy = Gr00t16ServicePolicyClient(
-    host="localhost",
-    port=5555,
-    timeout_ms=5000,
-    camera_keys=["front", "wrist"],       # Must match your env camera names
-    modality_keys=["single_arm", "gripper"],  # Must match your modality config
-)
-print(f"Policy client created: {type(policy).__name__}")
-print("Gr00t16ServicePolicyClient instantiation OK")
-PYEOF
-# Expected: Gr00t16ServicePolicyClient instantiation OK
-```
-
-> **API reference** (`leisaac.policy.service_policy_clients`):
-> - `Gr00t16ServicePolicyClient` — N1.6 policy client (ZMQ, requires `main` branch commit)
-> - `Gr00tServicePolicyClient` — N1.5 policy client (ZMQ, in v0.3.0 tag)
-> - `LeRobotServicePolicyClient` — LeRobot policy client (gRPC)
-> - `OpenPIServicePolicyClient` — OpenPI policy client (WebSocket)
-
-### 8a.4 Send Test Observation
-
-The `get_action()` method accepts an IsaacLab-style observation dict and returns a
-`torch.Tensor` of actions. The installed `Gr00t16ServicePolicyClient` uses
-`annotation.human.action.task_description` (N1.6 key) internally.
-
-```bash
-/workspace/isaaclab/_isaac_sim/python.sh << 'PYEOF'
-import sys, torch, numpy as np
-sys.path.insert(0, '/workspace/isaaclab-pkgs')
-from leisaac.policy.service_policy_clients import Gr00t16ServicePolicyClient
-
-policy = Gr00t16ServicePolicyClient(
-    host="localhost",
-    port=5555,
-    timeout_ms=10000,
-    camera_keys=["front", "wrist"],
-    modality_keys=["single_arm", "gripper"],
-)
-
-# Camera: (1, H, W, C) uint8 numpy arrays (client wraps as video.<key>)
-# State: (1, D) float64 numpy arrays (client wraps as state.<key>)
-# joint_pos: (1, 6) float64 — single_arm (5) + gripper (1), converted internally
-obs = {
-    "front": np.random.randint(0, 255, (1, 224, 224, 3), dtype=np.uint8),
-    "wrist": np.random.randint(0, 255, (1, 224, 224, 3), dtype=np.uint8),
-    "joint_pos": np.zeros((1, 6), dtype=np.float64),
-    "task_description": "pick up the orange and place it on the plate",
-}
-
-# get_action returns torch.Tensor shape (action_horizon, 1, action_dim)
-actions = policy.get_action(obs)
-print(f"Action tensor shape: {actions.shape}")
-print(f"Action dtype: {actions.dtype}")
-print("Policy inference test PASSED")
-PYEOF
-```
-
-> **Note:** If you see a timeout error, the policy server may still be loading the model.
-> Check `docker logs gr00t-policy-server` for progress. First inference is slower due to
-> model warm-up.
-
-### 8a.5 Closed-Loop Simulation Evaluation (LeIsaac)
-
-For proper closed-loop evaluation, leisaac provides `policy_inference.py` which drives
-an IsaacSim environment and feeds observations to the policy server in a loop. This
-requires a running X11 display (the DCV session provides this).
-
-Inside the IsaacLab container:
-
-```bash
-# Ensure DISPLAY is set (should be inherited from run-isaaclab.sh)
+# Verify DISPLAY is set (DCV provides the X11 session)
 echo $DISPLAY
-# Expected: :1 or similar
+# Expected: :0 or :1
+
+# Verify scripts are mounted
+ls /workspace/scripts/evaluation/policy_inference.py
+# Expected: file exists
 
 # Run closed-loop evaluation with the N1.6 policy
-python scripts/evaluation/policy_inference.py \
+/workspace/isaaclab/_isaac_sim/python.sh /workspace/scripts/evaluation/policy_inference.py \
     --task=LeIsaac-SO101-PickOrange-v0 \
     --eval_rounds=10 \
     --policy_type=gr00tn1.6 \
@@ -620,49 +647,34 @@ python scripts/evaluation/policy_inference.py \
 - `--policy_action_horizon`: Number of action steps per inference (16 for GR00T)
 - `--enable_cameras`: Required for vision-based policies
 
-### 8a.6 Performance Smoke Test
+### 8a.4 Observation and Response Format Reference
 
-```bash
-/workspace/isaaclab/_isaac_sim/python.sh << 'PYEOF'
-import sys, time, numpy as np
-sys.path.insert(0, '/workspace/isaaclab-pkgs')
-from leisaac.policy.service_policy_clients import Gr00t16ServicePolicyClient
+The policy server (`run_gr00t_server.py`) expects nested-dict observations. The modality
+keys come from the checkpoint's `processor_config.json` — for `new_embodiment`:
 
-policy = Gr00t16ServicePolicyClient(
-    host="localhost", port=5555, timeout_ms=5000,
-    camera_keys=["front", "wrist"], modality_keys=["single_arm", "gripper"],
-)
-obs = {
-    "front": np.random.randint(0, 255, (1, 224, 224, 3), dtype=np.uint8),
-    "wrist": np.random.randint(0, 255, (1, 224, 224, 3), dtype=np.uint8),
-    "joint_pos": np.zeros((1, 6), dtype=np.float64),
-    "task_description": "pick up the object",
-}
+| Modality | Keys | Shape | Dtype |
+|---|---|---|---|
+| `video` | `front`, `wrist` | `(B, T, H, W, C)` | `uint8` |
+| `state` | `single_arm`, `gripper` | `(B, T, D)` | `float32` |
+| `language` | `annotation.human.action.task_description` | `list[list[str]]` | — |
 
-# Warm-up
-policy.get_action(obs)
+**Response** (tuple of `action_dict, info_dict`):
+- `action_dict["single_arm"]`: shape `(1, 16, 5)` float32
+- `action_dict["gripper"]`: shape `(1, 16, 1)` float32
 
-# Timed inference
-start = time.perf_counter()
-actions = policy.get_action(obs)
-elapsed = time.perf_counter() - start
-print(f"Inference latency: {elapsed*1000:.1f} ms")
-# Expected: 50-200ms depending on GPU and model size
-PYEOF
-```
+The leisaac `Gr00t16ServicePolicyClient` abstracts this format — it accepts a simpler
+observation dict with `front`, `wrist` (camera images), `joint_pos` (6D state), and
+`task_description` (string), and handles the conversion internally. The `policy_inference.py`
+script uses this client under the hood.
 
-**Notes:**
-- Use `from leisaac.policy.service_policy_clients import Gr00t16ServicePolicyClient`
-  (not `from leisaac.policy import ...`) to avoid triggering `leisaac.__init__` which
-  pulls in simulation-only dependencies (`omni.physics`).
-- The `Gr00t16ServicePolicyClient` uses `joint_pos` (shape `(1,6)`) internally,
-  converting it to `state.single_arm` (5D) + `state.gripper` (1D) for the server.
-- **N1.6 vs N1.5 key difference**: N1.6 uses `annotation.human.action.task_description`
-  internally (N1.5 used `annotation.human.task_description`). The leisaac client abstracts
-  this — just pass `task_description` in the obs dict.
-- For remote testing, replace `localhost` with the DCV instance's private IP.
-- The `policy_inference.py` script is the recommended way to run full closed-loop
-  evaluation. Manual `get_action()` calls are useful for debugging and latency testing.
+> **N1.6 vs N1.5 key difference**: N1.6 uses `annotation.human.action.task_description`
+> (N1.5 used `annotation.human.task_description` — note the extra `.action.` segment).
+
+> **LeIsaac API reference** (`leisaac.policy.service_policy_clients`):
+> - `Gr00t16ServicePolicyClient` — N1.6 policy client (ZMQ, requires `main` branch commit)
+> - `Gr00tServicePolicyClient` — N1.5 policy client (ZMQ, in v0.3.0 tag)
+> - `LeRobotServicePolicyClient` — LeRobot policy client (gRPC)
+> - `OpenPIServicePolicyClient` — OpenPI policy client (WebSocket)
 
 ## Cleanup: Tearing Down Stacks
 

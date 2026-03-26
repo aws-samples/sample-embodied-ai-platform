@@ -212,6 +212,63 @@ docker run --gpus all -d \
 
 Ensure the DCV security group allows inbound TCP 5555 from the client IP. Clients send observations as msgpack-serialized numpy arrays over ZMQ REQ/REP. See the [SKILL.md](SKILL.md) evaluation section for the full observation/response format specification.
 
+### Closed-loop evaluation with LeIsaac
+
+[LeIsaac](https://github.com/LightwheelAI/leisaac) drives an IsaacSim environment and
+feeds observations to the policy server in a closed loop. It is **not** installed by
+default on the DCV instance — set it up when you need to run sim evaluations.
+
+**One-time setup on the DCV instance:**
+
+```bash
+ssh dcv-isaac
+
+# 1. Clone the leisaac repo (for evaluation scripts)
+LEISAAC_COMMIT=d2cbfd2e33517f2094e1904ff817aa17de6e8939
+git clone https://github.com/LightwheelAI/leisaac.git ~/leisaac-repo
+cd ~/leisaac-repo && git checkout $LEISAAC_COMMIT
+
+# 2. Install the leisaac Python package to the persistent IsaacLab package dir
+mkdir -p ~/isaaclab-pkgs
+docker run --rm --gpus all \
+  -e ACCEPT_EULA=Y \
+  -v ~/isaaclab-pkgs:/workspace/isaaclab-pkgs:rw \
+  nvcr.io/nvidia/isaac-lab:2.3.0 \
+  -c "/workspace/isaaclab/_isaac_sim/python.sh -m pip install \
+    --target /workspace/isaaclab-pkgs \
+    'leisaac[gr00t] @ git+https://github.com/LightwheelAI/leisaac.git@${LEISAAC_COMMIT}#subdirectory=source/leisaac'"
+
+# 3. Update run-isaaclab.sh to mount the evaluation scripts
+sudo sed -i '/--network=host/a\  -v $HOME/leisaac-repo/scripts:/workspace/scripts:ro \\' \
+  /usr/local/bin/run-isaaclab.sh
+```
+
+> [!NOTE]
+> The commit SHA must match the version pinned in `dcv/versions.py` for your IsaacSim
+> version. `Gr00t16ServicePolicyClient` (N1.6) was added after the `v0.3.0` tag.
+
+**Run the evaluation** (requires a DCV desktop session for the IsaacSim GUI):
+
+```bash
+# Launch the IsaacLab container from a DCV terminal
+run-isaaclab.sh
+
+# Inside the container:
+/workspace/isaaclab/_isaac_sim/python.sh /workspace/scripts/evaluation/policy_inference.py \
+    --task=LeIsaac-SO101-PickOrange-v0 \
+    --eval_rounds=10 \
+    --policy_type=gr00tn1.6 \
+    --policy_host=localhost \
+    --policy_port=5555 \
+    --policy_action_horizon=16 \
+    --policy_language_instruction="Pick up the orange and place it on the plate" \
+    --device=cuda \
+    --enable_cameras
+```
+
+See [SKILL.md](SKILL.md) Phase 8a for detailed setup instructions, troubleshooting,
+and the observation/response format reference.
+
 ## Configuration (env vars)
 
 See [env.example](env.example) for configuring the training job parameters:
