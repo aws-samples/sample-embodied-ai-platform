@@ -35,8 +35,9 @@ RUN pip install imageio h5py boto3 transformers[torch] deepspeed timm peft \
     albumentations==1.4.18 decord==0.6.0 torchcodec==0.4.0
 
 # PyTorch3D from source (N1.6 requirement)
+# MAX_JOBS=2 limits parallel C++ compilation to avoid OOM in memory-constrained build envs
 RUN cd /opt && git clone https://github.com/facebookresearch/pytorch3d.git && \
-    cd pytorch3d && pip install .
+    cd pytorch3d && MAX_JOBS=2 pip install .
 
 # Clone Isaac-GR00T
 RUN git clone https://github.com/NVIDIA/Isaac-GR00T.git /workspace/gr00t-repo && \
