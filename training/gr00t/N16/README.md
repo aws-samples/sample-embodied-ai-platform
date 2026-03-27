@@ -134,7 +134,7 @@ Batch container exits. No server is needed during training.
 
        export WANDB_BASE_URL=http://localhost:8080
        export WANDB_API_KEY=<your-local-api-key>
-       conda activate isaac
+       source ~/.venv/bin/activate
        wandb sync /mnt/efs/gr00t/checkpoints/<JOB_ID>/wandb/offline-run-*
 
 4. **View loss curves** at `http://<DCV_IP>:8080` in your browser.
@@ -216,23 +216,8 @@ Ensure the DCV security group allows inbound TCP 5555 from the client IP. Client
 
 [LeIsaac](https://github.com/LightwheelAI/leisaac) drives an IsaacSim environment and
 feeds observations to the policy server in a closed loop. The `run-isaaclab.sh` helper
-auto-installs the leisaac package and downloads scene assets on first launch — the only
-manual prerequisite is cloning the evaluation scripts repo.
-
-**One-time setup on the DCV instance:**
-
-```bash
-ssh dcv-isaac
-
-# Clone the leisaac repo (provides scripts/evaluation/policy_inference.py)
-LEISAAC_COMMIT=d2cbfd2e33517f2094e1904ff817aa17de6e8939
-git clone https://github.com/LightwheelAI/leisaac.git ~/leisaac-repo
-cd ~/leisaac-repo && git checkout $LEISAAC_COMMIT
-```
-
-> [!NOTE]
-> The commit SHA must match the version pinned in `dcv/versions.py` for your IsaacSim
-> version. `Gr00t16ServicePolicyClient` (N1.6) was added after the `v0.3.0` tag.
+auto-installs the leisaac package, downloads scene assets, and clones the evaluation
+scripts repo on first launch — no manual prerequisites are needed.
 
 > [!IMPORTANT]
 > **Scene assets**: The `leisaac` pip package only ships empty placeholder directories.
