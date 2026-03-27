@@ -215,37 +215,31 @@ Ensure the DCV security group allows inbound TCP 5555 from the client IP. Client
 ### Closed-loop evaluation with LeIsaac
 
 [LeIsaac](https://github.com/LightwheelAI/leisaac) drives an IsaacSim environment and
-feeds observations to the policy server in a closed loop. It is **not** installed by
-default on the DCV instance — set it up when you need to run sim evaluations.
+feeds observations to the policy server in a closed loop. The `run-isaaclab.sh` helper
+auto-installs the leisaac package and downloads scene assets on first launch — the only
+manual prerequisite is cloning the evaluation scripts repo.
 
 **One-time setup on the DCV instance:**
 
 ```bash
 ssh dcv-isaac
 
-# 1. Clone the leisaac repo (for evaluation scripts)
+# Clone the leisaac repo (provides scripts/evaluation/policy_inference.py)
 LEISAAC_COMMIT=d2cbfd2e33517f2094e1904ff817aa17de6e8939
 git clone https://github.com/LightwheelAI/leisaac.git ~/leisaac-repo
 cd ~/leisaac-repo && git checkout $LEISAAC_COMMIT
-
-# 2. Install the leisaac Python package to the persistent IsaacLab package dir
-mkdir -p ~/isaaclab-pkgs
-docker run --rm --gpus all \
-  -e ACCEPT_EULA=Y \
-  -v ~/isaaclab-pkgs:/workspace/isaaclab-pkgs:rw \
-  nvcr.io/nvidia/isaac-lab:2.3.0 \
-  -c "/workspace/isaaclab/_isaac_sim/python.sh -m pip install \
-    --target /workspace/isaaclab-pkgs \
-    'leisaac[gr00t] @ git+https://github.com/LightwheelAI/leisaac.git@${LEISAAC_COMMIT}#subdirectory=source/leisaac'"
-
-# 3. Update run-isaaclab.sh to mount the evaluation scripts
-sudo sed -i '/--network=host/a\  -v $HOME/leisaac-repo/scripts:/workspace/scripts:ro \\' \
-  /usr/local/bin/run-isaaclab.sh
 ```
 
 > [!NOTE]
 > The commit SHA must match the version pinned in `dcv/versions.py` for your IsaacSim
 > version. `Gr00t16ServicePolicyClient` (N1.6) was added after the `v0.3.0` tag.
+
+> [!IMPORTANT]
+> **Scene assets**: The `leisaac` pip package only ships empty placeholder directories.
+> USD scenes (`kitchen_with_orange/scene.usd`) and robot models (`so101_follower.usd`)
+> are downloaded automatically by `run-isaaclab.sh` from
+> [GitHub releases v0.1.0](https://github.com/LightwheelAI/leisaac/releases/tag/v0.1.0)
+> and persisted at `~/leisaac-assets/`. They are mounted at `/assets` inside the container.
 
 **Run the evaluation** (requires a DCV desktop session for the IsaacSim GUI):
 

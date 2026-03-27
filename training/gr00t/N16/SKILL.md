@@ -484,17 +484,14 @@ session for the IsaacSim GUI.
 
 ### 8a.1 Set Up LeIsaac on the DCV Instance
 
-LeIsaac is **not** installed by default — set it up when you need to run evaluations.
-There are two parts: the Python package (policy client library) and the evaluation
-scripts (from the git repo).
+LeIsaac setup is **automated by `run-isaaclab.sh`** — on first launch it:
+1. Installs the `leisaac[gr00t]` Python package to `~/isaaclab-pkgs` (persistent across container restarts)
+2. Downloads scene assets (USD scenes, robot models) from [GitHub releases v0.1.0](https://github.com/LightwheelAI/leisaac/releases/tag/v0.1.0) to `~/leisaac-assets`
+3. Mounts evaluation scripts from `~/leisaac-repo/scripts` into the container
 
-**SSH into the DCV instance:**
+**One-time prerequisite — clone the leisaac repo** (provides `scripts/evaluation/policy_inference.py`):
 ```bash
 ssh dcv-isaac
-```
-
-**Step 1 — Clone the leisaac repo** (provides `scripts/evaluation/policy_inference.py`):
-```bash
 LEISAAC_COMMIT=d2cbfd2e33517f2094e1904ff817aa17de6e8939
 git clone https://github.com/LightwheelAI/leisaac.git ~/leisaac-repo
 cd ~/leisaac-repo && git checkout $LEISAAC_COMMIT
@@ -504,46 +501,31 @@ cd ~/leisaac-repo && git checkout $LEISAAC_COMMIT
 > version. The `Gr00t16ServicePolicyClient` (N1.6) was added after the `v0.3.0` tag and
 > only exists on `main`.
 
-**Step 2 — Install the leisaac Python package** to a persistent directory that gets
-mounted into the IsaacLab container:
+**Verify the setup** (after running `run-isaaclab.sh` at least once):
 ```bash
-mkdir -p ~/isaaclab-pkgs
-docker run --rm --gpus all \
-  -e ACCEPT_EULA=Y \
-  -v ~/isaaclab-pkgs:/workspace/isaaclab-pkgs:rw \
-  nvcr.io/nvidia/isaac-lab:2.3.0 \
-  -c "/workspace/isaaclab/_isaac_sim/python.sh -m pip install \
-    --target /workspace/isaaclab-pkgs \
-    'leisaac[gr00t] @ git+https://github.com/LightwheelAI/leisaac.git@${LEISAAC_COMMIT}#subdirectory=source/leisaac'"
-```
-
-> **Why `python.sh`?** The IsaacLab container's Python is at
-> `/workspace/isaaclab/_isaac_sim/python.sh` (an Isaac Sim wrapper). It is not on `$PATH`
-> as `python`. All pip/python commands inside this container must use this wrapper.
-
-**Step 3 — Update `run-isaaclab.sh`** to mount the evaluation scripts and fix
-an unbound variable:
-```bash
-# Mount leisaac scripts into the container
-sudo sed -i '/--network=host/a\  -v $HOME/leisaac-repo/scripts:/workspace/scripts:ro \\' \
-  /usr/local/bin/run-isaaclab.sh
-
-# Fix PYTHONPATH unbound variable (set -u trips on empty PYTHONPATH)
-sudo sed -i 's|-e PYTHONPATH=/workspace/isaaclab-pkgs:$PYTHONPATH|-e PYTHONPATH=/workspace/isaaclab-pkgs:${PYTHONPATH:-}|' \
-  /usr/local/bin/run-isaaclab.sh
-```
-
-**Verify the setup:**
-```bash
-grep 'leisaac-repo/scripts' /usr/local/bin/run-isaaclab.sh
-# Expected: -v $HOME/leisaac-repo/scripts:/workspace/scripts:ro \
-
-grep 'PYTHONPATH:-' /usr/local/bin/run-isaaclab.sh
-# Expected: -e PYTHONPATH=/workspace/isaaclab-pkgs:${PYTHONPATH:-}
-
+# Confirm leisaac package installed
 grep "class Gr00t16ServicePolicyClient" ~/isaaclab-pkgs/leisaac/policy/service_policy_clients.py
 # Expected: class Gr00t16ServicePolicyClient(ZMQServicePolicy):
+
+# Confirm scene assets downloaded
+ls ~/leisaac-assets/scenes/kitchen_with_orange/scene.usd
+# Expected: file exists
+
+# Confirm robot USD downloaded
+ls ~/leisaac-assets/robots/so101_follower.usd
+# Expected: file exists
 ```
+
+> **Scene assets**: The `leisaac` pip package only ships empty `.gitkeep` placeholders in
+> `assets/{scenes,robots}/`. The actual USD scenes and robot models are distributed as
+> [GitHub release artifacts](https://github.com/LightwheelAI/leisaac/releases/tag/v0.1.0)
+> and must be downloaded separately. `run-isaaclab.sh` handles this automatically.
+
+> **X11 forwarding**: `run-isaaclab.sh` runs `xhost +local:docker` and mounts the DCV
+> xauth file (at `/run/user/1000/dcv/console.xauth`) into the container, following the
+> [official IsaacLab Docker pattern](https://github.com/isaac-sim/IsaacLab/blob/main/docs/source/deployment/docker.rst).
+> DCV does **not** write `~/.Xauthority` — the bootstrap script copies the DCV xauth there
+> so the Docker bind mount finds a file (not a directory).
 
 ### 8a.2 Verify the Policy Server (Direct Test)
 

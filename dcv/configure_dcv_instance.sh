@@ -147,6 +147,14 @@ else
   echo "DCV session ${SESSION_ID} already exists."
 fi
 
+# Copy DCV xauth to ~/.Xauthority so Docker can mount it as a file.
+# DCV writes its X11 cookie to /run/user/1000/dcv/console.xauth (not ~/.Xauthority).
+# Without this, Docker bind-mounting ~/.Xauthority creates a directory instead.
+if [[ -f /run/user/1000/dcv/console.xauth ]]; then
+  cp /run/user/1000/dcv/console.xauth /home/${owner}/.Xauthority
+  chown ${owner}:${owner} /home/${owner}/.Xauthority
+fi
+
 # Optional: GUI tweaks (non-fatal)
 sudo -u "${owner}" dbus-launch gsettings set org.gnome.desktop.lockdown disable-lock-screen true || true
 sudo -u "${owner}" dbus-launch gsettings set org.gnome.desktop.interface gtk-theme Yaru-dark || true
