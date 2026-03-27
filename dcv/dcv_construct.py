@@ -304,10 +304,13 @@ class DcvWorkstation(Construct):
         # cross-stack EFS ID token at deploy time.
         if props.efs_id:
             self._user_data.add_commands(
-                "apt-get install -y -qq amazon-efs-utils || true",
                 "mkdir -p /mnt/efs",
-                f"grep -q '{props.efs_id}' /etc/fstab || echo '{props.efs_id}:/ /mnt/efs efs _netdev,tls 0 0' >> /etc/fstab",
-                "mount -a",
+                # nofail prevents boot hang if DNS is not ready at fstab mount time.
+                # efs-ensure-mount.service (installed below) retries after network-online.target.
+                f"grep -q '{props.efs_id}' /etc/fstab || echo '{props.efs_id}:/ /mnt/efs efs _netdev,tls,nofail 0 0' >> /etc/fstab",
+                # Install the retry-mount service (function defined in configure_dcv_instance.sh)
+                "install_efs_ensure_mount_service",
+                "mount /mnt/efs || true",
                 "chown ubuntu:ubuntu /mnt/efs || true",
             )
 
@@ -356,6 +359,16 @@ class DcvWorkstation(Construct):
             '    cat <<DCVEOF >>/etc/dcv/dcv.conf',
             '[display/linux]',
             'disable-local-console=false',
+            'DCVEOF',
+            '  fi',
+            # Auto-create a console session on every DCV server start (covers stop/start).
+            # Console sessions attach to GDM3 which provides the GNOME desktop automatically.
+            '  if ! grep -q "\\[session-management/automatic-console-session\\]" /etc/dcv/dcv.conf; then',
+            '    cat <<DCVEOF >>/etc/dcv/dcv.conf',
+            '',
+            '[session-management/automatic-console-session]',
+            'create-session = true',
+            'owner = ubuntu',
             'DCVEOF',
             '  fi',
             '  systemctl restart dcvserver || true',

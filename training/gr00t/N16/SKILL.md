@@ -730,7 +730,9 @@ aws efs delete-file-system --file-system-id $EFS_ID
 SSH in and check `sudo cat /var/lib/cloud/instance/scripts/part-001` for the full script.
 Re-run with `sudo bash /var/lib/cloud/instance/scripts/part-001`.
 
-**SSM "TargetNotConnected":** The instance is booting. Wait 60-90 seconds and retry.
+**SSM "TargetNotConnected":** The instance is booting or the SSM agent is still registering.
+Wait 3-5 minutes after instance start and retry — the SSM agent retries credential acquisition
+on boot, so `TargetNotConnected` is transient and not a sign of a broken instance.
 
 **CDK destroy "Cannot delete export":** Happens when destroying Batch before DCV.
 Always destroy DCV first.
@@ -757,3 +759,35 @@ check detailed logs: `grep -A 50 "pull-isaaclab-container" /var/log/dcv-bootstra
 **LeIsaac import fails inside container:** Verify the persistent package dir is mounted:
 `ls /workspace/isaaclab-pkgs/.leisaac-installed`. If missing, the auto-install didn't run —
 exit the container and run `run-isaaclab.sh` again (it retries on each launch).
+
+**EFS not mounted after instance stop/start:** The `efs-ensure-mount.service` systemd unit
+(installed by the bootstrap) retries the mount after `network-online.target`. If you deployed
+before this fix was added, mount manually:
+```bash
+sudo mount -t nfs4 -o nfsvers=4.1 fs-<ID>.efs.us-west-2.amazonaws.com:/ /mnt/efs
+```
+New deployments use `nofail` in fstab (boot doesn't hang) plus `efs-ensure-mount.service`
+(retries up to 10 × 10 s after the network is ready).
+
+**DCV "no session available" after stop/start:** For new deployments, `dcv_construct.py`
+writes `create-session = true` under `[session-management/automatic-console-session]` in
+`/etc/dcv/dcv.conf`, so DCV auto-creates a console session on every server start. For
+existing instances, apply manually then restart:
+```bash
+sudo sed -i '/\[session-management\/automatic-console-session\]/,/\[/{s/^#create-session = true/create-session = true/}' /etc/dcv/dcv.conf
+# If the section is absent entirely:
+printf '\n[session-management/automatic-console-session]\ncreate-session = true\nowner = ubuntu\n' | sudo tee -a /etc/dcv/dcv.conf
+sudo systemctl restart dcvserver
+```
+
+**IsaacLab container cache dirs owned by root:** `run-isaaclab.sh` creates cache dirs
+(`~/docker/isaac-sim/cache/...`) on first run; if a prior `docker run` created them as root,
+subsequent runs fail with "permission denied". Fix:
+```bash
+sudo chown -R ubuntu:ubuntu ~/docker/ ~/isaaclab-pkgs/
+```
+
+**N1.6 CodeBuild fails: `cc1plus` killed (OOM):** PyTorch3D's C++ compilation exhausts
+CodeBuild LARGE's 15 GB RAM when all 8 ninja workers run in parallel. The fix
+(`MAX_JOBS=2` in `N16/Dockerfile`) was applied in commit `41277b3`. If you see
+`fatal error: Killed signal terminated program cc1plus`, rebuild — the fix is already in.

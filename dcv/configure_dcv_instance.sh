@@ -268,5 +268,34 @@ must "install-cfn-bootstrap" '
   test -x /usr/local/bin/cfn-signal
 '
 
+# Install a systemd service that ensures /mnt/efs is mounted after network is ready.
+# This handles stop/start scenarios where DNS resolution may fail during the early
+# fstab mount phase (network.target vs network-online.target timing).
+install_efs_ensure_mount_service() {
+  cat >/etc/systemd/system/efs-ensure-mount.service <<'EOF'
+[Unit]
+Description=Ensure /mnt/efs is mounted after network is available
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Retry up to 10 times (10 x 10s = ~100s) until the mount is established
+ExecStart=/bin/bash -c '\
+  for i in $(seq 1 10); do \
+    mount | grep -q " /mnt/efs " && exit 0; \
+    mount /mnt/efs 2>/dev/null && exit 0; \
+    sleep 10; \
+  done; \
+  mount /mnt/efs'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl enable efs-ensure-mount.service
+}
+
 # DCV desktop, container pull, host tools, EFS mount, cfn-signal, and ALL_DONE
 # are handled dynamically by dcv_construct.py add_commands.
