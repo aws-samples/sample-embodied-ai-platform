@@ -81,9 +81,29 @@ npx cdk deploy IsaacGr00tBatchStack --require-approval=never
 npx cdk deploy IsaacLabDcvStack --require-approval=never
 ```
 
-After each deploy, capture the stack outputs — you'll need them for SSH setup and later
-operations. Key outputs include instance ID, Elastic IP, EFS ID, ECR URI, checkpoint S3
-path, and DCV credentials.
+After both deploys complete, capture the stack outputs — you'll need them for SSH setup,
+job submission, and evaluation. Save these as shell variables for use in later phases:
+
+```bash
+# Capture all outputs into shell variables
+eval "$(aws cloudformation describe-stacks --stack-name IsaacGr00tBatchStack \
+  --query 'Stacks[0].Outputs[].[join(`=`,[OutputKey,OutputValue])]' --output text \
+  | sed 's/^/export /')"
+eval "$(aws cloudformation describe-stacks --stack-name IsaacLabDcvStack \
+  --query 'Stacks[0].Outputs[].[join(`=`,[OutputKey,OutputValue])]' --output text \
+  | sed 's/^/export /')"
+
+# Verify key values are set
+echo "Instance ID: $InstanceId"
+echo "Elastic IP:  $InstancePublicIP"
+echo "ECR URI:     $EcrImageUri"
+echo "EFS ID:      $EFSFileSystemId"
+echo "DCV URL:     $DCVWebURL"
+echo "DCV Creds:   $DCVCredentials"
+```
+
+> The variable names match the CDK `CfnOutput` keys exactly (PascalCase). These are used
+> in later phases as `$InstanceId`, `$InstancePublicIP`, `$EcrImageUri`, etc.
 
 ## Phase 4: Monitor Bootstrap Completion
 
@@ -93,18 +113,18 @@ CloudFormation stack waits for a cfn-signal before marking CREATE_COMPLETE. Moni
 progress via SSM (no SSH needed yet).
 
 ```bash
-INSTANCE_ID=<instance-id-from-stack-outputs>
+# Uses $InstanceId from Phase 3 output capture
 
 # Check progress (repeat every 2-3 minutes)
 CMD_ID=$(aws ssm send-command \
-  --instance-ids $INSTANCE_ID \
+  --instance-ids $InstanceId \
   --document-name AWS-RunShellScript \
   --parameters 'commands=["cat /var/log/dcv-bootstrap.summary 2>/dev/null || echo BOOTSTRAP_NOT_STARTED"]' \
   --output text --query 'Command.CommandId') \
 && sleep 5 \
 && aws ssm get-command-invocation \
   --command-id $CMD_ID \
-  --instance-id $INSTANCE_ID \
+  --instance-id $InstanceId \
   --query 'StandardOutputContent' --output text
 ```
 
@@ -138,7 +158,7 @@ CMD_ID=$(aws ssm send-command \
 && sleep 5 \
 && aws ssm get-command-invocation \
   --command-id $CMD_ID \
-  --instance-id $INSTANCE_ID \
+  --instance-id $InstanceId \
   --query 'StandardOutputContent' --output text
 ```
 
@@ -158,29 +178,33 @@ If missing: Ubuntu/Debian `sudo dpkg -i session-manager-plugin.deb`, macOS `brew
 ### 5b. Push SSH public key to the instance
 
 ```bash
-INSTANCE_ID=<instance-id>
+# Generate SSH key if you don't have one
+test -f ~/.ssh/id_ed25519.pub || ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N ""
+
+# Uses $InstanceId from Phase 3 output capture
 PUBKEY=$(cat ~/.ssh/id_ed25519.pub)
 
 aws ssm send-command \
-  --instance-ids $INSTANCE_ID \
+  --instance-ids $InstanceId \
   --document-name AWS-RunShellScript \
   --parameters "commands=[\"mkdir -p /home/ubuntu/.ssh && echo '$PUBKEY' > /home/ubuntu/.ssh/authorized_keys && chmod 700 /home/ubuntu/.ssh && chmod 600 /home/ubuntu/.ssh/authorized_keys && chown -R ubuntu:ubuntu /home/ubuntu/.ssh\"]" \
   --output text --query 'Command.CommandId'
 ```
 
-If the user doesn't have an SSH key pair yet: `ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N ""`
-
 ### 5c. Configure SSH config
 
-Add or update this entry in `~/.ssh/config`:
+Add or update this entry in `~/.ssh/config` (substitute your instance ID and region):
 
 ```
 Host dcv-isaac
-  HostName <instance-id>
+  HostName <InstanceId from Phase 3>
   User ubuntu
   IdentityFile ~/.ssh/id_ed25519
-  ProxyCommand aws ssm start-session --target %h --document-name AWS-StartSSHSession --parameters 'portNumber=%p' --region us-west-2
+  ProxyCommand aws ssm start-session --target %h --document-name AWS-StartSSHSession --parameters 'portNumber=%p' --region <your-region>
 ```
+
+> Replace `<InstanceId from Phase 3>` with the value of `$InstanceId` and `<your-region>`
+> with your deployment region (e.g. `us-west-2`).
 
 ### 5d. Test the connection
 
@@ -737,6 +761,18 @@ seconds. This only affects the first deploy.
 **Helper script not found:** If `run-isaaclab.sh` doesn't exist, check the bootstrap
 summary for `create-helper-script` status. If missing, the container setup step failed —
 check detailed logs: `grep -A 50 "pull-isaaclab-container" /var/log/dcv-bootstrap.log`.
+
+**LeIsaac `KeyError: 0` during eval:** The leisaac `Gr00t16ServicePolicyClient` at commit
+`d2cbfd2` has a bug: it sends `annotation.human.task_description` but N1.6 expects
+`annotation.human.action.task_description` (note the `.action.` segment). The GR00T server's
+strict validation fails, returns `{"error": "..."}` dict, and the client's `action_chunk[0]`
+raises `KeyError: 0` on the dict. `run-isaaclab.sh` auto-patches this after install via `sed`.
+If you installed leisaac manually, apply the fix:
+```bash
+sed -i 's/"annotation.human.task_description"/"annotation.human.action.task_description"/' \
+  ~/isaaclab-pkgs/leisaac/policy/service_policy_clients.py
+```
+Upstream issue: https://github.com/LightwheelAI/leisaac/issues/145
 
 **LeIsaac import fails inside container:** Verify the persistent package dir is mounted:
 `ls /workspace/isaaclab-pkgs/.leisaac-installed`. If missing, the auto-install didn't run —

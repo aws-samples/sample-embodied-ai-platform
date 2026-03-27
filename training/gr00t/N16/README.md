@@ -260,6 +260,13 @@ run-isaaclab.sh
     --enable_cameras
 ```
 
+> [!WARNING]
+> **LeIsaac N1.6 language key bug**: The `Gr00t16ServicePolicyClient` at the pinned commit
+> sends the wrong language key (`annotation.human.task_description` instead of
+> `annotation.human.action.task_description`). This causes a cryptic `KeyError: 0` during
+> evaluation. `run-isaaclab.sh` auto-patches this after install. If you installed leisaac
+> manually, see the troubleshooting section in [SKILL.md](SKILL.md).
+
 See [SKILL.md](SKILL.md) Phase 8a for detailed setup instructions, troubleshooting,
 and the observation/response format reference.
 
