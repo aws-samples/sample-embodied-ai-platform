@@ -90,6 +90,14 @@ npx cdk deploy IsaacGr00tBatchStack --require-approval=never
 npx cdk deploy IsaacLabDcvStack --require-approval=never
 ```
 
+> **GPU capacity:** `g6.2xlarge` and `g6.4xlarge` can be exhausted in popular AZs.
+> If you hit `InsufficientInstanceCapacity`, edit `training/gr00t/infra/app.py`:
+> 1. Try a different `availability_zone` (`us-west-2b`, `us-west-2c`, etc.)
+> 2. Fall back to `g5.2xlarge` or `g6e.xlarge` (At least 32GiB memory is required
+>    to run GR00T server and simulation at the same time)
+> 3. Redeploy with `npx cdk deploy IsaacLabDcvStack` (which also updates BatchStack
+>    cross-stack exports for the new AZ's subnet)
+
 After both deploys complete, capture the stack outputs as shell variables for later phases.
 The jq approach handles values with spaces safely (unlike `eval`-based approaches):
 
@@ -268,7 +276,9 @@ Exit the container with `exit` or Ctrl-D.
 ### 7a. Verify container image is ready
 
 The Batch stack triggers a CodeBuild project that builds and pushes the training container
-to ECR. This takes ~15 minutes for N1.6 (PyTorch3D compilation). Check the build status:
+to ECR. This takes ~15 minutes for N1.6 (PyTorch3D compilation). **Note:** Redeploying
+BatchStack auto-triggers a new CodeBuild run that may fail due to transient Docker Hub
+rate limits — check for a recent successful build, not just the latest build status:
 
 ```bash
 aws codebuild batch-get-projects --names "$CodeBuildProjectName" \

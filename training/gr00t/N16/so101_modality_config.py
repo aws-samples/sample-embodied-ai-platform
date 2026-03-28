@@ -45,7 +45,7 @@ so101_config = {
     ),
     "language": ModalityConfig(
         delta_indices=[0],
-        modality_keys=["annotation.human.action.task_description"],
+        modality_keys=["annotation.human.task_description"],
     ),
 }
 

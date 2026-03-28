@@ -203,7 +203,6 @@ class DcvWorkstation(Construct):
 
         # Pull the NVIDIA IsaacLab container from NGC
         self._user_data.add_commands(
-            '# === Container Setup (dynamic, from CDK) ===',
             f'must "pull-isaaclab-container" "docker pull {container_image}"',
         )
 
@@ -224,47 +223,22 @@ class DcvWorkstation(Construct):
             'MARKER="$PKGS_DIR/.leisaac-installed"',
             'ASSETS_DIR="/home/ubuntu/leisaac-assets"',
             'ASSETS_MARKER="$ASSETS_DIR/.assets-downloaded"',
-            '',
-            '# Create cache directories for persistent NVIDIA/Isaac caches',
-            'mkdir -p ~/docker/isaac-sim/cache/kit',
-            'mkdir -p ~/docker/isaac-sim/cache/ov',
-            'mkdir -p ~/docker/isaac-sim/cache/pip',
-            'mkdir -p ~/docker/isaac-sim/cache/glcache',
-            'mkdir -p ~/docker/isaac-sim/cache/computecache',
-            'mkdir -p ~/docker/isaac-sim/logs',
-            'mkdir -p ~/docker/isaac-sim/data',
-            'mkdir -p ~/docker/isaac-sim/documents',
-            '',
-            '# Create persistent package directory',
+            'mkdir -p ~/docker/isaac-sim/cache/kit ~/docker/isaac-sim/cache/ov',
+            'mkdir -p ~/docker/isaac-sim/cache/pip ~/docker/isaac-sim/cache/glcache',
+            'mkdir -p ~/docker/isaac-sim/cache/computecache ~/docker/isaac-sim/logs',
+            'mkdir -p ~/docker/isaac-sim/data ~/docker/isaac-sim/documents',
             'mkdir -p "$PKGS_DIR"',
-            '',
-            '# Auto-install leisaac on first launch (skips if already installed)',
-            '# Uses git commit SHA (not PyPI tag) — Gr00t16ServicePolicyClient was added',
-            '# after the v0.3.0 release tag. Uses the Isaac Sim python.sh pip wrapper.',
             'if [[ ! -f "$MARKER" ]]; then',
-            '  echo "Installing leisaac @${LEISAAC_COMMIT} to persistent volume..."',
             '  docker run --rm --gpus all \\',
             '    -e ACCEPT_EULA=Y \\',
             '    -e PYTHONPATH=/workspace/isaaclab-pkgs \\',
             '    -v "$PKGS_DIR":/workspace/isaaclab-pkgs:rw \\',
             '    "$CONTAINER_IMAGE" \\',
             '    -c "/workspace/isaaclab/_isaac_sim/python.sh -m pip install --target /workspace/isaaclab-pkgs \'leisaac[gr00t] @ git+https://github.com/LightwheelAI/leisaac.git@${LEISAAC_COMMIT}#subdirectory=source/leisaac\' && touch /workspace/isaaclab-pkgs/.leisaac-installed"',
-            '',
-            '  # Patch leisaac Gr00t16ServicePolicyClient: fix N1.6 language key',
-            '  # (upstream bug: uses annotation.human.task_description instead of',
-            '  #  annotation.human.action.task_description — see https://github.com/LightwheelAI/leisaac/issues/145)',
-            '  POLICY_FILE="$PKGS_DIR/leisaac/policy/service_policy_clients.py"',
-            '  if [[ -f "$POLICY_FILE" ]]; then',
-            '    sed -i \'s/"annotation.human.task_description"/"annotation.human.action.task_description"/\' "$POLICY_FILE"',
-            '    echo "Patched leisaac Gr00t16ServicePolicyClient language key for N1.6"',
-            '  fi',
+            '  # Fix root-owned files from docker run (container runs as root)',
+            '  sudo chown -R ubuntu:ubuntu "$PKGS_DIR"',
             'fi',
-            '',
-            '# Auto-download LeIsaac scene assets from GitHub releases (skips if already downloaded)',
-            '# The pip package only ships empty .gitkeep placeholders — actual USD scenes and',
-            '# robot models must be downloaded separately.',
             'if [[ ! -f "$ASSETS_MARKER" ]]; then',
-            '  echo "Downloading LeIsaac scene assets from GitHub releases..."',
             '  mkdir -p "$ASSETS_DIR/scenes" "$ASSETS_DIR/robots"',
             '  curl -fsSL -o /tmp/kitchen_with_orange.zip \\',
             '    https://github.com/LightwheelAI/leisaac/releases/download/v0.1.0/kitchen_with_orange.zip',
@@ -274,32 +248,16 @@ class DcvWorkstation(Construct):
             '    https://github.com/LightwheelAI/leisaac/releases/download/v0.1.0/so101_follower.usd',
             '  touch "$ASSETS_MARKER"',
             'fi',
-            '',
-            '# Auto-clone leisaac repo (provides scripts/evaluation/policy_inference.py)',
-            '# Follows the same auto-install pattern as the pip package and asset downloads.',
             'SCRIPTS_DIR="/home/ubuntu/leisaac-repo"',
             'if [[ ! -d "$SCRIPTS_DIR/scripts" ]]; then',
-            '  echo "Cloning leisaac repo @${LEISAAC_COMMIT}..."',
             '  git clone https://github.com/LightwheelAI/leisaac.git "$SCRIPTS_DIR"',
             '  cd "$SCRIPTS_DIR" && git checkout "$LEISAAC_COMMIT"',
             'fi',
-            '',
-            '# X11 forwarding (aligned with official IsaacLab Docker pattern: xhost + / -e DISPLAY / -v .Xauthority)',
-            '# DCV stores xauth at /run/user/1000/dcv/console.xauth, not ~/.Xauthority.',
-            '# xhost +local:docker allows local connections without xauth file dependency.',
             'xhost +local:docker 2>/dev/null || true',
-            '',
             'XAUTH_FILE="/run/user/1000/dcv/console.xauth"',
-            'if [[ ! -f "$XAUTH_FILE" ]]; then',
-            '  XAUTH_FILE="$HOME/.Xauthority"',
-            'fi',
-            '',
-            '# Build Xauthority mount only if the file exists (avoids Docker creating a directory)',
+            'if [[ ! -f "$XAUTH_FILE" ]]; then XAUTH_FILE="$HOME/.Xauthority"; fi',
             'XAUTH_MOUNT=""',
-            'if [[ -f "$XAUTH_FILE" ]]; then',
-            '  XAUTH_MOUNT="-v $XAUTH_FILE:/root/.Xauthority:ro"',
-            'fi',
-            '',
+            'if [[ -f "$XAUTH_FILE" ]]; then XAUTH_MOUNT="-v $XAUTH_FILE:/root/.Xauthority:ro"; fi',
             'docker run \\',
             '  --name "$SESSION_NAME" \\',
             '  --entrypoint bash \\',
@@ -333,14 +291,12 @@ class DcvWorkstation(Construct):
 
         # Create persistent package directory for container volume mount
         self._user_data.add_commands(
-            '# === Persistent Package Volume (Phase 2) ===',
             'mkdir -p /home/ubuntu/isaaclab-pkgs',
             'chown ubuntu:ubuntu /home/ubuntu/isaaclab-pkgs',
         )
 
         # Install uv package manager for ubuntu user
         self._user_data.add_commands(
-            '# === Host Utilities (Phase 2) ===',
             'su - ubuntu -c "curl -LsSf https://astral.sh/uv/install.sh | sh"',
         )
 
@@ -377,7 +333,6 @@ class DcvWorkstation(Construct):
         # ================================================================
 
         self._user_data.add_commands(
-            '# === DCV Desktop (Phase 3 — last application installed) ===',
             'must "install-desktop" \'',
             '  apt_install ubuntu-desktop gdm3 dbus-x11',
             '  sed -i "s/^#\\(WaylandEnable=false\\)/\\1/" /etc/gdm3/custom.conf || true',
@@ -504,7 +459,7 @@ class DcvWorkstation(Construct):
         cfn_instance.cfn_options.creation_policy = CfnCreationPolicy(
             resource_signal=CfnResourceSignal(
                 count=1,
-                timeout="PT60M"  # D-05: 60 min timeout (container pull + DCV desktop install)
+                timeout="PT20M"  # observed ~13 min; 25 min gives buffer for slow NGC pulls
             )
         )
 
@@ -514,19 +469,16 @@ class DcvWorkstation(Construct):
         region = Stack.of(self).region
 
         self._user_data.add_commands(
-            '# === CloudFormation Signal (Phase 3) ===',
             f'/usr/local/bin/cfn-signal --stack {stack_name} --resource {logical_id} --region {region} -e 0 || true',
             'echo "STEP_OK:cfn-signal" >> "$SUMMARY"',
         )
 
         self._user_data.add_commands(
-            '# === ALL_DONE Marker (Phase 3) ===',
             'date -Iseconds > /var/lib/dcv-bootstrap/ALL_DONE',
             'log "Bootstrap complete. ALL_DONE marker written."',
         )
 
         self._user_data.add_commands(
-            '# === Final Summary ===',
             'log "==== SUMMARY (also in $SUMMARY) ===="',
             'cat "$SUMMARY" || true',
         )
