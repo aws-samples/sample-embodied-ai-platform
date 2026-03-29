@@ -4,10 +4,10 @@ Verify the policy server responds to inference requests before launching the ful
 This uses GR00T's own `PolicyClient` from the training container (not the leisaac client,
 which requires a running IsaacSim process to import — see note below).
 
-## Run the test
+## N1.6 Test
 
 ```bash
-ECR_URI=$EcrImageUri   # From Phase 3 output capture
+ECR_URI=$EcrImageUri   # From Phase 3 output capture (gr00t-finetune:6)
 
 ssh dcv-isaac "docker run --rm --network=host \
   --entrypoint /bin/sh \
@@ -37,6 +37,45 @@ for k, v in result[0].items():
 print(\\\"Policy server test PASSED\\\")
 \"'"
 ```
+
+> **N1.6 only:** Uses `--entrypoint /bin/sh`, `.venv/bin/python`, and the
+> `annotation.human.action.task_description` language key.
+
+## N1.5 Test
+
+```bash
+ECR_URI=$EcrImageUri   # From Phase 3 output capture (gr00t-finetune:latest)
+
+ssh dcv-isaac "docker run --rm --network=host \
+  --entrypoint python \
+  $ECR_URI \
+  -c '
+import numpy as np
+from gr00t.policy.server_client import PolicyClient
+
+client = PolicyClient(host=\"localhost\", port=5555)
+obs = {
+    \"video\": {
+        \"front\": np.random.randint(0, 255, (1, 1, 224, 224, 3), dtype=np.uint8),
+        \"wrist\": np.random.randint(0, 255, (1, 1, 224, 224, 3), dtype=np.uint8),
+    },
+    \"state\": {
+        \"single_arm\": np.zeros((1, 1, 5), dtype=np.float32),
+        \"gripper\": np.zeros((1, 1, 1), dtype=np.float32),
+    },
+    \"language\": {
+        \"annotation.human.task_description\": [[\"pick up the orange\"]],
+    },
+}
+result = client.get_action(obs)
+for k, v in result[0].items():
+    print(f\"{k}: shape={v.shape}, dtype={v.dtype}\")
+print(\"Policy server test PASSED\")
+'"
+```
+
+> **N1.5 only:** Uses `--entrypoint python` (system Python) and the
+> `annotation.human.task_description` language key (no `.action.` segment).
 
 ## Expected output
 

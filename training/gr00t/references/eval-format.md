@@ -1,4 +1,4 @@
-# N1.6 Observation and Response Format Reference
+# Observation and Response Format Reference
 
 ## Table of Contents
 

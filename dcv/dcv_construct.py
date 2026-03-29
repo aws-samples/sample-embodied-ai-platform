@@ -216,7 +216,7 @@ class DcvWorkstation(Construct):
             f"cat > /usr/local/bin/run-isaaclab.sh << 'HELPER_EOF'",
             '#!/bin/bash',
             'set -euo pipefail',
-            f'CONTAINER_IMAGE="{container_image}"',
+            f'CONTAINER_IMAGE="${{ISAAC_LAB_IMAGE:-{container_image}}}"',
             'SESSION_NAME="isaac-lab"',
             f'LEISAAC_COMMIT="{leisaac_commit}"',
             'PKGS_DIR="/home/ubuntu/isaaclab-pkgs"',
@@ -301,8 +301,9 @@ class DcvWorkstation(Construct):
         )
 
         # Create host venv with tensorboard and wandb
+        # --seed: pre-installs setuptools+pip+wheel
         self._user_data.add_commands(
-            'su - ubuntu -c "/home/ubuntu/.local/bin/uv venv /home/ubuntu/.venv"',
+            'su - ubuntu -c "/home/ubuntu/.local/bin/uv venv --seed /home/ubuntu/.venv"',
             'su - ubuntu -c "/home/ubuntu/.local/bin/uv pip install --python /home/ubuntu/.venv/bin/python tensorboard wandb"',
         )
 
@@ -476,6 +477,11 @@ class DcvWorkstation(Construct):
         self._user_data.add_commands(
             'date -Iseconds > /var/lib/dcv-bootstrap/ALL_DONE',
             'log "Bootstrap complete. ALL_DONE marker written."',
+            # Reboot to load the NVIDIA kernel module. cfn-signal was already sent,
+            # so CloudFormation marks CREATE_COMPLETE before the instance goes down.
+            # The driver persists — subsequent stop/start cycles don't need this.
+            'log "Rebooting to activate NVIDIA kernel module..."',
+            'shutdown -r +1 "Bootstrap complete — rebooting for NVIDIA driver"',
         )
 
         self._user_data.add_commands(

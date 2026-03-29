@@ -6,6 +6,10 @@ Fine-tune NVIDIA Isaac GR00T VLA models using teleoperation/simulation datasets.
 
 - Component docs (this): [README.md](README.md)
 - Infrastructure and deployment: [infra/README.md](infra/README.md)
+- N1.5 deployment guide (agent): [SKILL.md](SKILL.md)
+- N1.6 deployment guide (agent): [N16/SKILL.md](N16/SKILL.md)
+- Observation/response format: [references/eval-format.md](references/eval-format.md)
+- Troubleshooting: [references/troubleshooting.md](references/troubleshooting.md)
 - Workflow scripts: [run_finetune_workflow.sh](run_finetune_workflow.sh), [finetune_gr00t.py](finetune_gr00t.py)
 
 ## Deployment
@@ -17,17 +21,26 @@ See [infra/README.md](infra/README.md).
 ```text
 training/gr00t/
 ├── README.md                  # GR00T training overview
-├── Dockerfile                 # Training container
+├── SKILL.md                   # N1.5 deployment guide (agent automation)
+├── Dockerfile                 # N1.5 training container
 ├── build_container.sh         # Build/test/push helper
 ├── env.example                # Example environment variables
-├── finetune_gr00t.py          # GR00T training script
+├── finetune_gr00t.py          # GR00T N1.5 training script
 ├── run_finetune_workflow.sh   # Entrypoint: dataset, auth, uploads
+├── so101_modality_config.py   # SO-101 modality config for evaluation
+├── references/                # Shared reference docs (N1.5 + N1.6)
+│   ├── eval-format.md         # Observation/response format reference
+│   ├── policy-server-test.md  # Direct policy server test
+│   └── troubleshooting.md     # Common issues and fixes
+├── N16/                       # N1.6-specific files
+│   ├── SKILL.md               # N1.6 deployment guide (agent automation)
+│   ├── Dockerfile             # N1.6 training container
+│   └── ...
 └── infra/                     # AWS CDK stacks for Batch and DCV
     ├── README.md              # Deployment guide (paths 1–3, troubleshooting)
-    ├── app.py
+    ├── app.py                 # CDK entry point (N1.5 default, edit for N1.6)
     ├── batch_stack.py
-    ├── dcv_stack.py
-    ├── configure_dcv_instance.sh
+    ├── codebuild_stack.py
     ├── requirements.txt
     ├── cdk.json               # Context (VPC/EFS/SG IDs) when importing existing resources
     └── architecture.drawio.png
@@ -111,6 +124,18 @@ aws logs tail /aws/batch/job --follow \
 ```
 
 > Default: 6000 steps (~2 hours on g6e.4xlarge using the provided dataset). Checkpoints saved every 2000 steps at `/mnt/efs/gr00t/checkpoints`.
+
+## Evaluation
+
+After training, evaluate checkpoints using the policy server and LeIsaac simulation:
+
+- **N1.5**: Closed-loop policy server with TensorBoard visualization. See [SKILL.md](SKILL.md) Phase 8.
+- **N1.6**: Open-loop + closed-loop evaluation with W&B visualization. See [N16/SKILL.md](N16/SKILL.md) Phase 8.
+
+Both versions serve trained checkpoints as ZMQ policy servers on port 5555 for real-time
+robot control or LeIsaac simulation testing. See [references/eval-format.md](references/eval-format.md)
+for observation/response format details and [references/policy-server-test.md](references/policy-server-test.md)
+for direct inference testing.
 
 ## Configuration (env vars)
 

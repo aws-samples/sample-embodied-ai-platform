@@ -24,9 +24,11 @@ seconds. This only affects the first deploy.
 **`--shm-size=8g` required:** Both open-loop eval and policy server need this flag or
 DataLoader workers crash with a bus error.
 
-**NGC base image bash broken:** The `nvcr.io/nvidia/pytorch:25.04-py3` base image ships a
-`/usr/bin/bash` that fails with "cannot execute binary file". Use `--entrypoint /bin/sh`
-when running `docker run` commands against the `gr00t-finetune:latest` image.
+**NGC base image bash broken (N1.6 only):** The `nvcr.io/nvidia/pytorch:25.04-py3` base
+image ships a `/usr/bin/bash` that fails with "cannot execute binary file". Use
+`--entrypoint /bin/sh` when running `docker run` commands against the N1.6 training
+container (`gr00t-finetune:6`). The N1.5 container (`gr00t-finetune:latest`) uses
+`nvidia/cuda` base and works fine with `--entrypoint python`.
 
 **Helper script not found:** If `run-isaaclab.sh` doesn't exist, check the bootstrap
 summary for `create-helper-script` status. If missing, the container setup step failed —
