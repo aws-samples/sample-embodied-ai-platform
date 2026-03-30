@@ -12,7 +12,7 @@ from typing import Dict, Any
 
 # Future versions can be added here.
 SUPPORTED_CONFIGS: Dict[str, Dict[str, Any]] = {
-    "5.1.0": {
+    "v2.3.0": {
         "container_image": "nvcr.io/nvidia/isaac-lab:2.3.0",
         "dcv": "2025.0-20103",
         "leisaac": "v0.3.0",
