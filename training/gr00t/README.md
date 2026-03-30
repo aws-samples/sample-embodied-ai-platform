@@ -1,6 +1,6 @@
 # NVIDIA Isaac GR00T Training Component
 
-Fine-tune NVIDIA Isaac GR00T VLA models using teleoperation/simulation datasets. Supports AWS Batch training with GPU and Amazon DCV for monitoring/evaluation. Use this README as a bridge: high-level usage and structure here; detailed infrastructure/deployment in `infra/README.md`.
+Fine-tune NVIDIA Isaac GR00T VLA models (N1.5 and N1.6) using teleoperation/simulation datasets. Supports AWS Batch training with GPU and Amazon DCV for monitoring/evaluation. Use this README as a bridge: high-level usage and structure here; detailed infrastructure/deployment in `infra/README.md`.
 
 ## Links
 
@@ -38,7 +38,7 @@ training/gr00t/
 │   └── ...
 └── infra/                     # AWS CDK stacks for Batch and DCV
     ├── README.md              # Deployment guide (paths 1–3, troubleshooting)
-    ├── app.py                 # CDK entry point (N1.5 default, edit for N1.6)
+    ├── app.py                 # CDK entry point
     ├── batch_stack.py
     ├── codebuild_stack.py
     ├── requirements.txt
@@ -129,13 +129,14 @@ aws logs tail /aws/batch/job --follow \
 
 After training, evaluate checkpoints using the policy server and LeIsaac simulation:
 
-- **N1.5**: Closed-loop policy server with TensorBoard visualization. See [SKILL.md](SKILL.md) Phase 8.
-- **N1.6**: Open-loop + closed-loop evaluation with W&B visualization. See [N16/SKILL.md](N16/SKILL.md) Phase 8.
+- **N1.5**: `inference_service.py --server` with TensorBoard. See [SKILL.md](SKILL.md) Phase 8.
+- **N1.6**: `run_gr00t_server.py` with W&B. See [N16/SKILL.md](N16/SKILL.md) Phase 8.
 
-Both versions serve trained checkpoints as ZMQ policy servers on port 5555 for real-time
-robot control or LeIsaac simulation testing. See [references/eval-format.md](references/eval-format.md)
-for observation/response format details and [references/policy-server-test.md](references/policy-server-test.md)
-for direct inference testing.
+Both versions use the same eval container (`isaac-lab:2.3.0`) and `leisaac v0.3.0` for
+LeIsaac closed-loop simulation. They serve trained checkpoints as ZMQ policy servers on
+port 5555 — only the training container and `--policy_type` flag (`gr00tn1.5` vs `gr00tn1.6`)
+differ. See [references/eval-format.md](references/eval-format.md) for format details and
+[references/policy-server-test.md](references/policy-server-test.md) for direct inference testing.
 
 ## Configuration (env vars)
 

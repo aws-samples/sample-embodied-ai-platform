@@ -30,7 +30,7 @@ Only the DCV setup, reboot step, policy server, TensorBoard, and LeIsaac eval st
 ### 1. DCV Workstation Setup
 
 **What changed:** IsaacSim 4.5.0 and IsaacLab v2.2.0 are no longer host-installed via
-conda/pip. They are pulled from NGC as a pre-built container (`nvcr.io/nvidia/isaac-lab:2.2.0`)
+conda/pip. They are pulled from NGC as a pre-built container (`nvcr.io/nvidia/isaac-lab:2.3.0`)
 during the EC2 bootstrap. The `run-isaaclab.sh` helper script (installed at `/usr/local/bin/`)
 wraps `docker run` with all required flags.
 
@@ -43,7 +43,7 @@ wraps `docker run` with all required flags.
 **Replace with:**
 
 > The DCV workstation bootstrap automatically pulls the official NVIDIA IsaacLab container
-> (`nvcr.io/nvidia/isaac-lab:2.2.0`) from NGC during instance startup. A helper script
+> (`nvcr.io/nvidia/isaac-lab:2.3.0`) from NGC during instance startup. A helper script
 > `run-isaaclab.sh` is installed at `/usr/local/bin/` and handles GPU access, X11 forwarding,
 > persistent cache volumes, and leisaac package installation automatically on first launch.
 >
@@ -75,9 +75,10 @@ fails, wait a minute and retry.
 ### 3. Policy Server Command
 
 **What changed:**
-- Use `--entrypoint python` (the N1.5 `gr00t-finetune:latest` container has `ENTRYPOINT ["/bin/bash"]` — you need to override it to run a Python script directly)
+- Use `--entrypoint python` (the N1.5 `gr00t-finetune:latest` container has `ENTRYPOINT ["/bin/bash"]`)
 - Add `--shm-size=8g` (required — without it, DataLoader workers crash with a bus error)
-- The `--embodiment_tag` argument takes the enum **name** in uppercase (`NEW_EMBODIMENT`), not the value (`new_embodiment`)
+- Use `inference_service.py --server` (not the old `run_gr00t_server.py`)
+- The `--embodiment_tag` is lowercase `new_embodiment` with `--data_config so100_dualcam`
 - Language key is `annotation.human.task_description` (the `.action.` variant is N1.6 only)
 
 **Old command (approximate):**
@@ -103,9 +104,12 @@ ssh dcv-isaac "docker run --gpus all -d \
   --entrypoint python \
   -v $CHECKPOINT:/workspace/checkpoint \
   $EcrImageUri \
-  gr00t/eval/run_gr00t_server.py \
+  scripts/inference_service.py \
+    --server \
     --model_path /workspace/checkpoint \
-    --embodiment_tag NEW_EMBODIMENT \
+    --embodiment_tag new_embodiment \
+    --data_config so100_dualcam \
+    --port 5555 \
     --host 0.0.0.0"
 ```
 

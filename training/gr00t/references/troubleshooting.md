@@ -21,6 +21,13 @@ seconds. This only affects the first deploy.
 
 ## Container Issues
 
+**"No CUDA GPUs are available" in isaac-lab:2.3.0:** Likely caused by stale kit cache
+from a previous IsaacSim version mounted into the 2.3.0 container. Clear the cache:
+```bash
+rm -rf ~/docker/isaac-sim/cache/*
+docker run --rm --gpus all --entrypoint nvidia-smi nvcr.io/nvidia/isaac-lab:2.3.0
+```
+
 **`--shm-size=8g` required:** Both open-loop eval and policy server need this flag or
 DataLoader workers crash with a bus error.
 
@@ -43,18 +50,18 @@ sudo chown -R ubuntu:ubuntu ~/docker/ ~/isaaclab-pkgs/
 
 ## Policy Server Issues
 
-**Uppercase embodiment tag in server CLI:** The `run_gr00t_server.py` CLI (via `tyro`)
-expects the `EmbodimentTag` enum **name** in uppercase (`NEW_EMBODIMENT`), not the enum
-**value** in lowercase (`new_embodiment`). The training script uses the value form.
+**N1.5 vs N1.6 server scripts differ:**
+- **N1.5:** `inference_service.py --server` with lowercase `--embodiment_tag new_embodiment`
+  and `--data_config so100_dualcam`. Uses msgpack serialization (compatible with leisaac v0.3.0).
+- **N1.6:** `run_gr00t_server.py` with uppercase `--embodiment_tag NEW_EMBODIMENT` (tyro
+  parses enum names). Uses `--entrypoint /bin/sh` (NGC `/usr/bin/bash` is broken).
 
 ## LeIsaac / Eval Issues
 
-**LeIsaac `KeyError: 0` during eval:** The leisaac `Gr00t16ServicePolicyClient` at commit
-`d2cbfd2` has a bug: it sends `annotation.human.task_description` but N1.6 expects
-`annotation.human.action.task_description` (note the `.action.` segment). The GR00T server's
-strict validation fails, returns `{"error": "..."}` dict, and the client's `action_chunk[0]`
-raises `KeyError: 0` on the dict. `run-isaaclab.sh` auto-patches this after install via `sed`.
-If you installed leisaac manually, apply the fix:
+**LeIsaac `KeyError: 0` during eval:** If using leisaac at commit `d2cbfd2` (pre-v0.3.0),
+the `Gr00t16ServicePolicyClient` sends `annotation.human.task_description` but N1.6 expects
+`annotation.human.action.task_description`. This is fixed in leisaac v0.3.0 (the current
+default). If you're on an older commit, apply manually:
 ```bash
 sed -i 's/"annotation.human.task_description"/"annotation.human.action.task_description"/' \
   ~/isaaclab-pkgs/leisaac/policy/service_policy_clients.py

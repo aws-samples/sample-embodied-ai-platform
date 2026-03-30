@@ -67,7 +67,7 @@ If that fails, run `npx cdk bootstrap` from `training/gr00t/infra/`.
 Always synth before deploying — it catches version mismatches, missing dependencies, and
 code errors at zero cost (no AWS resources created).
 
-The default `app.py` deploys N1.5 (IsaacSim 4.5.0 / IsaacLab v2.2.0). No edits needed.
+The default `app.py` deploys IsaacSim 5.1.0 / IsaacLab v2.3.0.
 
 ```bash
 cd training/gr00t/infra
@@ -294,7 +294,7 @@ ssh dcv-isaac "cat /var/log/dcv-bootstrap.summary"
 # 2. EFS mounted
 ssh dcv-isaac "mount | grep efs"
 
-# 3. Container image pulled (should show isaac-lab:2.2.0)
+# 3. Container image pulled (should show isaac-lab:2.3.0)
 ssh dcv-isaac "docker images | grep isaac-lab"
 
 # 4. Helper script installed
@@ -329,7 +329,7 @@ run-isaaclab.sh
 # Python wrapper works
 /workspace/isaaclab/_isaac_sim/python.sh --version
 
-# LeIsaac N1.5 client is present
+# LeIsaac policy client is present
 grep "class Gr00tServicePolicyClient" /workspace/isaaclab-pkgs/leisaac/policy/service_policy_clients.py
 
 # GPU accessible
@@ -418,15 +418,19 @@ ssh dcv-isaac "docker run --gpus all -d \
   --entrypoint python \
   -v $CHECKPOINT:/workspace/checkpoint \
   $EcrImageUri \
-  gr00t/eval/run_gr00t_server.py \
+  scripts/inference_service.py \
+    --server \
     --model_path /workspace/checkpoint \
-    --embodiment_tag NEW_EMBODIMENT \
+    --embodiment_tag new_embodiment \
+    --data_config so100_dualcam \
+    --port 5555 \
     --host 0.0.0.0"
 ```
 
 > Use `--entrypoint python` for the N1.5 container (which has `ENTRYPOINT ["/bin/bash"]`
-> in its Dockerfile). The server CLI expects uppercase `NEW_EMBODIMENT` (tyro parses enum
-> names). Pass `--host 0.0.0.0` to allow remote clients.
+> in its Dockerfile). Pass `--host 0.0.0.0` to allow remote clients. The server uses
+> `inference_service.py --server` which starts a ZMQ inference server with msgpack
+> serialization, compatible with leisaac v0.3.0's `Gr00tServicePolicyClient`.
 
 Verify: `ssh dcv-isaac "docker logs gr00t-policy-server 2>&1 | tail -5"`
 
@@ -438,6 +442,10 @@ For observation/response format details, see [references/eval-format.md](referen
 
 Test trained N1.5 policies in simulation using [LeIsaac](https://github.com/LightwheelAI/leisaac).
 Requires the policy server running (Phase 8) and a DCV desktop session for the IsaacSim GUI.
+
+> **Note:** The eval container uses `isaac-lab:2.3.0` (IsaacSim 5.1) regardless of
+> the GR00T training version. The simulation container only needs IsaacSim for rendering —
+> the policy server communicates via ZMQ on port 5555, independent of the sim version.
 
 `run-isaaclab.sh` handles all prerequisites automatically on first launch: leisaac package
 install, scene asset download, repo clone, and script mount. No manual setup is needed.
@@ -460,6 +468,10 @@ run-isaaclab.sh
     --device=cuda \
     --enable_cameras
 ```
+
+> **Headless mode:** On resource-constrained instances (e.g. g6.2xlarge with 24GB VRAM),
+> add `--headless` to skip the GUI and reduce VRAM usage. This is useful for quick
+> validation before running the full GUI eval.
 
 **Expected:** Per-episode success/failure and a final success rate (e.g. `Final success rate: 0.700 [7/10]`).
 

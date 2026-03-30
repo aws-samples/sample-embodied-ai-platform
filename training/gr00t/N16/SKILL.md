@@ -62,12 +62,7 @@ If that fails, run `npx cdk bootstrap` from `training/gr00t/infra/`.
 
 ## Phase 2: Validate with CDK Synth
 
-> **N1.6 version override:** The default `app.py` deploys N1.5 (IsaacSim 4.5.0 / v2.2.0).
-> For N1.6, edit `training/gr00t/infra/app.py` before synth:
-> ```python
-> isaac_sim_version="5.1.0",        # N1.6
-> isaac_lab_version="v2.3.0",       # Matches isaac-lab:2.3.0 on NGC
-> ```
+The default `app.py` deploys with IsaacSim 5.1.0 / IsaacLab v2.3.0.
 
 Always synth before deploying — it catches version mismatches, missing dependencies, and
 code errors at zero cost (no AWS resources created).
@@ -472,11 +467,6 @@ Requires the policy server running (Phase 8) and a DCV desktop session for the I
 
 `run-isaaclab.sh` handles all prerequisites automatically on first launch: leisaac package
 install, scene asset download, repo clone, and script mount. No manual setup is needed.
-
-> **If the instance was deployed with N1.5 defaults**, override the container image:
-> ```bash
-> ISAAC_LAB_IMAGE=nvcr.io/nvidia/isaac-lab:2.3.0 run-isaaclab.sh
-> ```
 
 **Launch the container from a DCV terminal** (`https://<elastic-ip>:8443`):
 ```bash

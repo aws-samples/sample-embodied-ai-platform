@@ -10,12 +10,6 @@ phases:
       - echo "Build started on $(date)"
       - echo "Logging in to Amazon ECR..."
 
-      # Configure Docker registry mirror to avoid rate limiting
-      - 'echo ''{"registry-mirrors": ["https://public-mirror.ratelimitshield.io"]}'' | tee /etc/docker/daemon.json'
-      - pkill -SIGHUP dockerd || echo "Docker daemon reload attempted"
-      - sleep 5
-      - echo "Docker daemon configured with RateLimitShield mirror."
-
       # Get AWS account ID and region
       - export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
       - "export AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-west-2}"

@@ -100,7 +100,7 @@ class DcvWorkstation(Construct):
         container_image = version_config["container_image"]
         dcv_version_build = version_config["dcv"]
         dcv_version, dcv_build = dcv_version_build.split("-")
-        leisaac_commit = version_config.get("leisaac", "d2cbfd2e33517f2094e1904ff817aa17de6e8939")
+        leisaac_commit = version_config.get("leisaac", "v0.3.0")
 
         # Import EFS file system if provided
         efs_fs = None
@@ -230,6 +230,7 @@ class DcvWorkstation(Construct):
             'mkdir -p "$PKGS_DIR"',
             'if [[ ! -f "$MARKER" ]]; then',
             '  docker run --rm --gpus all \\',
+            '    --entrypoint bash \\',
             '    -e ACCEPT_EULA=Y \\',
             '    -e PYTHONPATH=/workspace/isaaclab-pkgs \\',
             '    -v "$PKGS_DIR":/workspace/isaaclab-pkgs:rw \\',
