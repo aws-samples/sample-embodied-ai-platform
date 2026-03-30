@@ -128,11 +128,15 @@ values before running Step 2 below.
 
 No context parameters needed — the stacks auto-create VPC, EFS, and ECR.
 
+> **N1.6 build target:** The BatchStack deploy automatically triggers a CodeBuild run.
+> Pass `--context build_target=n16` so it builds `N16/Dockerfile` (not the N1.5 default).
+
 ```bash
 cd training/gr00t/infra
 
 # Step 1: Batch stack (VPC, EFS, ECR, Batch — ~3 min)
-npx cdk deploy IsaacGr00tBatchStack --require-approval=never
+# build_target=n16 selects N16/Dockerfile for the CodeBuild run triggered on deploy.
+npx cdk deploy IsaacGr00tBatchStack --require-approval=never --context build_target=n16
 
 # Capture VpcId output, then run Phase 2.5 capacity probe, then update app.py.
 
@@ -341,7 +345,8 @@ Exit the container with `exit` or Ctrl-D.
 ### 7a. Verify container image is ready
 
 The Batch stack triggers a CodeBuild project that builds and pushes the training container
-to ECR. This takes ~15 minutes for N1.6 (PyTorch3D compilation). **Note:** Redeploying
+to ECR. If you deployed with `--context build_target=n16` in Phase 3, the N1.6 container
+is already building. This takes ~15 minutes for N1.6 (PyTorch3D compilation). **Note:** Redeploying
 BatchStack auto-triggers a new CodeBuild run that may fail due to transient Docker Hub
 rate limits — check for a recent successful build, not just the latest build status:
 

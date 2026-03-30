@@ -343,7 +343,16 @@ Exit the container with `exit` or Ctrl-D.
 ### 7a. Verify container image is ready
 
 The Batch stack triggers a CodeBuild project that builds and pushes the training container
-to ECR. This takes ~10 minutes for N1.5. **Note:** Redeploying BatchStack auto-triggers
+to ECR. By default, `BUILD_TARGET=n15` is set in the CDK stack, so the N1.5 Dockerfile is
+used automatically — no extra configuration needed. To confirm or override at deploy time:
+
+```bash
+# Default: n15 (no override needed for this guide)
+AWS_DEFAULT_REGION=us-west-2 npx cdk deploy IsaacGr00tBatchStack \
+  --require-approval=never --context build_target=n15
+```
+
+This takes ~10 minutes for N1.5. **Note:** Redeploying BatchStack auto-triggers
 a new CodeBuild run that may fail due to transient Docker Hub rate limits — check for a
 recent successful build, not just the latest build status:
 
