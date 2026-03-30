@@ -3,18 +3,20 @@ name: deploy-stack
 description: >
   Guide for deploying the Embodied AI Platform CDK stacks (IsaacGr00tBatchStack + IsaacLabDcvStack)
   from scratch, including prerequisites, deployment, bootstrap monitoring, SSH setup via SSM,
-  verification, training job submission, W&B visualization, and model evaluation. Also covers
-  tearing down stacks and cleaning up retained resources. Use this skill whenever someone wants
-  to deploy, redeploy, tear down the CDK infrastructure, visualize training metrics, submit
-  training jobs, or run model evaluations — even if they just say "set up the stack", "deploy
-  to AWS", "get DCV running", "view training loss", "run evals", or "clean up AWS resources".
+  verification, training job submission, TensorBoard visualization, and model evaluation (N1.5).
+  Also covers tearing down stacks and cleaning up retained resources. Use this skill whenever
+  someone wants to deploy, redeploy, tear down the CDK infrastructure, visualize training metrics,
+  submit training jobs, or run model evaluations — even if they just say "set up the stack",
+  "deploy to AWS", "get DCV running", "view training loss", "run evals", or "clean up AWS resources".
 ---
 
-# Deploy Embodied AI Platform CDK Stacks
+# Deploy Embodied AI Platform CDK Stacks (N1.5)
 
 This skill walks through deploying the two CDK stacks that make up the platform's AWS
 infrastructure, setting up SSH access to the GPU workstation, submitting training jobs,
-visualizing metrics, and running model evaluations.
+visualizing metrics with TensorBoard, and running closed-loop model evaluations.
+
+> **For N1.6 (GR00T N1.6 / IsaacSim 5.1.0):** See [N16/SKILL.md](N16/SKILL.md).
 
 The two stacks are:
 - **IsaacGr00tBatchStack** — VPC, EFS, ECR, CodeBuild, AWS Batch compute environment and job queue
@@ -62,10 +64,10 @@ If that fails, run `npx cdk bootstrap` from `training/gr00t/infra/`.
 
 ## Phase 2: Validate with CDK Synth
 
-The default `app.py` deploys with IsaacSim 5.1.0 / IsaacLab v2.3.0.
-
 Always synth before deploying — it catches version mismatches, missing dependencies, and
 code errors at zero cost (no AWS resources created).
+
+The default `app.py` deploys IsaacSim 5.1.0 / IsaacLab v2.3.0.
 
 ```bash
 cd training/gr00t/infra
@@ -292,7 +294,7 @@ ssh dcv-isaac "cat /var/log/dcv-bootstrap.summary"
 # 2. EFS mounted
 ssh dcv-isaac "mount | grep efs"
 
-# 3. Container image pulled
+# 3. Container image pulled (should show isaac-lab:2.3.0)
 ssh dcv-isaac "docker images | grep isaac-lab"
 
 # 4. Helper script installed
@@ -327,8 +329,8 @@ run-isaaclab.sh
 # Python wrapper works
 /workspace/isaaclab/_isaac_sim/python.sh --version
 
-# LeIsaac N1.6 client is present
-grep "class Gr00t16ServicePolicyClient" /workspace/isaaclab-pkgs/leisaac/policy/service_policy_clients.py
+# LeIsaac policy client is present
+grep "class Gr00tServicePolicyClient" /workspace/isaaclab-pkgs/leisaac/policy/service_policy_clients.py
 
 # GPU accessible
 nvidia-smi
@@ -341,9 +343,9 @@ Exit the container with `exit` or Ctrl-D.
 ### 7a. Verify container image is ready
 
 The Batch stack triggers a CodeBuild project that builds and pushes the training container
-to ECR. This takes ~15 minutes for N1.6 (PyTorch3D compilation). **Note:** Redeploying
-BatchStack auto-triggers a new CodeBuild run that may fail due to transient Docker Hub
-rate limits — check for a recent successful build, not just the latest build status:
+to ECR. This takes ~10 minutes for N1.5. **Note:** Redeploying BatchStack auto-triggers
+a new CodeBuild run that may fail due to transient Docker Hub rate limits — check for a
+recent successful build, not just the latest build status:
 
 ```bash
 aws codebuild batch-get-projects --names "$CodeBuildProjectName" \
@@ -382,33 +384,24 @@ aws logs tail /aws/batch/job --follow \
 > Default: 6000 steps (~2 hours on g6e.4xlarge). Checkpoints saved every 2000 steps
 > at `/mnt/efs/gr00t/checkpoints/$JOB_ID/`.
 
-### 7c. Visualize Training Metrics (W&B)
+### 7c. Visualize Training Metrics (TensorBoard)
 
-Training logs to W&B in **offline mode** — run data persists on EFS after the container exits.
+N1.5 logs to TensorBoard by default. The DCV bootstrap installs TensorBoard in a host
+venv at `/home/ubuntu/.venv/`.
 
 ```bash
-# Start local W&B server on DCV instance
-ssh dcv-isaac "docker run -d --name wandb-local -p 8080:8080 -v wandb-data:/vol wandb/local:latest"
-
-# Create account at http://<elastic-ip>:8080, generate API key from Settings -> API Keys
-
-# Sync offline runs
-ssh dcv-isaac "bash -l -c '
-  export WANDB_BASE_URL=http://localhost:8080
-  export WANDB_API_KEY=<your-local-api-key>
-  source /home/ubuntu/.venv/bin/activate
-  wandb sync /mnt/efs/gr00t/checkpoints/$JOB_ID/wandb/offline-run-*
-'"
+# Start TensorBoard on the DCV instance (port-forwarded via SSH)
+# Note: TensorBoard logs land in /mnt/efs/gr00t/checkpoints/runs/ (not under $JOB_ID)
+ssh -L 6006:localhost:6006 dcv-isaac \
+  "/home/ubuntu/.local/bin/tensorboard --logdir /mnt/efs/gr00t/checkpoints/runs --host 0.0.0.0 --port 6006"
 ```
 
-View loss curves at `http://<elastic-ip>:8080`. Stop/restart the server anytime —
-data persists in the `wandb-data` Docker volume.
+View loss curves at `http://localhost:6006` in your local browser.
 
-## Phase 8: Model Evaluation
+## Phase 8: Closed-Loop Evaluation (Policy Server)
 
-### Open-loop evaluation
-
-Computes MSE and cosine similarity against a held-out dataset:
+Serves a trained checkpoint as a ZMQ policy server for real-time robot control or
+simulation testing on TCP port 5555.
 
 ```bash
 CHECKPOINT=/mnt/efs/gr00t/checkpoints/$JOB_ID/checkpoint-6000
@@ -418,52 +411,41 @@ ssh dcv-isaac "aws ecr get-login-password --region $AWS_DEFAULT_REGION | \
 
 ssh dcv-isaac "docker pull $EcrImageUri"
 
-ssh dcv-isaac "docker run --gpus all --rm \
-  -v /mnt/efs:/mnt/efs:ro \
-  --shm-size=8g \
-  $EcrImageUri \
-  python -m gr00t.eval.robot_eval \
-    --model-path $CHECKPOINT \
-    --embodiment-tag new_embodiment \
-    --dataset-path /path/to/eval-dataset \
-    --modality-config-path /workspace/scripts/so101_modality_config.py"
-```
-
-### Closed-loop evaluation (policy server)
-
-Serves a trained checkpoint as a ZMQ policy server for real-time robot control or
-simulation testing on TCP port 5555.
-
-```bash
-CHECKPOINT=/mnt/efs/gr00t/checkpoints/$JOB_ID/checkpoint-6000
-
 ssh dcv-isaac "docker run --gpus all -d \
   --name gr00t-policy-server \
   --shm-size=8g \
   --network host \
-  --entrypoint /bin/sh \
+  --entrypoint python \
   -v $CHECKPOINT:/workspace/checkpoint \
   $EcrImageUri \
-  -c '/workspace/gr00t-repo/.venv/bin/python gr00t/eval/run_gr00t_server.py \
+  scripts/inference_service.py \
+    --server \
     --model_path /workspace/checkpoint \
-    --embodiment_tag NEW_EMBODIMENT \
-    --host 0.0.0.0'"
+    --embodiment_tag new_embodiment \
+    --data_config so100_dualcam \
+    --port 5555 \
+    --host 0.0.0.0"
 ```
 
-> Use `--entrypoint /bin/sh` (NGC `/usr/bin/bash` is broken). The server CLI expects
-> uppercase `NEW_EMBODIMENT` (tyro parses enum names). Pass `--host 0.0.0.0` to allow
-> remote clients.
+> Use `--entrypoint python` for the N1.5 container (which has `ENTRYPOINT ["/bin/bash"]`
+> in its Dockerfile). Pass `--host 0.0.0.0` to allow remote clients. The server uses
+> `inference_service.py --server` which starts a ZMQ inference server with msgpack
+> serialization, compatible with leisaac v0.3.0's `Gr00tServicePolicyClient`.
 
 Verify: `ssh dcv-isaac "docker logs gr00t-policy-server 2>&1 | tail -5"`
 
-For a direct inference test (without IsaacSim), see [../references/policy-server-test.md](../references/policy-server-test.md).
+For a direct inference test (without IsaacSim), see [references/policy-server-test.md](references/policy-server-test.md).
 
-For observation/response format details, see [../references/eval-format.md](../references/eval-format.md).
+For observation/response format details, see [references/eval-format.md](references/eval-format.md).
 
 ## Phase 8a: LeIsaac Closed-Loop Evaluation
 
-Test trained N1.6 policies in simulation using [LeIsaac](https://github.com/LightwheelAI/leisaac).
+Test trained N1.5 policies in simulation using [LeIsaac](https://github.com/LightwheelAI/leisaac).
 Requires the policy server running (Phase 8) and a DCV desktop session for the IsaacSim GUI.
+
+> **Note:** The eval container uses `isaac-lab:2.3.0` (IsaacSim 5.1) regardless of
+> the GR00T training version. The simulation container only needs IsaacSim for rendering —
+> the policy server communicates via ZMQ on port 5555, independent of the sim version.
 
 `run-isaaclab.sh` handles all prerequisites automatically on first launch: leisaac package
 install, scene asset download, repo clone, and script mount. No manual setup is needed.
@@ -478,7 +460,7 @@ run-isaaclab.sh
 /workspace/isaaclab/_isaac_sim/python.sh /workspace/scripts/evaluation/policy_inference.py \
     --task=LeIsaac-SO101-PickOrange-v0 \
     --eval_rounds=10 \
-    --policy_type=gr00tn1.6 \
+    --policy_type=gr00tn1.5 \
     --policy_host=localhost \
     --policy_port=5555 \
     --policy_action_horizon=16 \
@@ -487,9 +469,13 @@ run-isaaclab.sh
     --enable_cameras
 ```
 
+> **Headless mode:** On resource-constrained instances (e.g. g6.2xlarge with 24GB VRAM),
+> add `--headless` to skip the GUI and reduce VRAM usage. This is useful for quick
+> validation before running the full GUI eval.
+
 **Expected:** Per-episode success/failure and a final success rate (e.g. `Final success rate: 0.700 [7/10]`).
 
-For eval parameters and format details, see [../references/eval-format.md](../references/eval-format.md).
+For eval parameters and format details, see [references/eval-format.md](references/eval-format.md).
 
 ## Cleanup: Tearing Down Stacks
 
@@ -522,4 +508,4 @@ aws efs delete-file-system --file-system-id $EFSFileSystemId
 > If EFS deletion fails with "FileSystemInUse", delete lingering mount targets first:
 > `aws efs describe-mount-targets --file-system-id $EFSFileSystemId --query 'MountTargets[].MountTargetId' --output text | xargs -n1 aws efs delete-mount-target --mount-target-id`
 
-See [../references/troubleshooting.md](../references/troubleshooting.md) for common issues and fixes.
+See [references/troubleshooting.md](references/troubleshooting.md) for common issues and fixes.

@@ -61,12 +61,12 @@ class IsaacLabDcvStack(Stack):
         super().__init__(scope, construct_id, **kwargs)
 
         # Configure DCV workstation with gr00t-specific settings
-        # IMPORTANT: Use old versions to preserve exact behavior (zero regression)
+        # isaac_sim_version="5.1.0", isaac_lab_version="v2.3.0" for both N1.5 and N1.6
         props = DcvWorkstationProps(
             vpc=batch_stack.vpc,              # Share VPC with Batch
             efs_id=batch_stack.efs_id,        # Share EFS with Batch
             efs_sg_id=batch_stack.efs_sg_id,  # Share security group
-            # Preferred: g6.4xlarge, g6.2xlarge or g5.2xlarge. 
+            # Preferred: g6.4xlarge, g6.2xlarge, g5.2xlarge or larger.
             # If capacity errors occur, try changing availability_zone between us-west-2a/b/c/d.
             instance_type="g6.4xlarge",       # Fall back to g6/g5.2xlarge if capacity unavailable.
             isaac_sim_version="5.1.0",        # Latest version with valid NGC container

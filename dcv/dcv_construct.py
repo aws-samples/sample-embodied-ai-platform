@@ -100,7 +100,7 @@ class DcvWorkstation(Construct):
         container_image = version_config["container_image"]
         dcv_version_build = version_config["dcv"]
         dcv_version, dcv_build = dcv_version_build.split("-")
-        leisaac_commit = version_config.get("leisaac", "d2cbfd2e33517f2094e1904ff817aa17de6e8939")
+        leisaac_commit = version_config.get("leisaac", "v0.3.0")
 
         # Import EFS file system if provided
         efs_fs = None
@@ -216,7 +216,7 @@ class DcvWorkstation(Construct):
             f"cat > /usr/local/bin/run-isaaclab.sh << 'HELPER_EOF'",
             '#!/bin/bash',
             'set -euo pipefail',
-            f'CONTAINER_IMAGE="{container_image}"',
+            f'CONTAINER_IMAGE="${{ISAAC_LAB_IMAGE:-{container_image}}}"',
             'SESSION_NAME="isaac-lab"',
             f'LEISAAC_COMMIT="{leisaac_commit}"',
             'PKGS_DIR="/home/ubuntu/isaaclab-pkgs"',
@@ -230,6 +230,7 @@ class DcvWorkstation(Construct):
             'mkdir -p "$PKGS_DIR"',
             'if [[ ! -f "$MARKER" ]]; then',
             '  docker run --rm --gpus all \\',
+            '    --entrypoint bash \\',
             '    -e ACCEPT_EULA=Y \\',
             '    -e PYTHONPATH=/workspace/isaaclab-pkgs \\',
             '    -v "$PKGS_DIR":/workspace/isaaclab-pkgs:rw \\',
@@ -301,8 +302,9 @@ class DcvWorkstation(Construct):
         )
 
         # Create host venv with tensorboard and wandb
+        # --seed: pre-installs setuptools+pip+wheel
         self._user_data.add_commands(
-            'su - ubuntu -c "/home/ubuntu/.local/bin/uv venv /home/ubuntu/.venv"',
+            'su - ubuntu -c "/home/ubuntu/.local/bin/uv venv --seed /home/ubuntu/.venv"',
             'su - ubuntu -c "/home/ubuntu/.local/bin/uv pip install --python /home/ubuntu/.venv/bin/python tensorboard wandb"',
         )
 
@@ -476,6 +478,11 @@ class DcvWorkstation(Construct):
         self._user_data.add_commands(
             'date -Iseconds > /var/lib/dcv-bootstrap/ALL_DONE',
             'log "Bootstrap complete. ALL_DONE marker written."',
+            # Reboot to load the NVIDIA kernel module. cfn-signal was already sent,
+            # so CloudFormation marks CREATE_COMPLETE before the instance goes down.
+            # The driver persists — subsequent stop/start cycles don't need this.
+            'log "Rebooting to activate NVIDIA kernel module..."',
+            'shutdown -r +1 "Bootstrap complete — rebooting for NVIDIA driver"',
         )
 
         self._user_data.add_commands(

@@ -13,7 +13,7 @@ The infrastructure consists of two CDK stacks:
 
 Both stacks share common resources (VPC, EFS, Security Groups) to enable seamless data flow between training and evaluation workflows.
 
-> **Note**: The DCV workstation infrastructure was extracted into a standalone, reusable module at `dcv/` in the repo root. The gr00t `app.py` imports and consumes this module with gr00t-specific configuration (IsaacSim 4.5.0, leisaac enabled). See [`dcv/README.md`](../../../dcv/README.md) for standalone usage and full documentation.
+> **Note**: The DCV workstation infrastructure was extracted into a standalone, reusable module at `dcv/` in the repo root. The gr00t `app.py` imports and consumes this module — N1.5 (IsaacSim 4.5.0 / v2.2.0) by default, or N1.6 (5.1.0 / v2.3.0) by editing `app.py`. See [`dcv/README.md`](../../../dcv/README.md) for standalone usage and full documentation.
 
 ## Stack Dependencies
 
@@ -39,13 +39,13 @@ Consumes the standalone DCV module at `dcv/` and creates:
 - Elastic IP for stable connectivity
 - IAM role for EC2 instance (S3, SSM, ECR)
 - Mounts shared EFS file system from BatchStack
-- IsaacSim 4.5.0, IsaacLab v2.1.1, and leisaac pre-installed
+- IsaacSim 4.5.0 / IsaacLab v2.2.0 with leisaac pre-installed (default). For N1.6: 5.1.0 / v2.3.0
 
 **Dependencies**:
 - VPC from BatchStack (shared network)
 - EFS and Security Group from BatchStack (for shared storage with Batch jobs)
 
-**Configuration**: Gr00t-specific settings are hardcoded in `app.py` (IsaacSim 4.5.0, leisaac enabled). To change versions, edit the `DcvWorkstationProps` in `app.py`. The standalone `dcv/` module supports IsaacSim 5.1.0, 5.0.0, and 4.5.0 — see [`dcv/README.md`](../../../dcv/README.md) for the full version compatibility matrix.
+**Configuration**: Gr00t-specific settings are in `app.py` — N1.5 (IsaacSim 4.5.0 / v2.2.0) by default, leisaac enabled. For N1.6, edit `DcvWorkstationProps` to use `isaac_sim_version="5.1.0"`, `isaac_lab_version="v2.3.0"`. The standalone `dcv/` module supports IsaacSim 5.1.0 and 4.5.0 — see [`dcv/README.md`](../../../dcv/README.md) for the full version compatibility matrix.
 
 ## Deployment Paths
 
@@ -213,6 +213,10 @@ This enables:
 - Real-time monitoring of training jobs via TensorBoard on the DCV instance
 - Direct access to model checkpoints for evaluation
 - Seamless data flow between training and evaluation workflows
+
+The DCV workstation runs IsaacSim/Lab in containers via the `run-isaaclab.sh` helper.
+TensorBoard (N1.5) runs in a host venv on port 6006. Override the container version
+with `ISAAC_LAB_IMAGE` env var for N1.6 evaluation.
 
 ## Prerequisites
 

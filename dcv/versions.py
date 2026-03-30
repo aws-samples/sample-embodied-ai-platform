@@ -2,24 +2,20 @@
 
 This module provides a single source of truth for supported version combinations
 of IsaacSim and IsaacLab, mapping each to the corresponding NVIDIA container image tag.
+
+Currently, only isaac-lab:2.3.0 (IsaacSim 5.1) is tested. The eval container only needs
+IsaacSim for simulation — the policy server runs separately via ZMQ — so the sim
+container version is independent of the GR00T training version (N1.5 vs N1.6).
 """
-from typing import Dict, List, Any
+from typing import Dict, Any
 
 
+# Future versions can be added here.
 SUPPORTED_CONFIGS: Dict[str, Dict[str, Any]] = {
     "5.1.0": {
         "container_image": "nvcr.io/nvidia/isaac-lab:2.3.0",
-        "compatible_isaaclab": ["v2.3.0", "v2.3.1", "v2.3.2"],
         "dcv": "2025.0-20103",
-        # Gr00t16ServicePolicyClient was added after the v0.3.0 tag; pin to the
-        # commit that introduced it so `pip install leisaac @ git+...` is reproducible.
-        "leisaac": "d2cbfd2e33517f2094e1904ff817aa17de6e8939",
-    },
-    "4.5.0": {
-        "container_image": "nvcr.io/nvidia/isaac-lab:2.2.0",
-        "compatible_isaaclab": ["v2.2.0", "v2.2.1"],
-        "dcv": "2024.0-19030",
-        "leisaac": "v0.2.0",
+        "leisaac": "v0.3.0",
     },
 }
 
@@ -27,15 +23,18 @@ SUPPORTED_CONFIGS: Dict[str, Dict[str, Any]] = {
 def validate_version_config(isaac_sim_version: str, isaac_lab_version: str) -> Dict[str, Any]:
     """Validate version combination and return the compatible container image and DCV version.
 
+    The isaac_lab_version parameter is accepted for backwards compatibility but is not
+    validated — the container image is determined solely by isaac_lab_version.
+
     Args:
-        isaac_sim_version: IsaacSim version (e.g., "5.1.0")
-        isaac_lab_version: IsaacLab version (e.g., "v2.3.2")
+        isaac_sim_version: IsaacSim version (informational only, depends on IsaacLab version)
+        isaac_lab_version: IsaacLab version (e.g. "v2.3.0")
 
     Returns:
         Dict with keys: container_image, dcv, leisaac
 
     Raises:
-        ValueError: If version combination is unsupported
+        ValueError: If isaac_lab_version is unsupported
 
     Examples:
         >>> config = validate_version_config("5.1.0", "v2.3.0")
@@ -44,27 +43,16 @@ def validate_version_config(isaac_sim_version: str, isaac_lab_version: str) -> D
         >>> config["dcv"]
         '2025.0-20103'
     """
-    # Check if IsaacSim version is supported
-    if isaac_sim_version not in SUPPORTED_CONFIGS:
+    if isaac_lab_version not in SUPPORTED_CONFIGS:
         supported_versions = ", ".join(sorted(SUPPORTED_CONFIGS.keys()))
         raise ValueError(
-            f"Unsupported IsaacSim version: {isaac_sim_version}. "
+            f"Unsupported IsaacLab version: {isaac_lab_version}. "
             f"Supported versions: {supported_versions}"
         )
 
-    config = SUPPORTED_CONFIGS[isaac_sim_version]
-
-    # Check if IsaacLab version is compatible with this IsaacSim version
-    if isaac_lab_version not in config["compatible_isaaclab"]:
-        compatible_versions = ", ".join(config["compatible_isaaclab"])
-        raise ValueError(
-            f"IsaacLab {isaac_lab_version} is not compatible with IsaacSim {isaac_sim_version}. "
-            f"Compatible IsaacLab versions for IsaacSim {isaac_sim_version}: {compatible_versions}"
-        )
-
-    # Return the container-centric configuration
+    config = SUPPORTED_CONFIGS[isaac_lab_version]
     return {
         "container_image": config["container_image"],
         "dcv": config["dcv"],
-        "leisaac": config.get("leisaac", "v0.3.0"),
+        "leisaac": config["leisaac"],
     }

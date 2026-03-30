@@ -177,14 +177,15 @@ class CodeBuildStack(Construct):
                     f"{build_project.project_name}-build-{source_asset.s3_object_key}"
                 ),
             ),
-            # Also trigger on UPDATE when the physical resource ID changes (i.e., when asset hash changes)
+            # on_update: no-op — only trigger builds on CREATE (first deploy) or when source files
+            # change (asset hash changes → physical resource ID changes → replacement → on_create fires).
+            # Using batchGetProjects as a read-only no-op so repeated deploys don't re-trigger builds.
             on_update=cr.AwsSdkCall(
                 service="CodeBuild",
-                action="startBuild",
+                action="batchGetProjects",
                 parameters={
-                    "projectName": build_project.project_name,
+                    "names": [build_project.project_name],
                 },
-                # Use the same dynamic physical resource ID based on S3 object key hash
                 physical_resource_id=cr.PhysicalResourceId.of(
                     f"{build_project.project_name}-build-{source_asset.s3_object_key}"
                 ),
