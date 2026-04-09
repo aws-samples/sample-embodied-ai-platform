@@ -12,13 +12,18 @@ description: >
 
 # Deploy Embodied AI Platform CDK Stacks
 
+> **Autonomous execution:** Execute all phases sequentially from Phase 1 through Phase 8a
+> without pausing for user input. Only stop if a phase fails or requires information not
+> available in this document. When a phase depends on a long-running process (e.g. CodeBuild,
+> training job), poll until completion then proceed to the next phase automatically.
+
 This skill walks through deploying the two CDK stacks that make up the platform's AWS
 infrastructure, setting up SSH access to the GPU workstation, submitting training jobs,
 visualizing metrics, and running model evaluations.
 
 The two stacks are:
 - **IsaacGr00tBatchStack** — VPC, EFS, ECR, CodeBuild, AWS Batch compute environment and job queue
-- **IsaacLabDcvStack** — GPU-accelerated DCV workstation (EC2 instance with Elastic IP)
+- **IsaacLabDcvStack** — GPU-accelerated DCV workstation (EC2 instance, accessed via SSM)
 
 The DCV stack depends on the Batch stack (shares its VPC and EFS), so deploy order matters:
 Batch first, DCV second. Destroy order is reversed: DCV first, Batch second.
@@ -306,8 +311,15 @@ ssh dcv-isaac "test -x /usr/local/bin/run-isaaclab.sh && echo 'Helper script OK'
 ssh dcv-isaac "nvidia-smi --query-gpu=name --format=csv,noheader"
 ```
 
-The DCV web console is also available at `https://<elastic-ip>:8443` (accept the
-self-signed certificate warning).
+The DCV web console is also available via SSH port forwarding. No public ports are
+exposed — all access is through SSM tunneling (configured in Phase 5).
+
+To access DCV or W&B from a browser, start port forwards in the background:
+```bash
+ssh -f -N -L 8443:localhost:8443 -L 8080:localhost:8080 dcv-isaac
+```
+Then open `https://localhost:8443` for DCV or `http://localhost:8080` for W&B.
+Claude Code does not need these port forwards — it accesses everything via SSH commands.
 
 ## Phase 6a: Container and LeIsaac Testing
 
@@ -395,7 +407,10 @@ Training logs to W&B in **offline mode** — run data persists on EFS after the 
 # Start local W&B server on DCV instance
 ssh dcv-isaac "docker run -d --name wandb-local -p 8080:8080 -v wandb-data:/vol wandb/local:latest"
 
-# Create account at http://<elastic-ip>:8080, generate API key from Settings -> API Keys
+# W&B is accessible via SSH port forward (no public access needed):
+#   ssh -f -N -L 8080:localhost:8080 dcv-isaac
+#   Then open http://localhost:8080 in your browser
+# Create account and generate API key from Settings -> API Keys
 
 # Sync offline runs
 ssh dcv-isaac "bash -l -c '
@@ -406,8 +421,8 @@ ssh dcv-isaac "bash -l -c '
 '"
 ```
 
-View loss curves at `http://<elastic-ip>:8080`. Stop/restart the server anytime —
-data persists in the `wandb-data` Docker volume.
+View loss curves at `http://localhost:8080` (after starting the SSH port forward above).
+Stop/restart the server anytime — data persists in the `wandb-data` Docker volume.
 
 ## Phase 8: Model Evaluation
 
@@ -430,8 +445,10 @@ ssh dcv-isaac "docker run --gpus all --rm \
   python -m gr00t.eval.robot_eval \
     --model-path $CHECKPOINT \
     --embodiment-tag new_embodiment \
-    --dataset-path /path/to/eval-dataset \
-    --modality-config-path /workspace/scripts/so101_modality_config.py"
+    --dataset-path /mnt/efs/gr00t/sample_dataset \
+    --modality-config-path /workspace/scripts/so101_modality_config.py \
+    --modality-keys single_arm gripper \
+    --video-backend torchvision_av"
 ```
 
 ### Closed-loop evaluation (policy server)
@@ -449,17 +466,28 @@ ssh dcv-isaac "docker run --gpus all -d \
   --entrypoint /bin/sh \
   -v $CHECKPOINT:/workspace/checkpoint \
   $EcrImageUri \
-  -c '/workspace/gr00t-repo/.venv/bin/python gr00t/eval/run_gr00t_server.py \
-    --model_path /workspace/checkpoint \
-    --embodiment_tag NEW_EMBODIMENT \
-    --host 0.0.0.0'"
+  -c 'python3 -c \"
+from gr00t.model.policy import Gr00tPolicy
+from gr00t.eval.robot import RobotInferenceServer
+policy = Gr00tPolicy(
+    model_path=\\\"/workspace/checkpoint\\\",
+    embodiment_tag=\\\"new_embodiment\\\",
+    device=\\\"cuda\\\",
+)
+server = RobotInferenceServer(policy=policy, host=\\\"0.0.0.0\\\", port=5555)
+server.run()
+\"'"
 ```
 
-> Use `--entrypoint /bin/sh` (NGC `/usr/bin/bash` is broken). The server CLI expects
-> uppercase `NEW_EMBODIMENT` (tyro parses enum names). Pass `--host 0.0.0.0` to allow
-> remote clients.
+> The N1.6 container uses `RobotInferenceServer` from `gr00t.eval.robot` (ZMQ-based),
+> not a standalone `run_gr00t_server.py` script. Use `--entrypoint /bin/sh` because
+> the NGC default `/usr/bin/bash` is broken.
 
-Verify: `ssh dcv-isaac "docker logs gr00t-policy-server 2>&1 | tail -5"`
+Verify the server is listening:
+```bash
+ssh dcv-isaac "docker logs gr00t-policy-server 2>&1 | tail -5"
+ssh dcv-isaac "ss -tlnp | grep 5555"
+```
 
 For a direct inference test (without IsaacSim), see [../references/policy-server-test.md](../references/policy-server-test.md).
 
@@ -468,29 +496,56 @@ For observation/response format details, see [../references/eval-format.md](../r
 ## Phase 8a: LeIsaac Closed-Loop Evaluation
 
 Test trained N1.6 policies in simulation using [LeIsaac](https://github.com/LightwheelAI/leisaac).
-Requires the policy server running (Phase 8) and a DCV desktop session for the IsaacSim GUI.
+Requires the policy server running (Phase 8).
 
-`run-isaaclab.sh` handles all prerequisites automatically on first launch: leisaac package
-install, scene asset download, repo clone, and script mount. No manual setup is needed.
+> **Important:** Do NOT use `run-isaaclab.sh` for automated evaluation — it launches an
+> interactive bash shell and routes arguments through `runheadless.sh` (the Kit launcher),
+> which does not execute the Python eval script. Use the direct `docker run` command below
+> with `--entrypoint` set to `python.sh`.
 
-**Launch the container from a DCV terminal** (`https://<elastic-ip>:8443`):
+`run-isaaclab.sh` handles leisaac package install, scene asset download, and repo clone
+on first launch. Run it once interactively to set up prerequisites if they haven't been
+installed yet:
 ```bash
-run-isaaclab.sh
+ssh dcv-isaac "run-isaaclab.sh -c 'echo prerequisites installed'"
 ```
 
-**Inside the container, run the evaluation:**
+**Run the closed-loop evaluation via SSH** (fully autonomous, no DCV desktop needed):
 ```bash
-/workspace/isaaclab/_isaac_sim/python.sh /workspace/scripts/evaluation/policy_inference.py \
+ssh dcv-isaac "docker run --gpus all --rm --network host \
+  -e ACCEPT_EULA=Y -e PRIVACY_CONSENT=Y \
+  -e PYTHONPATH=/workspace/isaaclab-pkgs \
+  -e PYTHONUNBUFFERED=1 \
+  -v /home/ubuntu/isaaclab-pkgs:/workspace/isaaclab-pkgs:rw \
+  -v /home/ubuntu/leisaac-repo/scripts:/workspace/scripts:ro \
+  -v /home/ubuntu/leisaac-assets:/assets:ro \
+  -v /mnt/efs:/mnt/efs \
+  -e LEISAAC_ASSETS_ROOT=/assets \
+  --shm-size=8g \
+  --entrypoint /workspace/isaaclab/_isaac_sim/python.sh \
+  nvcr.io/nvidia/isaac-lab:2.3.0 \
+  /workspace/scripts/evaluation/policy_inference.py \
     --task=LeIsaac-SO101-PickOrange-v0 \
     --eval_rounds=10 \
     --policy_type=gr00tn1.6 \
     --policy_host=localhost \
     --policy_port=5555 \
     --policy_action_horizon=16 \
-    --policy_language_instruction="Pick up the orange and place it on the plate" \
+    --policy_language_instruction='Pick up the orange and place it on the plate' \
     --device=cuda \
-    --enable_cameras
+    --enable_cameras 2>&1 | tee /mnt/efs/gr00t/eval-results.log"
 ```
+
+> `PYTHONUNBUFFERED=1` ensures eval output streams in real time over SSH.
+> Results are persisted to `/mnt/efs/gr00t/eval-results.log` so the final success rate
+> is available even after the container exits (`--rm`).
+> First run takes ~5 minutes for IsaacSim shader compilation before episodes begin.
+
+For manual visual inspection, start an SSH port forward to the DCV desktop:
+```bash
+ssh -f -N -L 8443:localhost:8443 dcv-isaac
+```
+Then open `https://localhost:8443` in your browser and run `run-isaaclab.sh` from the DCV terminal.
 
 **Expected:** Per-episode success/failure and a final success rate (e.g. `Final success rate: 0.700 [7/10]`).
 

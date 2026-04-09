@@ -254,6 +254,12 @@ class DcvWorkstation(Construct):
             '  git clone https://github.com/LightwheelAI/leisaac.git "$SCRIPTS_DIR"',
             '  cd "$SCRIPTS_DIR" && git checkout "$LEISAAC_COMMIT"',
             'fi',
+            '# Patch policy_inference.py to support gr00tn1.6 (upstream LeIsaac v0.3.0 only supports gr00tn1.5)',
+            'EVAL_SCRIPT="$SCRIPTS_DIR/scripts/evaluation/policy_inference.py"',
+            'if [[ -f "$EVAL_SCRIPT" ]] && ! grep -q "gr00tn1.6" "$EVAL_SCRIPT"; then',
+            '  sed -i \'s/if model_type in \\["gr00tn1.5", "lerobot", "openpi"\\]/if model_type in ["gr00tn1.5", "gr00tn1.6", "lerobot", "openpi"]/\' "$EVAL_SCRIPT"',
+            '  sed -i \'s/if args_cli.policy_type == "gr00tn1.5"/if args_cli.policy_type in ["gr00tn1.5", "gr00tn1.6"]/\' "$EVAL_SCRIPT"',
+            'fi',
             'xhost +local:docker 2>/dev/null || true',
             'XAUTH_FILE="/run/user/1000/dcv/console.xauth"',
             'if [[ ! -f "$XAUTH_FILE" ]]; then XAUTH_FILE="$HOME/.Xauthority"; fi',
@@ -393,22 +399,15 @@ class DcvWorkstation(Construct):
         )
 
         # Security Group
-        # Controls network access to the instance
+        # Controls network access to the instance.
+        # No public ingress rules — DCV (8443) and W&B (8080) are accessed
+        # via SSH port forwarding through SSM (see SKILL.md Phase 5).
+        # This avoids exposing unauthenticated web endpoints to the internet.
         self._security_group = ec2.SecurityGroup(
             self, "SecurityGroup",
             vpc=self._vpc,
-            description="Allow DCV, TensorBoard, and W&B access",
-            allow_all_outbound=True, # Do not allow all outbound traffic in production
-        )
-        self._security_group.add_ingress_rule(
-            ec2.Peer.any_ipv4(),
-            ec2.Port.tcp(8443),
-            "Allow Amazon DCV access",
-        )
-        self._security_group.add_ingress_rule(
-            ec2.Peer.any_ipv4(),
-            ec2.Port.tcp(8080),
-            "Allow W&B local server access",
+            description="DCV workstation — access via SSM port forwarding only",
+            allow_all_outbound=True,
         )
 
         # Allow EFS access from DCV instance (only if EFS provided)
