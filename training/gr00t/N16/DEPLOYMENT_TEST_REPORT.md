@@ -133,7 +133,7 @@ Total time: ~4 hours (deploy ~30min, training ~2hrs, evaluation ~1.5hrs includin
 
 ---
 
-### 11. Phase 8 Policy Server Command Doesn't Match N1.6 Container
+### 9. Phase 8 Policy Server Command Doesn't Match N1.6 Container
 
 | | |
 |---|---|
@@ -142,12 +142,12 @@ Total time: ~4 hours (deploy ~30min, training ~2hrs, evaluation ~1.5hrs includin
 | **Error** | SKILL.md references `run_gr00t_server.py` but the N1.6 container has a different server structure. The ZMQ server is in `gr00t/eval/service.py` via `RobotInferenceServer`, not a standalone script. |
 | **Cause** | The documented command was written for a different container layout. Claude Code had to explore the container to find the correct server interface. |
 | **Status** | ✅ Fixed |
-| **Fix** | Rewrote Phase 8 policy server command to use `RobotInferenceServer` from `gr00t.eval.robot` with an inline Python script, instead of the non-existent `run_gr00t_server.py`. Uses `Gr00tPolicy` to load the checkpoint and `RobotInferenceServer` to serve on port 5555. Added `ss -tlnp | grep 5555` verification step. |
+| **Fix** | Replaced the inline `RobotInferenceServer` script with `python3 -m gr00t.eval.run_gr00t_server` and added `--use-sim-policy-wrapper` to the Phase 8 policy server command in SKILL.md. Added `ss -tlnp | grep 5555` verification step. |
 | **Files changed** | `training/gr00t/N16/SKILL.md` |
 
 ---
 
-### 12. Eval Container Uses --rm, Losing Final Output
+### 10. Eval Container Uses --rm, Losing Final Output
 
 | | |
 |---|---|
@@ -161,29 +161,154 @@ Total time: ~4 hours (deploy ~30min, training ~2hrs, evaluation ~1.5hrs includin
 
 ---
 
-### 13. Claude Code Improvises Instead of Following SKILL.md
+### 11. Non-ASCII Em Dash in Security Group Description Breaks CDK Synth
 
 | | |
 |---|---|
-| **Severity** | Low — works but wastes time |
+| **Severity** | Medium - blocks deployment on some environments |
+| **File** | `dcv/dcv_construct.py` |
+| **Error** | CDK synth failed due to a Unicode em dash character in the security group description string. Some environments and CI pipelines choke on non-ASCII characters in CloudFormation template strings. |
+| **Cause** | The description `"DCV workstation - access via SSM port forwarding only"` used an em dash (U+2014) instead of a regular hyphen (U+002D). |
+| **Status** | ✅ Fixed |
+| **Fix** | Replaced the em dash with a regular dash: `"DCV workstation - access via SSM port forwarding only"`. |
+| **Files changed** | `dcv/dcv_construct.py` |
+
+---
+
+### 12. UserData Exceeds 16KB EC2 Limit on Fresh Deploy
+
+| | |
+|---|---|
+| **Severity** | Critical - DCV stack deployment fails with CREATE_FAILED |
+| **File** | `dcv/dcv_construct.py` |
+| **Error** | `IsaacLabDcvStack` deployment failed because the EC2 UserData exceeded the 16KB hard limit. CloudFormation returned a creation error for the EC2 instance resource. |
+| **Cause** | The `run-isaaclab.sh` helper script (~3,500 bytes) was inlined as a heredoc directly in UserData alongside the bootstrap script (~10,000 bytes). With the LeIsaac N1.6 patches (finding #5) and other fixes added in the previous test run, the combined UserData grew past 16KB. Previous deployments were at ~99% of the limit and the additional content tipped it over. |
+| **Status** | ✅ Fixed |
+| **Fix** | Extracted the `run-isaaclab.sh` helper script into a standalone template file (`dcv/run-isaaclab.sh.tpl`) with `__CONTAINER_IMAGE__` and `__LEISAAC_COMMIT__` placeholders. At CDK synth time, placeholders are substituted and the rendered script is uploaded as an S3 asset via `aws_cdk.aws_s3_assets.Asset`. The UserData now downloads the script with `aws s3 cp` instead of inlining it, freeing ~3,500 bytes of UserData space. The instance IAM role is granted read access to the S3 asset automatically. |
+| **Files changed** | `dcv/dcv_construct.py`, `dcv/run-isaaclab.sh.tpl` (new file) |
+| **Note** | This is a permanent architectural improvement. As the project grows, more scripts can be externalized to S3 assets using the same pattern, avoiding future 16KB limit issues. |
+
+---
+
+### 13. Sample Dataset Not Available on EFS for Open-Loop Evaluation
+
+| | |
+|---|---|
+| **Severity** | High - Phase 8 open-loop eval fails with missing dataset |
+| **File** | `training/gr00t/N16/SKILL.md` |
+| **Error** | Phase 8 open-loop eval command references `--dataset-path /mnt/efs/gr00t/sample_dataset` but no prior step copies the dataset to EFS. The training job (Phase 7) uses the dataset baked into the container image during `docker build`, not from EFS. |
+| **Cause** | The sample dataset is included in the git repo at `training/sample_dataset/` and gets cloned into the container during the CodeBuild image build. The Batch training job accesses it at `/workspace/sample-embodied-ai-platform/training/sample_dataset` inside the container. However, the DCV instance has no copy of the dataset on EFS, so the eval container can't find it. |
+| **Status** | ✅ Fixed |
+| **Fix** | Added Phase 7d to SKILL.md with three steps: rsync sample dataset to EFS, create `modality.json` with correct column mappings, and generate `stats.json` via the training container. |
+| **Files changed** | `training/gr00t/N16/SKILL.md` |
+
+---
+
+### 14. LeIsaac Eval Hangs When --enable_cameras Used Without DCV Display Context
+
+| | |
+|---|---|
+| **Severity** | High - eval container hangs indefinitely, wastes over an hour |
+| **File** | `training/gr00t/N16/SKILL.md` |
+| **Error** | The LeIsaac closed-loop eval container ran for over an hour with 119% CPU but 0% GPU utilization. No episode output was produced. Docker logs stuck at 414 lines with no growth. |
+| **Cause** | The Phase 8a `docker run` command did not pass the display environment (`DISPLAY=:1`) or mount the X11 socket (`/tmp/.X11-unix`). IsaacSim requires a rendering context for `--enable_cameras`. The DCV auto-session runs on display `:1` (not `:0`), and without passing this to the container, IsaacSim hangs during rendering initialization. The `run-isaaclab.sh` helper script handles this correctly (it sets `-e DISPLAY` and mounts Xauth), but the direct `docker run` in SKILL.md Phase 8a did not. |
+| **Status** | ✅ Fixed |
+| **Fix** | Added `-e DISPLAY=:1 -v /tmp/.X11-unix:/tmp/.X11-unix:ro` to the Phase 8a eval `docker run` command in SKILL.md. Added a keyboard null-check patch in `run-isaaclab.sh.tpl` to handle missing keyboard in headless fallback. |
+| **Files changed** | `training/gr00t/N16/SKILL.md`, `dcv/run-isaaclab.sh.tpl` |
+| **Note** | The display number (`:1`) is set by DCV's auto-console-session and may vary. This fix should be baked into the SKILL.md eval command permanently. |
+
+---
+
+### 15. Policy Server Missing Sim Wrapper - Action Key Mismatch
+
+| | |
+|---|---|
+| **Severity** | High - eval crashes after first episode with KeyError |
+| **File** | `training/gr00t/N16/SKILL.md` |
+| **Error** | LeIsaac eval crashed with `KeyError: 'action.single_arm'` after completing episode 1. The policy server returns keys like `single_arm` and `gripper`, but the LeIsaac `Gr00tServicePolicyClient` expects `action.single_arm` and `action.gripper` (with the `action.` prefix). |
+| **Cause** | The GR00T `Gr00tPolicy` returns raw action keys without the `action.` prefix. The `Gr00tSimPolicyWrapper` class adds this prefix, but the SKILL.md Phase 8 policy server command does not use the wrapper. The policy server needs `--use-sim-policy-wrapper` to produce keys compatible with LeIsaac. |
+| **Status** | ✅ Fixed |
+| **Fix** | Replaced the inline `RobotInferenceServer` script with `python3 -m gr00t.eval.run_gr00t_server` and added `--use-sim-policy-wrapper` to the Phase 8 policy server command in SKILL.md. |
+| **Files changed** | `training/gr00t/N16/SKILL.md` |
+
+---
+
+### 17. Claude Code Improvises Instead of Following SKILL.md
+
+| | |
+|---|---|
+| **Severity** | Low - works but wastes time |
 | **File** | `training/gr00t/N16/SKILL.md` |
 | **Error** | Claude Code inspected parquet files, explored container internals, and ran diagnostic commands not in the SKILL.md. While this helped debug issues, it added ~30 minutes of unnecessary exploration. |
-| **Cause** | SKILL.md is not prescriptive enough — it describes what to do but not what NOT to do. Claude Code fills gaps with its own judgment. |
-| **Status** | 📋 For colleague — make SKILL.md more explicit |
+| **Cause** | SKILL.md is not prescriptive enough - it describes what to do but not what NOT to do. Claude Code fills gaps with its own judgment. |
+| **Status** | For colleague - make SKILL.md more explicit |
 | **Suggested fix** | Add guardrails to SKILL.md: "Do not inspect dataset contents or container internals unless a command fails. Follow the commands exactly as written." |
 
 ---
 
-### 15. No Resume/Recovery Guidance
+### 18. No Resume/Recovery Guidance
 
 | | |
 |---|---|
-| **Severity** | Medium — interrupted deployments require improvisation |
+| **Severity** | Medium - interrupted deployments require improvisation |
 | **File** | `training/gr00t/N16/SKILL.md` |
 | **Error** | When the DCV instance was isolated by security, Claude Code had no documented path to recover. It improvised by fixing the security group, restarting the instance, and manually transferring data. |
 | **Cause** | SKILL.md assumes a clean, uninterrupted deployment. No guidance for resuming from a specific phase or recovering from failures. |
-| **Status** | 📋 For colleague — add recovery section |
+| **Status** | For colleague - add recovery section |
 | **Suggested fix** | Add a "Resuming from Interruption" section that documents how to check current state and resume from any phase. Include common failure scenarios (instance stopped, security group changed, training job failed). |
+
+---
+
+### 19. run-isaaclab.sh Multiline Sed Missing Filename Argument
+
+| | |
+|---|---|
+| **Severity** | High — keyboard subscription patch silently fails, policy client patch never applies |
+| **File** | `dcv/run-isaaclab.sh.tpl` |
+| **Error** | `sed: no input files` during `run-isaaclab.sh -c 'echo prerequisites installed'`. Script exits with code 4 due to `set -euo pipefail`. The multiline `sed` command that wraps the keyboard subscription in `if self._keyboard:` guard is missing the `"$EVAL_SCRIPT"` filename argument. The subsequent Python heredoc patch for the policy client also fails to execute because the script aborts at the sed error. |
+| **Cause** | The multiline sed on line 50-55 of `run-isaaclab.sh.tpl` closes with `}'` but has no `"$EVAL_SCRIPT"` filename after the closing quote. |
+| **Status** | Fixed |
+| **Fix** | Changed `}'` to `}' "$EVAL_SCRIPT"` on line 55 of `dcv/run-isaaclab.sh.tpl`. Also manually applied both patches (keyboard subscription guard and policy client N1.6 compatibility) on the remote instance via SSH. |
+| **Files changed** | `dcv/run-isaaclab.sh.tpl` |
+
+---
+
+### 20. Phase 6a.2 References Non-Existent Gr00t16ServicePolicyClient Class
+
+| | |
+|---|---|
+| **Severity** | Low — verification step fails but not a blocker |
+| **File** | `training/gr00t/N16/SKILL.md` |
+| **Error** | Phase 6a.2 instructs `grep "class Gr00t16ServicePolicyClient"` but LeIsaac v0.3.0 only has `Gr00tServicePolicyClient`. The N1.6 support is patched into the existing class, not a separate one. |
+| **Cause** | SKILL.md assumes a class naming convention that doesn't match the actual LeIsaac codebase. |
+| **Status** | Not a blocker — the existing `Gr00tServicePolicyClient` class is patched for N1.6 compatibility. |
+| **Suggested fix** | Update SKILL.md Phase 6a.2 to check for `class Gr00tServicePolicyClient` instead, or check for the N1.6 patch marker string `GR00T N1.6 SimPolicyWrapper`. |
+
+---
+
+### 21. Open-Loop Eval in SKILL.md Uses Flags Not Accepted by N1.6 Eval Script
+
+| | |
+|---|---|
+| **Severity** | Medium — open-loop eval fails with unrecognized options |
+| **File** | `training/gr00t/N16/SKILL.md` |
+| **Error** | Phase 8 open-loop eval command includes `--modality-config-path` and `--video-backend` flags which are not accepted by the N1.6 `gr00t.eval.open_loop_eval` module. The N1.6 eval also requires a running policy server (`--host`/`--port`) rather than loading the model directly. |
+| **Cause** | SKILL.md Phase 8 eval command was written for the N1.5 eval interface. The N1.6 eval module has a different CLI interface. |
+| **Status** | Worked around — ran eval without the invalid flags and connected to the policy server. |
+| **Suggested fix** | Update Phase 8 to start the policy server first, then run open-loop eval with `--host 127.0.0.1 --port 5555` instead of `--modality-config-path` and `--video-backend`. |
+
+---
+
+### 22. EFS Permission Denied When Copying Dataset
+
+| | |
+|---|---|
+| **Severity** | Medium — Phase 7d dataset copy fails |
+| **File** | `training/gr00t/N16/SKILL.md` |
+| **Error** | `mkdir: cannot create directory '/mnt/efs/gr00t/sample_dataset': Permission denied` when copying dataset via scp/rsync. |
+| **Cause** | The EFS mount root is owned by root, and the ubuntu user doesn't have write permission to create `/mnt/efs/gr00t/`. The training Batch job runs as root inside the container so it doesn't hit this issue, but direct SSH commands as ubuntu fail. |
+| **Status** | Worked around — ran `sudo mkdir -p /mnt/efs/gr00t/sample_dataset && sudo chown -R ubuntu:ubuntu /mnt/efs/gr00t` before copying. |
+| **Suggested fix** | Add `sudo chown -R ubuntu:ubuntu /mnt/efs` to the bootstrap script, or add a `sudo mkdir -p && sudo chown` step in Phase 7d of SKILL.md before the rsync command. |
 
 ---
 
@@ -192,19 +317,8 @@ Total time: ~4 hours (deploy ~30min, training ~2hrs, evaluation ~1.5hrs includin
 | File | Change |
 |------|--------|
 | `training/gr00t/N16/so101_modality_config.py` | Fixed language modality key for N1.6 |
-| `dcv/dcv_construct.py` | Removed public ingress rules; added LeIsaac N1.6 patch |
+| `dcv/dcv_construct.py` | Removed public ingress rules; added LeIsaac N1.6 patch; extracted helper script to S3 asset; fixed em dash encoding |
+| `dcv/run-isaaclab.sh.tpl` | New file: externalized run-isaaclab.sh helper script template; fixed missing sed filename argument |
 | `training/gr00t/N16/SKILL.md` | SSM port forwarding; Phase 8a eval rewrite |
 | `training/gr00t/infra/cdk.json` | Fixed hardcoded path (Claude Code runtime fix) |
 | `training/gr00t/infra/app.py` | Set availability_zone and instance_type (Claude Code runtime fix) |
-
----
-
-## Test Results
-
-| Phase | Result |
-|-------|--------|
-| Phase 1-3: Deploy stacks | ✅ Both stacks CREATE_COMPLETE |
-| Phase 4-6: Bootstrap + verify | ✅ All STEP_OK, GPU detected, EFS mounted |
-| Phase 7: Training | ✅ 6000 steps, loss 0.0077, checkpoint saved |
-| Phase 8: Open-loop eval | ✅ MSE 13.836 |
-| Phase 8a: Closed-loop eval | ✅ Pipeline works, 0/10 success (model quality) |

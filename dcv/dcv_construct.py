@@ -7,7 +7,7 @@ Bootstrap flow (Phase 3):
 import os
 import re
 from typing import Optional
-from aws_cdk import aws_ec2 as ec2, aws_iam as iam, Stack, CfnOutput, CfnCreationPolicy, CfnResourceSignal
+from aws_cdk import aws_ec2 as ec2, aws_iam as iam, aws_s3_assets as s3_assets, Stack, CfnOutput, CfnCreationPolicy, CfnResourceSignal
 from constructs import Construct
 try:
     from .versions import validate_version_config
@@ -206,92 +206,32 @@ class DcvWorkstation(Construct):
             f'must "pull-isaaclab-container" "docker pull {container_image}"',
         )
 
-        # Create /usr/local/bin/run-isaaclab.sh helper script
-        # This script wraps `docker run` with GPU, X11, EULA, cache volume mounts,
-        # persistent package volume, leisaac auto-install, and LeIsaac asset download.
-        # NOTE: The heredoc is emitted directly (not inside must '...') because
-        # nested single quotes break shell parsing and cause $VAR expansion
-        # under set -u from the outer bootstrap script.
+        # Create /usr/local/bin/run-isaaclab.sh helper script from S3 asset
+        # The script is too large to inline in UserData (16KB limit), so we
+        # upload it as an S3 asset and download it during bootstrap.
+        helper_tpl_path = os.path.join(os.path.dirname(__file__), "run-isaaclab.sh.tpl")
+        with open(helper_tpl_path, "r") as f:
+            helper_content = f.read()
+        helper_content = helper_content.replace("__CONTAINER_IMAGE__", container_image)
+        helper_content = helper_content.replace("__LEISAAC_COMMIT__", leisaac_commit)
+
+        # Write rendered helper to a temp file for the S3 asset
+        import tempfile
+        helper_tmp = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".sh", prefix="run-isaaclab-", delete=False
+        )
+        helper_tmp.write(helper_content)
+        helper_tmp.close()
+
+        helper_asset = s3_assets.Asset(
+            self, "HelperScriptAsset",
+            path=helper_tmp.name,
+        )
+        # Grant the instance role read access to the S3 asset
+        helper_asset.grant_read(self._instance_role)
+
         self._user_data.add_commands(
-            f"cat > /usr/local/bin/run-isaaclab.sh << 'HELPER_EOF'",
-            '#!/bin/bash',
-            'set -euo pipefail',
-            f'CONTAINER_IMAGE="${{ISAAC_LAB_IMAGE:-{container_image}}}"',
-            'SESSION_NAME="isaac-lab"',
-            f'LEISAAC_COMMIT="{leisaac_commit}"',
-            'PKGS_DIR="/home/ubuntu/isaaclab-pkgs"',
-            'MARKER="$PKGS_DIR/.leisaac-installed"',
-            'ASSETS_DIR="/home/ubuntu/leisaac-assets"',
-            'ASSETS_MARKER="$ASSETS_DIR/.assets-downloaded"',
-            'mkdir -p ~/docker/isaac-sim/cache/kit ~/docker/isaac-sim/cache/ov',
-            'mkdir -p ~/docker/isaac-sim/cache/pip ~/docker/isaac-sim/cache/glcache',
-            'mkdir -p ~/docker/isaac-sim/cache/computecache ~/docker/isaac-sim/logs',
-            'mkdir -p ~/docker/isaac-sim/data ~/docker/isaac-sim/documents',
-            'mkdir -p "$PKGS_DIR"',
-            'if [[ ! -f "$MARKER" ]]; then',
-            '  docker run --rm --gpus all \\',
-            '    --entrypoint bash \\',
-            '    -e ACCEPT_EULA=Y \\',
-            '    -e PYTHONPATH=/workspace/isaaclab-pkgs \\',
-            '    -v "$PKGS_DIR":/workspace/isaaclab-pkgs:rw \\',
-            '    "$CONTAINER_IMAGE" \\',
-            '    -c "/workspace/isaaclab/_isaac_sim/python.sh -m pip install --target /workspace/isaaclab-pkgs \'leisaac[gr00t] @ git+https://github.com/LightwheelAI/leisaac.git@${LEISAAC_COMMIT}#subdirectory=source/leisaac\' && touch /workspace/isaaclab-pkgs/.leisaac-installed"',
-            '  # Fix root-owned files from docker run (container runs as root)',
-            '  sudo chown -R ubuntu:ubuntu "$PKGS_DIR"',
-            'fi',
-            'if [[ ! -f "$ASSETS_MARKER" ]]; then',
-            '  mkdir -p "$ASSETS_DIR/scenes" "$ASSETS_DIR/robots"',
-            '  curl -fsSL -o /tmp/kitchen_with_orange.zip \\',
-            '    https://github.com/LightwheelAI/leisaac/releases/download/v0.1.0/kitchen_with_orange.zip',
-            '  unzip -o /tmp/kitchen_with_orange.zip -d "$ASSETS_DIR/scenes/"',
-            '  rm -f /tmp/kitchen_with_orange.zip',
-            '  curl -fsSL -o "$ASSETS_DIR/robots/so101_follower.usd" \\',
-            '    https://github.com/LightwheelAI/leisaac/releases/download/v0.1.0/so101_follower.usd',
-            '  touch "$ASSETS_MARKER"',
-            'fi',
-            'SCRIPTS_DIR="/home/ubuntu/leisaac-repo"',
-            'if [[ ! -d "$SCRIPTS_DIR/scripts" ]]; then',
-            '  git clone https://github.com/LightwheelAI/leisaac.git "$SCRIPTS_DIR"',
-            '  cd "$SCRIPTS_DIR" && git checkout "$LEISAAC_COMMIT"',
-            'fi',
-            '# Patch policy_inference.py to support gr00tn1.6 (upstream LeIsaac v0.3.0 only supports gr00tn1.5)',
-            'EVAL_SCRIPT="$SCRIPTS_DIR/scripts/evaluation/policy_inference.py"',
-            'if [[ -f "$EVAL_SCRIPT" ]] && ! grep -q "gr00tn1.6" "$EVAL_SCRIPT"; then',
-            '  sed -i \'s/if model_type in \\["gr00tn1.5", "lerobot", "openpi"\\]/if model_type in ["gr00tn1.5", "gr00tn1.6", "lerobot", "openpi"]/\' "$EVAL_SCRIPT"',
-            '  sed -i \'s/if args_cli.policy_type == "gr00tn1.5"/if args_cli.policy_type in ["gr00tn1.5", "gr00tn1.6"]/\' "$EVAL_SCRIPT"',
-            'fi',
-            'xhost +local:docker 2>/dev/null || true',
-            'XAUTH_FILE="/run/user/1000/dcv/console.xauth"',
-            'if [[ ! -f "$XAUTH_FILE" ]]; then XAUTH_FILE="$HOME/.Xauthority"; fi',
-            'XAUTH_MOUNT=""',
-            'if [[ -f "$XAUTH_FILE" ]]; then XAUTH_MOUNT="-v $XAUTH_FILE:/root/.Xauthority:ro"; fi',
-            'docker run \\',
-            '  --name "$SESSION_NAME" \\',
-            '  --entrypoint bash \\',
-            '  -it \\',
-            '  --gpus all \\',
-            '  -e "ACCEPT_EULA=Y" \\',
-            '  -e "PRIVACY_CONSENT=Y" \\',
-            '  -e DISPLAY \\',
-            '  -e LEISAAC_ASSETS_ROOT=/assets \\',
-            '  -e PYTHONPATH=/workspace/isaaclab-pkgs:${PYTHONPATH:-} \\',
-            '  $XAUTH_MOUNT \\',
-            '  -v "$ASSETS_DIR":/assets:ro \\',
-            '  -v ~/docker/isaac-sim/cache/kit:/isaac-sim/kit/cache:rw \\',
-            '  -v ~/docker/isaac-sim/cache/ov:/root/.cache/ov:rw \\',
-            '  -v ~/docker/isaac-sim/cache/pip:/root/.cache/pip:rw \\',
-            '  -v ~/docker/isaac-sim/cache/glcache:/root/.cache/nvidia/GLCache:rw \\',
-            '  -v ~/docker/isaac-sim/cache/computecache:/root/.nv/ComputeCache:rw \\',
-            '  -v ~/docker/isaac-sim/logs:/root/.nvidia-omniverse/logs:rw \\',
-            '  -v ~/docker/isaac-sim/data:/root/.local/share/ov/data:rw \\',
-            '  -v ~/docker/isaac-sim/documents:/root/Documents:rw \\',
-            '  -v "$PKGS_DIR":/workspace/isaaclab-pkgs:rw \\',
-            '  --rm \\',
-            '  --network=host \\',
-            '  -v $HOME/leisaac-repo/scripts:/workspace/scripts:ro \\',
-            '  "$CONTAINER_IMAGE" \\',
-            '  "$@"',
-            'HELPER_EOF',
+            f'must "download-helper-script" "aws s3 cp s3://{helper_asset.s3_bucket_name}/{helper_asset.s3_object_key} /usr/local/bin/run-isaaclab.sh"',
             'chmod +x /usr/local/bin/run-isaaclab.sh',
             'must "create-helper-script" "test -x /usr/local/bin/run-isaaclab.sh"',
         )
@@ -406,7 +346,7 @@ class DcvWorkstation(Construct):
         self._security_group = ec2.SecurityGroup(
             self, "SecurityGroup",
             vpc=self._vpc,
-            description="DCV workstation — access via SSM port forwarding only",
+            description="DCV workstation - access via SSM port forwarding only",
             allow_all_outbound=True,
         )
 

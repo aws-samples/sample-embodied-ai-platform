@@ -343,14 +343,22 @@ run-isaaclab.sh
 # Python wrapper works
 /workspace/isaaclab/_isaac_sim/python.sh --version
 
-# LeIsaac N1.6 client is present
-grep "class Gr00t16ServicePolicyClient" /workspace/isaaclab-pkgs/leisaac/policy/service_policy_clients.py
-
 # GPU accessible
 nvidia-smi
 ```
 
 Exit the container with `exit` or Ctrl-D.
+
+### 6a.3 Verify Policy Client N1.6 Patch
+
+The `run-isaaclab.sh` helper patches the LeIsaac policy client for N1.6 compatibility
+on first launch. Confirm the patch applied:
+
+```bash
+ssh dcv-isaac "grep -q 'GR00T N1.6 SimPolicyWrapper' /home/ubuntu/isaaclab-pkgs/leisaac/policy/service_policy_clients.py && echo 'Policy client patch OK' || echo 'MISSING — re-run run-isaaclab.sh'"
+```
+
+If missing, re-run `run-isaaclab.sh -c 'echo patched'` and check again.
 
 ## Phase 7: Submit Training Job
 
@@ -424,6 +432,61 @@ ssh dcv-isaac "bash -l -c '
 View loss curves at `http://localhost:8080` (after starting the SSH port forward above).
 Stop/restart the server anytime — data persists in the `wandb-data` Docker volume.
 
+## Phase 7d: Prepare Dataset on EFS for Evaluation
+
+The training job uses the dataset baked into the container image during CodeBuild, but
+open-loop evaluation runs on the DCV instance and needs the dataset on EFS. Copy the
+sample dataset from your local machine, then generate the metadata files the eval
+scripts require.
+
+```bash
+# Copy sample dataset to EFS
+REPO_ROOT=$(git rev-parse --show-toplevel)
+rsync -avz "$REPO_ROOT/training/sample_dataset/" dcv-isaac:/mnt/efs/gr00t/sample_dataset/
+
+# Create modality.json (maps dataset columns to model modality keys)
+ssh dcv-isaac "cat > /mnt/efs/gr00t/sample_dataset/meta/modality.json << 'EOF'
+{
+  \"action\": {
+    \"single_arm\": {\"start\": 0, \"end\": 5},
+    \"gripper\": {\"start\": 5, \"end\": 6}
+  },
+  \"state\": {
+    \"single_arm\": {\"start\": 0, \"end\": 5},
+    \"gripper\": {\"start\": 5, \"end\": 6}
+  },
+  \"annotation\": {
+    \"human.action.task_description\": {
+      \"original_key\": \"task_index\"
+    }
+  },
+  \"video\": {
+    \"front\": {
+      \"original_key\": \"observation.images.front\",
+      \"shape\": [480, 640, 3]
+    },
+    \"wrist\": {
+      \"original_key\": \"observation.images.wrist\",
+      \"shape\": [480, 640, 3]
+    }
+  }
+}
+EOF"
+
+# Generate stats.json (normalization statistics used by the eval pipeline)
+ssh dcv-isaac "docker run --gpus all --rm \
+  -v /mnt/efs:/mnt/efs \
+  --entrypoint /bin/sh \
+  $EcrImageUri \
+  -c 'cd /workspace/gr00t-repo && python3 -m gr00t.data.stats \
+    --dataset-path /mnt/efs/gr00t/sample_dataset \
+    --embodiment-tag NEW_EMBODIMENT'"
+```
+
+> `modality.json` maps the dataset's column names to the model's expected modality keys
+> (video cameras, state joints, action joints, language annotations). `stats.json`
+> contains per-feature normalization statistics. Both are required by `open_loop_eval`.
+
 ## Phase 8: Model Evaluation
 
 ### Open-loop evaluation
@@ -441,20 +504,29 @@ ssh dcv-isaac "docker pull $EcrImageUri"
 ssh dcv-isaac "docker run --gpus all --rm \
   -v /mnt/efs:/mnt/efs:ro \
   --shm-size=8g \
+  --entrypoint /bin/sh \
   $EcrImageUri \
-  python -m gr00t.eval.robot_eval \
+  -c 'cd /workspace/gr00t-repo && python3 -m gr00t.eval.open_loop_eval \
     --model-path $CHECKPOINT \
-    --embodiment-tag new_embodiment \
+    --embodiment-tag NEW_EMBODIMENT \
     --dataset-path /mnt/efs/gr00t/sample_dataset \
     --modality-config-path /workspace/scripts/so101_modality_config.py \
     --modality-keys single_arm gripper \
-    --video-backend torchvision_av"
+    --video-backend torchvision_av'"
 ```
+
+> **Note:** The module is `gr00t.eval.open_loop_eval` (not `robot_eval`). Use
+> `--entrypoint /bin/sh` because the container's default entrypoint invokes a uv-managed
+> Python that can't be exec'd directly. The `--embodiment-tag` is case-sensitive and must
+> be `NEW_EMBODIMENT` (uppercase).
 
 ### Closed-loop evaluation (policy server)
 
 Serves a trained checkpoint as a ZMQ policy server for real-time robot control or
-simulation testing on TCP port 5555.
+simulation testing on TCP port 5555. The `--use-sim-policy-wrapper` flag is required
+for LeIsaac compatibility — it converts between flat-keyed observations (`video.front`,
+`state.single_arm`) and the nested format the model expects, and prefixes action keys
+with `action.` in the response.
 
 ```bash
 CHECKPOINT=/mnt/efs/gr00t/checkpoints/$JOB_ID/checkpoint-6000
@@ -464,24 +536,19 @@ ssh dcv-isaac "docker run --gpus all -d \
   --shm-size=8g \
   --network host \
   --entrypoint /bin/sh \
-  -v $CHECKPOINT:/workspace/checkpoint \
+  -v /mnt/efs:/mnt/efs \
   $EcrImageUri \
-  -c 'python3 -c \"
-from gr00t.model.policy import Gr00tPolicy
-from gr00t.eval.robot import RobotInferenceServer
-policy = Gr00tPolicy(
-    model_path=\\\"/workspace/checkpoint\\\",
-    embodiment_tag=\\\"new_embodiment\\\",
-    device=\\\"cuda\\\",
-)
-server = RobotInferenceServer(policy=policy, host=\\\"0.0.0.0\\\", port=5555)
-server.run()
-\"'"
+  -c 'cd /workspace/gr00t-repo && python3 -m gr00t.eval.run_gr00t_server \
+    --model-path $CHECKPOINT \
+    --embodiment-tag NEW_EMBODIMENT \
+    --use-sim-policy-wrapper \
+    --port 5555'"
 ```
 
-> The N1.6 container uses `RobotInferenceServer` from `gr00t.eval.robot` (ZMQ-based),
-> not a standalone `run_gr00t_server.py` script. Use `--entrypoint /bin/sh` because
-> the NGC default `/usr/bin/bash` is broken.
+> Use `--entrypoint /bin/sh` because the container's default entrypoint invokes a
+> uv-managed Python that can't be exec'd directly. The server module is
+> `gr00t.eval.run_gr00t_server` which wraps `Gr00tPolicy` in a `PolicyServer` (ZMQ).
+> Allow ~60 seconds for model loading before the server begins accepting connections.
 
 Verify the server is listening:
 ```bash
@@ -516,6 +583,8 @@ ssh dcv-isaac "docker run --gpus all --rm --network host \
   -e ACCEPT_EULA=Y -e PRIVACY_CONSENT=Y \
   -e PYTHONPATH=/workspace/isaaclab-pkgs \
   -e PYTHONUNBUFFERED=1 \
+  -e DISPLAY=:1 \
+  -v /tmp/.X11-unix:/tmp/.X11-unix:ro \
   -v /home/ubuntu/isaaclab-pkgs:/workspace/isaaclab-pkgs:rw \
   -v /home/ubuntu/leisaac-repo/scripts:/workspace/scripts:ro \
   -v /home/ubuntu/leisaac-assets:/assets:ro \
@@ -536,6 +605,11 @@ ssh dcv-isaac "docker run --gpus all --rm --network host \
     --enable_cameras 2>&1 | tee /mnt/efs/gr00t/eval-results.log"
 ```
 
+> `DISPLAY=:1` and the X11 socket mount are required because `--enable_cameras` uses
+> Vulkan rendering for camera frames, which needs an active display. DCV runs on
+> display `:1` (not `:0`). Without these flags, the render loop blocks silently with
+> 0% GPU utilization despite allocating VRAM.
+>
 > `PYTHONUNBUFFERED=1` ensures eval output streams in real time over SSH.
 > Results are persisted to `/mnt/efs/gr00t/eval-results.log` so the final success rate
 > is available even after the container exits (`--rm`).
