@@ -15,7 +15,7 @@ SUPPORTED_CONFIGS: Dict[str, Dict[str, Any]] = {
     "v2.3.0": {
         "container_image": "nvcr.io/nvidia/isaac-lab:2.3.0",
         "dcv": "2025.0-20103",
-        "leisaac": "v0.3.0",
+        "leisaac": "ef16f985e3bb2bf6f3012d0a40c2ca5c17c31cb6",
     },
 }
 

@@ -523,10 +523,9 @@ ssh dcv-isaac "docker run --gpus all --rm \
 ### Closed-loop evaluation (policy server)
 
 Serves a trained checkpoint as a ZMQ policy server for real-time robot control or
-simulation testing on TCP port 5555. The `--use-sim-policy-wrapper` flag is required
-for LeIsaac compatibility — it converts between flat-keyed observations (`video.front`,
-`state.single_arm`) and the nested format the model expects, and prefixes action keys
-with `action.` in the response.
+simulation testing on TCP port 5555. Do **not** use `--use-sim-policy-wrapper` — the
+`Gr00t16ServicePolicyClient` in LeIsaac sends observations in the nested format the
+server expects natively, and the wrapper would cause a key mismatch error.
 
 ```bash
 CHECKPOINT=/mnt/efs/gr00t/checkpoints/$JOB_ID/checkpoint-6000
@@ -541,7 +540,6 @@ ssh dcv-isaac "docker run --gpus all -d \
   -c 'cd /workspace/gr00t-repo && python3 -m gr00t.eval.run_gr00t_server \
     --model-path $CHECKPOINT \
     --embodiment-tag NEW_EMBODIMENT \
-    --use-sim-policy-wrapper \
     --port 5555'"
 ```
 

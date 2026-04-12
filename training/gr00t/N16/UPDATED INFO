@@ -1,0 +1,75 @@
+Bug
+Gr00t16ServicePolicyClient.get_action() in leisaac/policy/service_policy_clients.py sends the language key annotation.human.task_description, but GR00T N1.6 models expect annotation.human.action.task_description (note the extra .action. segment).
+
+This causes the GR00T N1.6 policy server's strict observation validation to fail. The server returns an error dict {"error": "..."}, and the client then raises a cryptic KeyError: 0 when trying action_chunk[0] on the error response.
+
+Affected code
+leisaac/source/leisaac/leisaac/policy/service_policy_clients.py
+
+Line 136 in d2cbfd2
+
+  
+# Current (line 136):
+language = {
+    "annotation.human.task_description": [[observation_dict["task_description"]]],
+}
+
+# Should be:
+language = {
+    "annotation.human.action.task_description": [[observation_dict["task_description"]]],
+}
+The N1.5 client (Gr00tServicePolicyClient) correctly uses annotation.human.task_description for N1.5, and the N1.6 client should use annotation.human.action.task_description for N1.6.
+
+Reproduction
+Start a GR00T N1.6 policy server (run_gr00t_server.py) with a fine-tuned checkpoint
+Run policy_inference.py with --policy_type=gr00tn1.6
+Evaluation fails with:
+File "leisaac/policy/service_policy_clients.py", line 171, in get_action
+    action_chunk = action_chunk[0]
+KeyError: 0
+Suggested fix
+-            "annotation.human.task_description": [[observation_dict["task_description"]]],
++            "annotation.human.action.task_description": [[observation_dict["task_description"]]],
+Additional suggestion
+The error handling could be improved to surface server errors instead of the cryptic KeyError: 0. Adding a check after call_endpoint would help:
+
+action_chunk = self.call_endpoint("get_action", obs_dict)
+if isinstance(action_chunk, dict) and "error" in action_chunk:
+    raise RuntimeError(f"Policy server error: {action_chunk['error']}")
+Environment
+LeIsaac commit: d2cbfd2e33517f2094e1904ff817aa17de6e8939
+GR00T N1.6 commit: e8e625f4f21898c506a1d8f7d20a289c97a52acf
+IsaacLab: nvcr.io/nvidia/isaac-lab:2.3.0
+Activity
+
+aaronsu11
+added a commit that references this issue 2 weeks ago
+fix(dcv): auto-patch leisaac N1.6 language key bug, improve SKILL.md …
+
+0b99b15
+EverNorif
+EverNorif commented 2 weeks ago
+EverNorif
+2 weeks ago
+Collaborator
+Training a model in gr00t n1.6 that can be successfully used for inference in leisaac requires preparing some configs. You can refer to this commit.
+
+The key here corresponds to modality_keys in leisaac_config.py, which we set to annotation.human.task_description. This is consistent with the code in leisaac.
+
+aaronsu11
+aaronsu11 commented 2 weeks ago
+aaronsu11
+2 weeks ago · edited by aaronsu11
+Author
+Thanks for your reply @EverNorif.
+
+I see the issue now. The latest GR00T repo provided inconsistent config examples using both annotation.human.action.task_description in the main fine-tuning guide and annotation.human.task_description in the SO-100 specific guide. I happened to have picked up the former during fine-tuning and in turn produced this issue.
+
+Is the purpose of this fork of the GR00T repo to maintain leisaac compatibility patches to all major GR00T version releases in the future? What else other than the modality config examples should we use the fork for?
+
+EverNorif
+EverNorif commented 2 weeks ago
+EverNorif
+2 weeks ago
+Collaborator
+@aaronsu11 This fork is used to test the compatibility between leisaac and gr00t and is for reference only. We will try our best to support the latest version of gr00t, but we will also clearly indicate in the code and documentation the commit versions that have been tested and verified.

@@ -312,13 +312,53 @@ Total time: ~4 hours (deploy ~30min, training ~2hrs, evaluation ~1.5hrs includin
 
 ---
 
+### 23. LeIsaac ef16f98 Requires `lerobot` Dependency Not in isaac-lab:2.3.0
+
+| | |
+|---|---|
+| **Severity** | High — eval import fails with `ModuleNotFoundError: No module named 'lerobot'` |
+| **File** | `dcv/run-isaaclab.sh.tpl` |
+| **Error** | After updating LeIsaac from `v0.3.0` to `ef16f985e3bb`, the `leisaac.tasks` import chain pulls in `leisaac.enhance.datasets.lerobot_dataset_handler` which requires the `lerobot` package. The `isaac-lab:2.3.0` container doesn't include this. |
+| **Cause** | The newer LeIsaac commit added `lerobot` as an implicit dependency through its task registration code, but `pip install 'leisaac[gr00t]'` doesn't pull it in automatically. |
+| **Status** | Worked around — manually ran `pip install --target /workspace/isaaclab-pkgs lerobot` in the container. |
+| **Suggested fix** | Add `lerobot` to `run-isaaclab.sh.tpl` pip install, or pin the LeIsaac dependency to include it: `'leisaac[gr00t,lerobot]'`. Alternatively, the LeIsaac `pyproject.toml` should declare `lerobot` as a required dependency for the `gr00t` extra. |
+
+---
+
+### 24. Newer LeIsaac Removes `Isaac-Gr00t-Franka-Cabinet-Direct-v0` Task
+
+| | |
+|---|---|
+| **Severity** | Critical — closed-loop eval cannot run against trained Franka model |
+| **File** | `dcv/versions.py`, LeIsaac task registry |
+| **Error** | `gymnasium.error.NameNotFound: Environment 'Isaac-Gr00t-Franka-Cabinet-Direct' doesn't exist`. Using built-in `Isaac-Franka-Cabinet-Direct-v0` fails with `AttributeError: 'FrankaCabinetEnvCfg' has no attribute 'use_teleop_device'`. |
+| **Cause** | LeIsaac `ef16f985e3bb` removed all `Isaac-Gr00t-*` tasks and replaced them with `LeIsaac-SO101-*` and `LeIsaac-LeKiwi-*` tasks for SO101/LeKiwi robots. The built-in IsaacLab Franka task lacks the `use_teleop_device()` method that the new `policy_inference.py` requires. Our trained model is Franka-based and incompatible with the SO101 tasks. |
+| **Status** | ⚠️ Blocking — cannot validate closed-loop eval with newer LeIsaac + Franka model |
+| **Suggested fix** | Either: (1) pin LeIsaac to a commit that still has the Franka task, (2) retrain on an SO101 task, or (3) write a thin task wrapper that makes `Isaac-Franka-Cabinet-Direct-v0` compatible with the new `policy_inference.py` by adding `use_teleop_device()`. |
+
+---
+
+### 25. All Three `run-isaaclab.sh.tpl` Patches Now Unnecessary
+
+| | |
+|---|---|
+| **Severity** | Improvement |
+| **File** | `dcv/run-isaaclab.sh.tpl` |
+| **Error** | N/A — positive finding |
+| **Cause** | LeIsaac `ef16f985e3bb` has native support for: (1) `gr00tn1.6` policy type in `policy_inference.py`, (2) `Gr00t16ServicePolicyClient` class, (3) keyboard headless mode (`self._appwindow ... if self._appwindow else None` + `if self._keyboard:` guard). All three patches from `run-isaaclab.sh.tpl` are now redundant. |
+| **Status** | ✅ Fixed — all patches removed from `dcv/run-isaaclab.sh.tpl` |
+| **Files changed** | `dcv/run-isaaclab.sh.tpl` (reduced from 202 lines to 72 lines) |
+
+---
+
 ## Files Changed (Local)
 
 | File | Change |
 |------|--------|
 | `training/gr00t/N16/so101_modality_config.py` | Fixed language modality key for N1.6 |
 | `dcv/dcv_construct.py` | Removed public ingress rules; added LeIsaac N1.6 patch; extracted helper script to S3 asset; fixed em dash encoding |
-| `dcv/run-isaaclab.sh.tpl` | New file: externalized run-isaaclab.sh helper script template; fixed missing sed filename argument |
+| `dcv/run-isaaclab.sh.tpl` | New file: externalized run-isaaclab.sh helper script template; all N1.6 patches removed (native in ef16f98) |
+| `dcv/versions.py` | Updated LeIsaac commit from `v0.3.0` to `ef16f985e3bb2bf6f3012d0a40c2ca5c17c31cb6` |
 | `training/gr00t/N16/SKILL.md` | SSM port forwarding; Phase 8a eval rewrite |
 | `training/gr00t/infra/cdk.json` | Fixed hardcoded path (Claude Code runtime fix) |
 | `training/gr00t/infra/app.py` | Set availability_zone and instance_type (Claude Code runtime fix) |
