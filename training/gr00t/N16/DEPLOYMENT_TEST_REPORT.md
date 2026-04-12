@@ -77,21 +77,6 @@ Total time: ~4 hours (deploy ~30min, training ~2hrs, evaluation ~1.5hrs includin
 
 ---
 
-### 5. LeIsaac v0.3.0 Doesn't Support gr00tn1.6 Policy Type
-
-| | |
-|---|---|
-| **Severity** | Critical — eval fails with unrecognized policy type |
-| **File** | `scripts/evaluation/policy_inference.py` (LeIsaac repo) |
-| **Error** | `policy_inference.py` only handles `gr00tn1.5`, `lerobot`, and `openpi` in both `preprocess_obs_dict` and policy creation. `gr00tn1.6` is not recognized. |
-| **Cause** | LeIsaac v0.3.0 was released before N1.6 support was added. The `Gr00t16ServicePolicyClient` class exists in the package but the eval script hasn't been wired up to use it. |
-| **Status** | ✅ Patched locally |
-| **Fix** | Added a post-clone `sed` patch in `dcv_construct.py` inside the `run-isaaclab.sh` helper script. After cloning LeIsaac, it patches `policy_inference.py` to accept `gr00tn1.6` in both the preprocessing and policy creation blocks. |
-| **Files changed** | `dcv/dcv_construct.py` |
-| **Note** | LeIsaac upstream (`LightwheelAI/leisaac`) needs native N1.6 support added. Once upstream adds `gr00tn1.6` handling, the local `sed` patch can be removed. Consider raising a PR or flagging to colleague. |
-
----
-
 ### 6. Hardcoded Python Path in cdk.json
 
 | | |
@@ -141,8 +126,8 @@ Total time: ~4 hours (deploy ~30min, training ~2hrs, evaluation ~1.5hrs includin
 | **File** | `training/gr00t/N16/SKILL.md` |
 | **Error** | SKILL.md references `run_gr00t_server.py` but the N1.6 container has a different server structure. The ZMQ server is in `gr00t/eval/service.py` via `RobotInferenceServer`, not a standalone script. |
 | **Cause** | The documented command was written for a different container layout. Claude Code had to explore the container to find the correct server interface. |
-| **Status** | ✅ Fixed |
-| **Fix** | Replaced the inline `RobotInferenceServer` script with `python3 -m gr00t.eval.run_gr00t_server` and added `--use-sim-policy-wrapper` to the Phase 8 policy server command in SKILL.md. Added `ss -tlnp | grep 5555` verification step. |
+| **Status** | ✅ Fixed (updated by #25) |
+| **Fix** | Replaced the inline `RobotInferenceServer` script with `python3 -m gr00t.eval.run_gr00t_server`. Originally added `--use-sim-policy-wrapper` but this was later removed — see #25. Added `ss -tlnp | grep 5555` verification step. |
 | **Files changed** | `training/gr00t/N16/SKILL.md` |
 
 ---
@@ -212,81 +197,15 @@ Total time: ~4 hours (deploy ~30min, training ~2hrs, evaluation ~1.5hrs includin
 | **File** | `training/gr00t/N16/SKILL.md` |
 | **Error** | The LeIsaac closed-loop eval container ran for over an hour with 119% CPU but 0% GPU utilization. No episode output was produced. Docker logs stuck at 414 lines with no growth. |
 | **Cause** | The Phase 8a `docker run` command did not pass the display environment (`DISPLAY=:1`) or mount the X11 socket (`/tmp/.X11-unix`). IsaacSim requires a rendering context for `--enable_cameras`. The DCV auto-session runs on display `:1` (not `:0`), and without passing this to the container, IsaacSim hangs during rendering initialization. The `run-isaaclab.sh` helper script handles this correctly (it sets `-e DISPLAY` and mounts Xauth), but the direct `docker run` in SKILL.md Phase 8a did not. |
-| **Status** | ✅ Fixed |
-| **Fix** | Added `-e DISPLAY=:1 -v /tmp/.X11-unix:/tmp/.X11-unix:ro` to the Phase 8a eval `docker run` command in SKILL.md. Added a keyboard null-check patch in `run-isaaclab.sh.tpl` to handle missing keyboard in headless fallback. |
-| **Files changed** | `training/gr00t/N16/SKILL.md`, `dcv/run-isaaclab.sh.tpl` |
+| **Status** | ✅ Fixed (keyboard patch superseded by #24) |
+| **Fix** | Added `-e DISPLAY=:1 -v /tmp/.X11-unix:/tmp/.X11-unix:ro` to the Phase 8a eval `docker run` command in SKILL.md. Originally added a keyboard null-check patch in `run-isaaclab.sh.tpl`, but this is now native in LeIsaac `ef16f98` and the patch was removed — see #24. |
+| **Files changed** | `training/gr00t/N16/SKILL.md` |
 | **Note** | The display number (`:1`) is set by DCV's auto-console-session and may vary. This fix should be baked into the SKILL.md eval command permanently. |
 
----
-
-### 15. Policy Server Missing Sim Wrapper - Action Key Mismatch
-
-| | |
-|---|---|
-| **Severity** | High - eval crashes after first episode with KeyError |
-| **File** | `training/gr00t/N16/SKILL.md` |
-| **Error** | LeIsaac eval crashed with `KeyError: 'action.single_arm'` after completing episode 1. The policy server returns keys like `single_arm` and `gripper`, but the LeIsaac `Gr00tServicePolicyClient` expects `action.single_arm` and `action.gripper` (with the `action.` prefix). |
-| **Cause** | The GR00T `Gr00tPolicy` returns raw action keys without the `action.` prefix. The `Gr00tSimPolicyWrapper` class adds this prefix, but the SKILL.md Phase 8 policy server command does not use the wrapper. The policy server needs `--use-sim-policy-wrapper` to produce keys compatible with LeIsaac. |
-| **Status** | ✅ Fixed |
-| **Fix** | Replaced the inline `RobotInferenceServer` script with `python3 -m gr00t.eval.run_gr00t_server` and added `--use-sim-policy-wrapper` to the Phase 8 policy server command in SKILL.md. |
-| **Files changed** | `training/gr00t/N16/SKILL.md` |
 
 ---
 
-### 17. Claude Code Improvises Instead of Following SKILL.md
-
-| | |
-|---|---|
-| **Severity** | Low - works but wastes time |
-| **File** | `training/gr00t/N16/SKILL.md` |
-| **Error** | Claude Code inspected parquet files, explored container internals, and ran diagnostic commands not in the SKILL.md. While this helped debug issues, it added ~30 minutes of unnecessary exploration. |
-| **Cause** | SKILL.md is not prescriptive enough - it describes what to do but not what NOT to do. Claude Code fills gaps with its own judgment. |
-| **Status** | For colleague - make SKILL.md more explicit |
-| **Suggested fix** | Add guardrails to SKILL.md: "Do not inspect dataset contents or container internals unless a command fails. Follow the commands exactly as written." |
-
----
-
-### 18. No Resume/Recovery Guidance
-
-| | |
-|---|---|
-| **Severity** | Medium - interrupted deployments require improvisation |
-| **File** | `training/gr00t/N16/SKILL.md` |
-| **Error** | When the DCV instance was isolated by security, Claude Code had no documented path to recover. It improvised by fixing the security group, restarting the instance, and manually transferring data. |
-| **Cause** | SKILL.md assumes a clean, uninterrupted deployment. No guidance for resuming from a specific phase or recovering from failures. |
-| **Status** | For colleague - add recovery section |
-| **Suggested fix** | Add a "Resuming from Interruption" section that documents how to check current state and resume from any phase. Include common failure scenarios (instance stopped, security group changed, training job failed). |
-
----
-
-### 19. run-isaaclab.sh Multiline Sed Missing Filename Argument
-
-| | |
-|---|---|
-| **Severity** | High — keyboard subscription patch silently fails, policy client patch never applies |
-| **File** | `dcv/run-isaaclab.sh.tpl` |
-| **Error** | `sed: no input files` during `run-isaaclab.sh -c 'echo prerequisites installed'`. Script exits with code 4 due to `set -euo pipefail`. The multiline `sed` command that wraps the keyboard subscription in `if self._keyboard:` guard is missing the `"$EVAL_SCRIPT"` filename argument. The subsequent Python heredoc patch for the policy client also fails to execute because the script aborts at the sed error. |
-| **Cause** | The multiline sed on line 50-55 of `run-isaaclab.sh.tpl` closes with `}'` but has no `"$EVAL_SCRIPT"` filename after the closing quote. |
-| **Status** | Fixed |
-| **Fix** | Changed `}'` to `}' "$EVAL_SCRIPT"` on line 55 of `dcv/run-isaaclab.sh.tpl`. Also manually applied both patches (keyboard subscription guard and policy client N1.6 compatibility) on the remote instance via SSH. |
-| **Files changed** | `dcv/run-isaaclab.sh.tpl` |
-
----
-
-### 20. Phase 6a.2 References Non-Existent Gr00t16ServicePolicyClient Class
-
-| | |
-|---|---|
-| **Severity** | Low — verification step fails but not a blocker |
-| **File** | `training/gr00t/N16/SKILL.md` |
-| **Error** | Phase 6a.2 instructs `grep "class Gr00t16ServicePolicyClient"` but LeIsaac v0.3.0 only has `Gr00tServicePolicyClient`. The N1.6 support is patched into the existing class, not a separate one. |
-| **Cause** | SKILL.md assumes a class naming convention that doesn't match the actual LeIsaac codebase. |
-| **Status** | Not a blocker — the existing `Gr00tServicePolicyClient` class is patched for N1.6 compatibility. |
-| **Suggested fix** | Update SKILL.md Phase 6a.2 to check for `class Gr00tServicePolicyClient` instead, or check for the N1.6 patch marker string `GR00T N1.6 SimPolicyWrapper`. |
-
----
-
-### 21. Open-Loop Eval in SKILL.md Uses Flags Not Accepted by N1.6 Eval Script
+### 15. Open-Loop Eval in SKILL.md Uses Flags Not Accepted by N1.6 Eval Script
 
 | | |
 |---|---|
@@ -299,7 +218,7 @@ Total time: ~4 hours (deploy ~30min, training ~2hrs, evaluation ~1.5hrs includin
 
 ---
 
-### 22. EFS Permission Denied When Copying Dataset
+### 16. EFS Permission Denied When Copying Dataset
 
 | | |
 |---|---|
@@ -312,7 +231,7 @@ Total time: ~4 hours (deploy ~30min, training ~2hrs, evaluation ~1.5hrs includin
 
 ---
 
-### 23. LeIsaac ef16f98 Requires `lerobot` Dependency Not in isaac-lab:2.3.0
+### 17. LeIsaac ef16f98 Requires `lerobot` Dependency Not in isaac-lab:2.3.0
 
 | | |
 |---|---|
@@ -320,25 +239,13 @@ Total time: ~4 hours (deploy ~30min, training ~2hrs, evaluation ~1.5hrs includin
 | **File** | `dcv/run-isaaclab.sh.tpl` |
 | **Error** | After updating LeIsaac from `v0.3.0` to `ef16f985e3bb`, the `leisaac.tasks` import chain pulls in `leisaac.enhance.datasets.lerobot_dataset_handler` which requires the `lerobot` package. The `isaac-lab:2.3.0` container doesn't include this. |
 | **Cause** | The newer LeIsaac commit added `lerobot` as an implicit dependency through its task registration code, but `pip install 'leisaac[gr00t]'` doesn't pull it in automatically. |
-| **Status** | Worked around — manually ran `pip install --target /workspace/isaaclab-pkgs lerobot` in the container. |
-| **Suggested fix** | Add `lerobot` to `run-isaaclab.sh.tpl` pip install, or pin the LeIsaac dependency to include it: `'leisaac[gr00t,lerobot]'`. Alternatively, the LeIsaac `pyproject.toml` should declare `lerobot` as a required dependency for the `gr00t` extra. |
+| **Status** | ✅ Fixed |
+| **Fix** | Added `lerobot` to the pip install line in `dcv/run-isaaclab.sh.tpl`. |
+| **Files changed** | `dcv/run-isaaclab.sh.tpl` |
 
 ---
 
-### 24. Newer LeIsaac Removes `Isaac-Gr00t-Franka-Cabinet-Direct-v0` Task
-
-| | |
-|---|---|
-| **Severity** | Critical — closed-loop eval cannot run against trained Franka model |
-| **File** | `dcv/versions.py`, LeIsaac task registry |
-| **Error** | `gymnasium.error.NameNotFound: Environment 'Isaac-Gr00t-Franka-Cabinet-Direct' doesn't exist`. Using built-in `Isaac-Franka-Cabinet-Direct-v0` fails with `AttributeError: 'FrankaCabinetEnvCfg' has no attribute 'use_teleop_device'`. |
-| **Cause** | LeIsaac `ef16f985e3bb` removed all `Isaac-Gr00t-*` tasks and replaced them with `LeIsaac-SO101-*` and `LeIsaac-LeKiwi-*` tasks for SO101/LeKiwi robots. The built-in IsaacLab Franka task lacks the `use_teleop_device()` method that the new `policy_inference.py` requires. Our trained model is Franka-based and incompatible with the SO101 tasks. |
-| **Status** | ⚠️ Blocking — cannot validate closed-loop eval with newer LeIsaac + Franka model |
-| **Suggested fix** | Either: (1) pin LeIsaac to a commit that still has the Franka task, (2) retrain on an SO101 task, or (3) write a thin task wrapper that makes `Isaac-Franka-Cabinet-Direct-v0` compatible with the new `policy_inference.py` by adding `use_teleop_device()`. |
-
----
-
-### 25. All Three `run-isaaclab.sh.tpl` Patches Now Unnecessary
+### 18. All Three `run-isaaclab.sh.tpl` Patches Now Unnecessary
 
 | | |
 |---|---|
@@ -348,6 +255,34 @@ Total time: ~4 hours (deploy ~30min, training ~2hrs, evaluation ~1.5hrs includin
 | **Cause** | LeIsaac `ef16f985e3bb` has native support for: (1) `gr00tn1.6` policy type in `policy_inference.py`, (2) `Gr00t16ServicePolicyClient` class, (3) keyboard headless mode (`self._appwindow ... if self._appwindow else None` + `if self._keyboard:` guard). All three patches from `run-isaaclab.sh.tpl` are now redundant. |
 | **Status** | ✅ Fixed — all patches removed from `dcv/run-isaaclab.sh.tpl` |
 | **Files changed** | `dcv/run-isaaclab.sh.tpl` (reduced from 202 lines to 72 lines) |
+
+---
+
+### 19. `--use-sim-policy-wrapper` Incompatible with `Gr00t16ServicePolicyClient`
+
+| | |
+|---|---|
+| **Severity** | Critical — eval crashes with `"Video key 'video.front' must be in observation"` |
+| **File** | `training/gr00t/N16/SKILL.md` |
+| **Error** | Policy server returns `{'error': "Video key 'video.front' must be in observation"}` when called from `Gr00t16ServicePolicyClient`. The client then hits `KeyError: 0` trying to index the error dict as an action. |
+| **Cause** | The `Gr00t16ServicePolicyClient` sends observations in a nested format (`{"observation": {"video": {"front": ...}, "state": {...}, "language": {...}}}`). The `--use-sim-policy-wrapper` flag expects flat-keyed observations (`video.front`, `state.single_arm`). These two formats are incompatible. The old `Gr00tServicePolicyClient` (N1.5) used flat keys and needed the wrapper, but the new N1.6 client does not. |
+| **Status** | ✅ Fixed |
+| **Fix** | Removed `--use-sim-policy-wrapper` from the Phase 8 policy server command in SKILL.md. Updated description to explain why the flag should not be used with the N1.6 client. |
+| **Files changed** | `training/gr00t/N16/SKILL.md` |
+
+---
+
+### 20. Language Key Mismatch in `Gr00t16ServicePolicyClient` (Upstream Issue #145)
+
+| | |
+|---|---|
+| **Severity** | High — eval crashes with `KeyError: 0` on first action request |
+| **File** | LeIsaac `leisaac/policy/service_policy_clients.py` line 136 (upstream) |
+| **Error** | `Gr00t16ServicePolicyClient.get_action()` sends language key `annotation.human.task_description`, but the GR00T N1.6 policy server's observation validation rejects it. The server returns `{'error': '...'}` and the client crashes with `KeyError: 0` when trying `action_chunk[0]` on the error dict. |
+| **Cause** | The language key used in LeIsaac's `Gr00t16ServicePolicyClient` must match the key the model was trained with. Our model was trained with `annotation.human.action.task_description` (N1.6 default from the main fine-tuning guide), but LeIsaac sends `annotation.human.task_description`. This is the mismatch documented in [LightwheelAI/leisaac#145](https://github.com/LightwheelAI/leisaac/issues/145). |
+| **Status** | ⚠️ Upstream — needs alignment between training config and LeIsaac client |
+| **Workaround** | Manually patched `annotation.human.task_description` to `annotation.human.action.task_description` in the installed `service_policy_clients.py` on the remote instance. |
+| **Note** | Colleague is aware of this issue and says `annotation.human.task_description` is the correct key for LeIsaac compatibility. The fix may need to happen on the training config side (use a modality config that trains with `annotation.human.task_description`) rather than patching LeIsaac. See the EverNorif response on issue #145 for the recommended training config. |
 
 ---
 
