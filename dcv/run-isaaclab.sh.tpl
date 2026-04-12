@@ -38,6 +38,55 @@ if [[ ! -d "$SCRIPTS_DIR/scripts" ]]; then
   git clone https://github.com/LightwheelAI/leisaac.git "$SCRIPTS_DIR"
   cd "$SCRIPTS_DIR" && git checkout "$LEISAAC_COMMIT"
 fi
+# Patch policy_inference.py for headless keyboard support.
+# omni.appwindow.get_default_app_window() returns None when running via SSH
+# without a windowed display, crashing the Controller.__init__. This wraps
+# the keyboard setup in None-checks so eval can run headless.
+POLICY_PY="$PKGS_DIR/../leisaac-repo/scripts/evaluation/policy_inference.py"
+if [[ -f "$POLICY_PY" ]] && grep -q 'self._appwindow.get_keyboard()' "$POLICY_PY"; then
+  python3 - "$POLICY_PY" << 'PATCH_EOF'
+import sys
+path = sys.argv[1]
+with open(path) as f:
+    src = f.read()
+
+old_init = """\
+        self._appwindow = omni.appwindow.get_default_app_window()
+        self._input = carb.input.acquire_input_interface()
+        self._keyboard = self._appwindow.get_keyboard()
+        self._keyboard_sub = self._input.subscribe_to_keyboard_events(
+            self._keyboard,
+            self._on_keyboard_event,
+        )"""
+
+new_init = """\
+        try:
+            self._appwindow = omni.appwindow.get_default_app_window()
+        except Exception:
+            self._appwindow = None
+        self._input = carb.input.acquire_input_interface()
+        if self._appwindow is not None:
+            self._keyboard = self._appwindow.get_keyboard()
+        else:
+            self._keyboard = None
+        if self._keyboard is not None:
+            self._keyboard_sub = self._input.subscribe_to_keyboard_events(
+                self._keyboard,
+                self._on_keyboard_event,
+            )
+        else:
+            self._keyboard_sub = None"""
+
+if old_init in src:
+    src = src.replace(old_init, new_init)
+    with open(path, "w") as f:
+        f.write(src)
+    print("Patched policy_inference.py for headless keyboard support")
+else:
+    print("policy_inference.py already patched or structure changed — skipping")
+PATCH_EOF
+fi
+
 xhost +local:docker 2>/dev/null || true
 XAUTH_FILE="/run/user/1000/dcv/console.xauth"
 if [[ ! -f "$XAUTH_FILE" ]]; then XAUTH_FILE="$HOME/.Xauthority"; fi

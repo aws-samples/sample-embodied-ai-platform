@@ -28,10 +28,10 @@ Total time: ~4 hours (deploy ~30min, training ~2hrs, evaluation ~1.5hrs includin
 | **Severity** | Critical — blocks training |
 | **File** | `training/gr00t/N16/so101_modality_config.py` |
 | **Error** | `AssertionError: Key human.task_description not found in language modality` |
-| **Cause** | The config used the N1.5 key `annotation.human.task_description` instead of the N1.6 key `annotation.human.action.task_description`. The training script (`finetune_gr00t.py`) patches parquet files with the N1.6 key, but the modality config still referenced the N1.5 key. |
+| **Cause** | The modality config and training script must use the same language key. The correct key for LeIsaac compatibility is `annotation.human.task_description` (not `annotation.human.action.task_description`). The training script, modality config, and LeIsaac client all need to agree on this key. |
 | **Status** | ✅ Fixed |
-| **Fix** | Changed `modality_keys` from `["annotation.human.task_description"]` to `["annotation.human.action.task_description"]` on line 48. |
-| **Files changed** | `training/gr00t/N16/so101_modality_config.py` |
+| **Fix** | Aligned all files to use `annotation.human.task_description`: modality config (`so101_modality_config.py` line 48), training script annotation key (`finetune_gr00t.py` line 116), and parquet patching function (`finetune_gr00t.py` line 157). |
+| **Files changed** | `training/gr00t/N16/so101_modality_config.py`, `training/gr00t/N16/finetune_gr00t.py` |
 
 ---
 

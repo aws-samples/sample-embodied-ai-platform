@@ -113,7 +113,7 @@ class FinetuneWorkflow:
         # Create or patch modality.json to ensure annotation key is present (N1.6 requirement)
         meta_dir = os.path.join(self.dataset_local_dir, "meta")
         modality_json_path = os.path.join(meta_dir, "modality.json")
-        annotation_key = "human.action.task_description"
+        annotation_key = "human.task_description"
         if not os.path.isfile(modality_json_path):
             os.makedirs(meta_dir, exist_ok=True)
             modality_content = {
@@ -148,13 +148,13 @@ class FinetuneWorkflow:
                     json.dump(modality_content, f, indent=4)
                 logger.info(f"Patched modality.json: added annotation.{annotation_key}")
 
-        # Patch parquet files: add annotation.human.action.task_description column
-        # if missing (N1.6 expects this instead of N1.5's human.task_description)
+        # Patch parquet files: add annotation.human.task_description column
+        # if missing (LeIsaac compatible key)
         self._patch_parquet_annotations()
 
     def _patch_parquet_annotations(self):
-        """Add annotation.human.action.task_description column to parquet files if missing."""
-        annotation_col = "annotation.human.action.task_description"
+        """Add annotation.human.task_description column to parquet files if missing."""
+        annotation_col = "annotation.human.task_description"
         data_dir = os.path.join(self.dataset_local_dir, "data")
         if not os.path.isdir(data_dir):
             # Try root-level parquet files

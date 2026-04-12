@@ -68,8 +68,8 @@ class IsaacLabDcvStack(Stack):
             efs_sg_id=batch_stack.efs_sg_id,  # Share security group
             # Preferred: g6.4xlarge, g6.2xlarge, g5.2xlarge or larger.
             # If capacity errors occur, try changing availability_zone between us-west-2a/b/c/d.
-            availability_zone="us-west-2a",
-            instance_type="g6.2xlarge",       # Probed available in us-west-2a
+            availability_zone="us-west-2b",
+            instance_type="g6.4xlarge",       # Probed available in us-west-2b
             isaac_sim_version="5.1.0",        # Latest version with valid NGC container
             isaac_lab_version="v2.3.0",       # Matches isaac-lab:2.3.0 on NGC
             leisaac_enabled=True,             # Required for gr00t

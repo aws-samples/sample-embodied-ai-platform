@@ -351,11 +351,11 @@ Exit the container with `exit` or Ctrl-D.
 
 ### 6a.3 Verify Policy Client N1.6 Patch
 
-The `run-isaaclab.sh` helper patches the LeIsaac policy client for N1.6 compatibility
-on first launch. Confirm the patch applied:
+The `run-isaaclab.sh` helper patches `policy_inference.py` for headless keyboard
+support on first launch. Confirm the patch applied:
 
 ```bash
-ssh dcv-isaac "grep -q 'GR00T N1.6 SimPolicyWrapper' /home/ubuntu/isaaclab-pkgs/leisaac/policy/service_policy_clients.py && echo 'Policy client patch OK' || echo 'MISSING — re-run run-isaaclab.sh'"
+ssh dcv-isaac "grep -q 'self._appwindow is not None' /home/ubuntu/leisaac-repo/scripts/evaluation/policy_inference.py && echo 'Keyboard patch OK' || echo 'MISSING — re-run run-isaaclab.sh'"
 ```
 
 If missing, re-run `run-isaaclab.sh -c 'echo patched'` and check again.
@@ -456,7 +456,7 @@ ssh dcv-isaac "cat > /mnt/efs/gr00t/sample_dataset/meta/modality.json << 'EOF'
     \"gripper\": {\"start\": 5, \"end\": 6}
   },
   \"annotation\": {
-    \"human.action.task_description\": {
+    \"human.task_description\": {
       \"original_key\": \"task_index\"
     }
   },
@@ -577,11 +577,15 @@ ssh dcv-isaac "run-isaaclab.sh -c 'echo prerequisites installed'"
 
 **Run the closed-loop evaluation via SSH** (fully autonomous, no DCV desktop needed):
 ```bash
+# Detect the DCV display number (varies between deployments: :0 or :1)
+DCV_DISPLAY=$(ssh dcv-isaac "ls /tmp/.X11-unix/ | sed 's/X/:/'" | head -1)
+echo "Using DISPLAY=$DCV_DISPLAY"
+
 ssh dcv-isaac "docker run --gpus all --rm --network host \
   -e ACCEPT_EULA=Y -e PRIVACY_CONSENT=Y \
   -e PYTHONPATH=/workspace/isaaclab-pkgs \
   -e PYTHONUNBUFFERED=1 \
-  -e DISPLAY=:1 \
+  -e DISPLAY=$DCV_DISPLAY \
   -v /tmp/.X11-unix:/tmp/.X11-unix:ro \
   -v /home/ubuntu/isaaclab-pkgs:/workspace/isaaclab-pkgs:rw \
   -v /home/ubuntu/leisaac-repo/scripts:/workspace/scripts:ro \
@@ -603,10 +607,11 @@ ssh dcv-isaac "docker run --gpus all --rm --network host \
     --enable_cameras 2>&1 | tee /mnt/efs/gr00t/eval-results.log"
 ```
 
-> `DISPLAY=:1` and the X11 socket mount are required because `--enable_cameras` uses
-> Vulkan rendering for camera frames, which needs an active display. DCV runs on
-> display `:1` (not `:0`). Without these flags, the render loop blocks silently with
-> 0% GPU utilization despite allocating VRAM.
+> `DISPLAY` and the X11 socket mount are required because `--enable_cameras` uses
+> Vulkan rendering for camera frames, which needs an active display. DCV picks
+> display `:0` or `:1` depending on what's available at boot — the detection
+> command above reads it from `/tmp/.X11-unix/`. Without these flags, the render
+> loop blocks silently with 0% GPU utilization despite allocating VRAM.
 >
 > `PYTHONUNBUFFERED=1` ensures eval output streams in real time over SSH.
 > Results are persisted to `/mnt/efs/gr00t/eval-results.log` so the final success rate
