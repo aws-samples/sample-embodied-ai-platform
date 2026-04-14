@@ -147,6 +147,8 @@ npx cdk deploy IsaacGr00tBatchStack --require-approval=never --context build_tar
 
 # Step 2: DCV stack (GPU instance — ~3 min for CFN, then ~15 min bootstrap)
 # This blocks until cfn-signal is received from the bootstrap script.
+# By default, ports 8443 (DCV) and 8080 (W&B) are open publicly.
+# For SSM-only access (no public ports), add: --context public_dcv_access=false
 npx cdk deploy IsaacLabDcvStack --require-approval=never
 ```
 
@@ -314,10 +316,8 @@ ssh dcv-isaac "nvidia-smi --query-gpu=name --format=csv,noheader"
 The DCV web console is available at `https://<elastic-ip>:8443` (accept the
 self-signed certificate warning). DCV is password-protected (credentials in stack outputs).
 
-**Alternative: SSM-only access (no public ports)**
-
-If you prefer not to expose ports 8443/8080 publicly, remove the ingress rules from the
-security group in `dcv/dcv_construct.py` and use SSH port forwarding instead:
+**If you deployed with `--context public_dcv_access=false`** (SSM-only mode), ports
+8443/8080 are not open. Use SSH port forwarding instead:
 ```bash
 ssh -f -N -L 8443:localhost:8443 -L 8080:localhost:8080 dcv-isaac
 ```

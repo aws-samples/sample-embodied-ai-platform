@@ -29,6 +29,8 @@ class DcvWorkstationProps:
         efs_sg_id: Optional EFS security group ID (required with efs_id)
         leisaac_enabled: Enable leisaac installation (default: False)
         availability_zone: Optional AZ to constrain subnet selection (e.g. "us-west-2b")
+        public_dcv_access: Open ports 8443/8080 publicly (default: True for blog compatibility).
+            Set to False for SSM-only access via SSH port forwarding.
     """
 
     def __init__(
@@ -43,6 +45,7 @@ class DcvWorkstationProps:
         efs_sg_id: Optional[str] = None,
         leisaac_enabled: bool = False,
         availability_zone: Optional[str] = None,
+        public_dcv_access: bool = True,
     ):
         self.vpc = vpc
         self.vpc_id = vpc_id
@@ -54,6 +57,7 @@ class DcvWorkstationProps:
         self.efs_sg_id = efs_sg_id
         self.leisaac_enabled = leisaac_enabled
         self.availability_zone = availability_zone
+        self.public_dcv_access = public_dcv_access
 
 
 class DcvWorkstation(Construct):
@@ -340,25 +344,27 @@ class DcvWorkstation(Construct):
 
         # Security Group
         # Controls network access to the instance.
-        # Public ingress on 8443 (DCV) and 8080 (W&B) for direct browser access.
-        # DCV is password-protected. For tighter security, remove these rules
-        # and use SSH port forwarding through SSM instead (see SKILL.md Phase 5).
+        # When public_dcv_access=True (default), opens ports 8443 (DCV) and 8080 (W&B)
+        # for direct browser access. DCV is password-protected.
+        # When public_dcv_access=False, no public ports are opened — use SSH port
+        # forwarding through SSM instead (see SKILL.md Phase 5).
         self._security_group = ec2.SecurityGroup(
             self, "SecurityGroup",
             vpc=self._vpc,
             description="Allow DCV, TensorBoard, and W&B access",
             allow_all_outbound=True,
         )
-        self._security_group.add_ingress_rule(
-            ec2.Peer.any_ipv4(),
-            ec2.Port.tcp(8443),
-            "Allow Amazon DCV access",
-        )
-        self._security_group.add_ingress_rule(
-            ec2.Peer.any_ipv4(),
-            ec2.Port.tcp(8080),
-            "Allow W&B local server access",
-        )
+        if props.public_dcv_access:
+            self._security_group.add_ingress_rule(
+                ec2.Peer.any_ipv4(),
+                ec2.Port.tcp(8443),
+                "Allow Amazon DCV access",
+            )
+            self._security_group.add_ingress_rule(
+                ec2.Peer.any_ipv4(),
+                ec2.Port.tcp(8080),
+                "Allow W&B local server access",
+            )
 
         # Allow EFS access from DCV instance (only if EFS provided)
         if efs_fs is not None:
