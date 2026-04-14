@@ -340,14 +340,24 @@ class DcvWorkstation(Construct):
 
         # Security Group
         # Controls network access to the instance.
-        # No public ingress rules — DCV (8443) and W&B (8080) are accessed
-        # via SSH port forwarding through SSM (see SKILL.md Phase 5).
-        # This avoids exposing unauthenticated web endpoints to the internet.
+        # Public ingress on 8443 (DCV) and 8080 (W&B) for direct browser access.
+        # DCV is password-protected. For tighter security, remove these rules
+        # and use SSH port forwarding through SSM instead (see SKILL.md Phase 5).
         self._security_group = ec2.SecurityGroup(
             self, "SecurityGroup",
             vpc=self._vpc,
-            description="DCV workstation - access via SSM port forwarding only",
+            description="Allow DCV, TensorBoard, and W&B access",
             allow_all_outbound=True,
+        )
+        self._security_group.add_ingress_rule(
+            ec2.Peer.any_ipv4(),
+            ec2.Port.tcp(8443),
+            "Allow Amazon DCV access",
+        )
+        self._security_group.add_ingress_rule(
+            ec2.Peer.any_ipv4(),
+            ec2.Port.tcp(8080),
+            "Allow W&B local server access",
         )
 
         # Allow EFS access from DCV instance (only if EFS provided)

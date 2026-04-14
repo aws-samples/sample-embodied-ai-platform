@@ -311,10 +311,13 @@ ssh dcv-isaac "test -x /usr/local/bin/run-isaaclab.sh && echo 'Helper script OK'
 ssh dcv-isaac "nvidia-smi --query-gpu=name --format=csv,noheader"
 ```
 
-The DCV web console is also available via SSH port forwarding. No public ports are
-exposed — all access is through SSM tunneling (configured in Phase 5).
+The DCV web console is available at `https://<elastic-ip>:8443` (accept the
+self-signed certificate warning). DCV is password-protected (credentials in stack outputs).
 
-To access DCV or W&B from a browser, start port forwards in the background:
+**Alternative: SSM-only access (no public ports)**
+
+If you prefer not to expose ports 8443/8080 publicly, remove the ingress rules from the
+security group in `dcv/dcv_construct.py` and use SSH port forwarding instead:
 ```bash
 ssh -f -N -L 8443:localhost:8443 -L 8080:localhost:8080 dcv-isaac
 ```
