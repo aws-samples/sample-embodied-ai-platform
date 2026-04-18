@@ -29,7 +29,7 @@ class DcvWorkstationProps:
         efs_sg_id: Optional EFS security group ID (required with efs_id)
         leisaac_enabled: Enable leisaac installation (default: False)
         availability_zone: Optional AZ to constrain subnet selection (e.g. "us-west-2b")
-        public_dcv_access: Open ports 8443/8080 publicly (default: True for blog compatibility).
+        public_dcv_access: Open ports 8443/6006/8080 publicly (default: True for blog compatibility).
             Set to False for SSM-only access via SSH port forwarding.
     """
 
@@ -255,7 +255,7 @@ class DcvWorkstation(Construct):
         # --seed: pre-installs setuptools+pip+wheel
         self._user_data.add_commands(
             'su - ubuntu -c "/home/ubuntu/.local/bin/uv venv --seed /home/ubuntu/.venv"',
-            'su - ubuntu -c "/home/ubuntu/.local/bin/uv pip install --python /home/ubuntu/.venv/bin/python tensorboard wandb"',
+            'su - ubuntu -c "/home/ubuntu/.local/bin/uv pip install --python /home/ubuntu/.venv/bin/python \'setuptools<82\' tensorboard wandb"',
         )
 
         # Add host venv to ubuntu user's PATH
@@ -344,7 +344,8 @@ class DcvWorkstation(Construct):
 
         # Security Group
         # Controls network access to the instance.
-        # When public_dcv_access=True (default), opens ports 8443 (DCV) and 8080 (W&B)
+        # When public_dcv_access=True (default), 
+        # opens ports 8443 (DCV), 6006 (TensorBoard), and 8080 (W&B)
         # for direct browser access. DCV is password-protected.
         # When public_dcv_access=False, no public ports are opened — use SSH port
         # forwarding through SSM instead (see SKILL.md Phase 5).
@@ -359,6 +360,11 @@ class DcvWorkstation(Construct):
                 ec2.Peer.any_ipv4(),
                 ec2.Port.tcp(8443),
                 "Allow Amazon DCV access",
+            )
+            self._security_group.add_ingress_rule(
+                ec2.Peer.any_ipv4(),
+                ec2.Port.tcp(6006),
+                "Allow TensorBoard access",
             )
             self._security_group.add_ingress_rule(
                 ec2.Peer.any_ipv4(),

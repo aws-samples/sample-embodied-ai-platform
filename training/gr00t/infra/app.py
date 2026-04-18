@@ -62,7 +62,7 @@ class IsaacLabDcvStack(Stack):
 
         # Configure DCV workstation with gr00t-specific settings
         # isaac_sim_version="5.1.0", isaac_lab_version="v2.3.0" for both N1.5 and N1.6
-        # public_dcv_access: True (default) opens ports 8443/8080 publicly.
+        # public_dcv_access: True (default) opens ports 8443/6006/8080 publicly.
         # Deploy with --context public_dcv_access=false for SSM-only access.
         public_dcv = self.node.try_get_context("public_dcv_access")
         public_dcv_access = public_dcv != "false"  # Default True unless explicitly "false"
