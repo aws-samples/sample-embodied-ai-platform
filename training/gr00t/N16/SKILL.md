@@ -12,13 +12,20 @@ description: >
 
 # Deploy Embodied AI Platform CDK Stacks
 
+> **Autonomous execution:** Execute all phases sequentially from Phase 1 through Phase 8c
+> without pausing for user input, **except** where a phase says "Prompt the user" — pause
+> and ask before proceeding with those optional phases. Only stop if a phase fails or
+> requires information not available in this document. When a phase depends on a
+> long-running process (e.g. CodeBuild, training job), poll until completion then proceed
+> to the next phase automatically.
+
 This skill walks through deploying the two CDK stacks that make up the platform's AWS
 infrastructure, setting up SSH access to the GPU workstation, submitting training jobs,
 visualizing metrics, and running model evaluations.
 
 The two stacks are:
 - **IsaacGr00tBatchStack** — VPC, EFS, ECR, CodeBuild, AWS Batch compute environment and job queue
-- **IsaacLabDcvStack** — GPU-accelerated DCV workstation (EC2 instance with Elastic IP)
+- **IsaacLabDcvStack** — GPU-accelerated DCV workstation (EC2 instance, accessed via SSM)
 
 The DCV stack depends on the Batch stack (shares its VPC and EFS), so deploy order matters:
 Batch first, DCV second. Destroy order is reversed: DCV first, Batch second.
@@ -142,6 +149,8 @@ npx cdk deploy IsaacGr00tBatchStack --require-approval=never --context build_tar
 
 # Step 2: DCV stack (GPU instance — ~3 min for CFN, then ~15 min bootstrap)
 # This blocks until cfn-signal is received from the bootstrap script.
+# By default, ports 8443 (DCV) and 8080 (W&B) are open publicly.
+# For SSM-only access (no public ports), add: --context public_dcv_access=false
 npx cdk deploy IsaacLabDcvStack --require-approval=never
 ```
 
@@ -176,12 +185,14 @@ export CodeBuildProjectName=$(echo "$BATCH_OUTPUTS" | jq -r '.[] | select(.Outpu
 export CheckpointS3UploadUri=$(echo "$BATCH_OUTPUTS" | jq -r '.[] | select(.OutputKey=="CheckpointS3UploadUri") | .OutputValue // empty')
 
 # Capture DCV stack outputs
+# CDK appends hash suffixes to output keys (e.g. DCVInstanceIdXXX00000),
+# so use startswith() instead of exact matching.
 DCV_OUTPUTS=$(aws cloudformation describe-stacks --stack-name IsaacLabDcvStack \
   --query 'Stacks[0].Outputs' --output json)
-export InstanceId=$(echo "$DCV_OUTPUTS" | jq -r '.[] | select(.OutputKey=="InstanceId") | .OutputValue')
-export InstancePublicIP=$(echo "$DCV_OUTPUTS" | jq -r '.[] | select(.OutputKey=="InstancePublicIP") | .OutputValue')
-export DCVWebURL=$(echo "$DCV_OUTPUTS" | jq -r '.[] | select(.OutputKey=="DCVWebURL") | .OutputValue')
-export DCVCredentials=$(echo "$DCV_OUTPUTS" | jq -r '.[] | select(.OutputKey=="DCVCredentials") | .OutputValue')
+export InstanceId=$(echo "$DCV_OUTPUTS" | jq -r '.[] | select(.OutputKey | startswith("DCVInstanceId")) | .OutputValue')
+export InstancePublicIP=$(echo "$DCV_OUTPUTS" | jq -r '.[] | select(.OutputKey | startswith("DCVInstancePublicIP")) | .OutputValue')
+export DCVWebURL=$(echo "$DCV_OUTPUTS" | jq -r '.[] | select(.OutputKey | startswith("DCVDCVWebURL")) | .OutputValue')
+export DCVCredentials=$(echo "$DCV_OUTPUTS" | jq -r '.[] | select(.OutputKey | startswith("DCVDCVCredentials")) | .OutputValue')
 
 # Verify key values are set
 echo "Instance ID: $InstanceId"
@@ -306,8 +317,16 @@ ssh dcv-isaac "test -x /usr/local/bin/run-isaaclab.sh && echo 'Helper script OK'
 ssh dcv-isaac "nvidia-smi --query-gpu=name --format=csv,noheader"
 ```
 
-The DCV web console is also available at `https://<elastic-ip>:8443` (accept the
-self-signed certificate warning).
+The DCV web console is available at `https://<elastic-ip>:8443` (accept the
+self-signed certificate warning). DCV is password-protected (credentials in stack outputs).
+
+**If you deployed with `--context public_dcv_access=false`** (SSM-only mode), ports
+8443/8080 are not open. Use SSH port forwarding instead:
+```bash
+ssh -f -N -L 8443:localhost:8443 -L 8080:localhost:8080 dcv-isaac
+```
+Then open `https://localhost:8443` for DCV or `http://localhost:8080` for W&B.
+Claude Code does not need these port forwards — it accesses everything via SSH commands.
 
 ## Phase 6a: Container and LeIsaac Testing
 
@@ -331,14 +350,22 @@ run-isaaclab.sh
 # Python wrapper works
 /workspace/isaaclab/_isaac_sim/python.sh --version
 
-# LeIsaac N1.6 client is present
-grep "class Gr00t16ServicePolicyClient" /workspace/isaaclab-pkgs/leisaac/policy/service_policy_clients.py
-
 # GPU accessible
 nvidia-smi
 ```
 
 Exit the container with `exit` or Ctrl-D.
+
+### 6a.3 Verify Policy Client N1.6 Patch
+
+The `run-isaaclab.sh` helper patches `policy_inference.py` for headless keyboard
+support on first launch. Confirm the patch applied:
+
+```bash
+ssh dcv-isaac "grep -q 'self._appwindow is not None' /home/ubuntu/leisaac-repo/scripts/evaluation/policy_inference.py && echo 'Keyboard patch OK' || echo 'MISSING — re-run run-isaaclab.sh'"
+```
+
+If missing, re-run `run-isaaclab.sh -c 'echo patched'` and check again.
 
 ## Phase 7: Submit Training Job
 
@@ -387,17 +414,29 @@ aws logs tail /aws/batch/job --follow \
 > Default: 6000 steps (~2 hours on g6e.4xlarge). Checkpoints saved every 2000 steps
 > at `/mnt/efs/gr00t/checkpoints/$JOB_ID/`.
 
-### 7c. Visualize Training Metrics (W&B)
+## Phase 7a: Visualize Training Metrics (W&B)
+
+> **Prompt the user:** "Would you like to visualize the training loss curves? This uses
+> a local W&B server on the DCV instance — **no W&B license or cloud account required.**"
+> Only proceed with this phase if the user says yes; otherwise skip to Phase 8.
 
 Training logs to W&B in **offline mode** — run data persists on EFS after the container exits.
 
 ```bash
 # Start local W&B server on DCV instance
 ssh dcv-isaac "docker run -d --name wandb-local -p 8080:8080 -v wandb-data:/vol wandb/local:latest"
+```
 
-# Create account at http://<elastic-ip>:8080, generate API key from Settings -> API Keys
+**Access the W&B dashboard:**
+- If deployed with default `public_dcv_access=true`: open `http://<$InstancePublicIP>:8080`
+- If deployed with `--context public_dcv_access=false`: use SSH port forward first:
+  `ssh -f -N -L 8080:localhost:8080 dcv-isaac`, then open `http://localhost:8080`
 
-# Sync offline runs
+Create an account on the local instance and generate an API key from **Settings → API Keys**.
+This is entirely local — no external W&B service is contacted.
+
+```bash
+# Sync offline runs (replace <your-local-api-key> with the key from the step above)
 ssh dcv-isaac "bash -l -c '
   export WANDB_BASE_URL=http://localhost:8080
   export WANDB_API_KEY=<your-local-api-key>
@@ -406,14 +445,18 @@ ssh dcv-isaac "bash -l -c '
 '"
 ```
 
-View loss curves at `http://<elastic-ip>:8080`. Stop/restart the server anytime —
-data persists in the `wandb-data` Docker volume.
+View loss curves in the W&B dashboard. Stop/restart the server anytime — data persists
+in the `wandb-data` Docker volume.
 
-## Phase 8: Model Evaluation
+## Phase 8: Start Policy Server
 
-### Open-loop evaluation
+All evaluation phases (8a, 8b, 8c) require a policy server serving the trained checkpoint.
+Start it once here; it stays running until cleanup.
 
-Computes MSE and cosine similarity against a held-out dataset:
+Serves the checkpoint as a ZMQ policy server on TCP port 5555. Do **not** use
+`--use-sim-policy-wrapper` — the `Gr00t16ServicePolicyClient` in LeIsaac sends
+observations in the nested format the server expects natively, and the wrapper would
+cause a key mismatch error.
 
 ```bash
 CHECKPOINT=/mnt/efs/gr00t/checkpoints/$JOB_ID/checkpoint-6000
@@ -423,82 +466,281 @@ ssh dcv-isaac "aws ecr get-login-password --region $AWS_DEFAULT_REGION | \
 
 ssh dcv-isaac "docker pull $EcrImageUri"
 
-ssh dcv-isaac "docker run --gpus all --rm \
-  -v /mnt/efs:/mnt/efs:ro \
-  --shm-size=8g \
-  $EcrImageUri \
-  python -m gr00t.eval.robot_eval \
-    --model-path $CHECKPOINT \
-    --embodiment-tag new_embodiment \
-    --dataset-path /path/to/eval-dataset \
-    --modality-config-path /workspace/scripts/so101_modality_config.py"
-```
-
-### Closed-loop evaluation (policy server)
-
-Serves a trained checkpoint as a ZMQ policy server for real-time robot control or
-simulation testing on TCP port 5555.
-
-```bash
-CHECKPOINT=/mnt/efs/gr00t/checkpoints/$JOB_ID/checkpoint-6000
-
 ssh dcv-isaac "docker run --gpus all -d \
   --name gr00t-policy-server \
   --shm-size=8g \
   --network host \
   --entrypoint /bin/sh \
-  -v $CHECKPOINT:/workspace/checkpoint \
+  -v /mnt/efs:/mnt/efs \
   $EcrImageUri \
-  -c '/workspace/gr00t-repo/.venv/bin/python gr00t/eval/run_gr00t_server.py \
-    --model_path /workspace/checkpoint \
-    --embodiment_tag NEW_EMBODIMENT \
-    --host 0.0.0.0'"
+  -c 'cd /workspace/gr00t-repo && python3 -m gr00t.eval.run_gr00t_server \
+    --model-path $CHECKPOINT \
+    --embodiment-tag NEW_EMBODIMENT \
+    --port 5555'"
 ```
 
-> Use `--entrypoint /bin/sh` (NGC `/usr/bin/bash` is broken). The server CLI expects
-> uppercase `NEW_EMBODIMENT` (tyro parses enum names). Pass `--host 0.0.0.0` to allow
-> remote clients.
+> Use `--entrypoint /bin/sh` because the container's default entrypoint invokes a
+> uv-managed Python that can't be exec'd directly. The server module is
+> `gr00t.eval.run_gr00t_server` which wraps `Gr00tPolicy` in a `PolicyServer` (ZMQ).
+> Allow ~60 seconds for model loading before the server begins accepting connections.
 
-Verify: `ssh dcv-isaac "docker logs gr00t-policy-server 2>&1 | tail -5"`
+Verify the server is listening:
+```bash
+ssh dcv-isaac "docker logs gr00t-policy-server 2>&1 | tail -5"
+ssh dcv-isaac "ss -tlnp | grep 5555"
+```
 
 For a direct inference test (without IsaacSim), see [../references/policy-server-test.md](../references/policy-server-test.md).
 
 For observation/response format details, see [../references/eval-format.md](../references/eval-format.md).
 
-## Phase 8a: LeIsaac Closed-Loop Evaluation
+## Phase 8a: Open-Loop Evaluation (Optional)
 
-Test trained N1.6 policies in simulation using [LeIsaac](https://github.com/LightwheelAI/leisaac).
-Requires the policy server running (Phase 8) and a DCV desktop session for the IsaacSim GUI.
+> **Prompt the user:** "Would you like to run open-loop evaluation? This computes MSE/MAE
+> against a dataset to measure action prediction quality. You can use the included sample
+> dataset or provide your own."
+> If the user declines, skip to Phase 8b.
 
-`run-isaaclab.sh` handles all prerequisites automatically on first launch: leisaac package
-install, scene asset download, repo clone, and script mount. No manual setup is needed.
+> **Ask for dataset:** "Which dataset should we use for evaluation?
+> 1. **Sample dataset** (default) — the included `training/sample_dataset/` (57 episodes)
+> 2. **Custom dataset** — provide a local path or an EFS path (e.g. `/mnt/efs/gr00t/my_dataset/`)
+>
+> Custom datasets must have the same LeRobot format with `data/`, `meta/`, and `videos/`
+> directories, plus `meta/modality.json` and `meta/stats.json`."
 
-**Launch the container from a DCV terminal** (`https://<elastic-ip>:8443`):
+### Prepare dataset on EFS
+
+The training job uses a dataset baked into the container during CodeBuild, but open-loop
+evaluation runs on the DCV instance and needs the dataset on EFS.
+
+**If using the sample dataset:**
+
 ```bash
-run-isaaclab.sh
+REPO_ROOT=$(git rev-parse --show-toplevel)
+
+# Pull LFS-tracked files (parquet data, video files). Without this, rsync copies
+# LFS pointer files instead of actual data, causing pyarrow read failures.
+cd "$REPO_ROOT" && git lfs pull --include="training/sample_dataset/"
+
+# Create EFS target directory with correct ownership (EFS root is owned by root)
+ssh dcv-isaac "sudo mkdir -p /mnt/efs/gr00t/sample_dataset && sudo chown -R ubuntu:ubuntu /mnt/efs/gr00t"
+
+# Sync dataset to EFS
+rsync -avz "$REPO_ROOT/training/sample_dataset/" dcv-isaac:/mnt/efs/gr00t/sample_dataset/
+
+DATASET_PATH=/mnt/efs/gr00t/sample_dataset
 ```
 
-**Inside the container, run the evaluation:**
+**If using a custom local dataset:**
+
 ```bash
-/workspace/isaaclab/_isaac_sim/python.sh /workspace/scripts/evaluation/policy_inference.py \
+# Create EFS target directory
+ssh dcv-isaac "sudo mkdir -p /mnt/efs/gr00t/<dataset-name> && sudo chown -R ubuntu:ubuntu /mnt/efs/gr00t"
+
+rsync -avz "<local-dataset-path>/" dcv-isaac:/mnt/efs/gr00t/<dataset-name>/
+
+DATASET_PATH=/mnt/efs/gr00t/<dataset-name>
+```
+
+**If the dataset is already on EFS**, just set `DATASET_PATH` to its path.
+
+### Generate metadata files (if not already present)
+
+```bash
+# Create modality.json (maps dataset columns to model modality keys)
+ssh dcv-isaac "cat > $DATASET_PATH/meta/modality.json << 'EOF'
+{
+  \"action\": {
+    \"single_arm\": {\"start\": 0, \"end\": 5},
+    \"gripper\": {\"start\": 5, \"end\": 6}
+  },
+  \"state\": {
+    \"single_arm\": {\"start\": 0, \"end\": 5},
+    \"gripper\": {\"start\": 5, \"end\": 6}
+  },
+  \"annotation\": {
+    \"human.task_description\": {
+      \"original_key\": \"task_index\"
+    }
+  },
+  \"video\": {
+    \"front\": {
+      \"original_key\": \"observation.images.front\",
+      \"shape\": [480, 640, 3]
+    },
+    \"wrist\": {
+      \"original_key\": \"observation.images.wrist\",
+      \"shape\": [480, 640, 3]
+    }
+  }
+}
+EOF"
+
+# Generate stats.json (normalization statistics used by the eval pipeline)
+ssh dcv-isaac "docker run --gpus all --rm \
+  -v /mnt/efs:/mnt/efs \
+  --entrypoint /bin/sh \
+  $EcrImageUri \
+  -c 'cd /workspace/gr00t-repo && python3 -m gr00t.data.stats \
+    --dataset-path $DATASET_PATH \
+    --embodiment-tag NEW_EMBODIMENT'"
+```
+
+> `modality.json` maps the dataset's column names to the model's expected modality keys
+> (video cameras, state joints, action joints, language annotations). `stats.json`
+> contains per-feature normalization statistics. Both are required by `open_loop_eval`.
+>
+> **Expected warning:** The stats command may print `KeyError: 'new_embodiment'` from
+> `generate_rel_stats` — this is non-blocking. The main `stats.json` file is still
+> written successfully. Verify with: `ssh dcv-isaac "ls -la $DATASET_PATH/meta/stats.json"`
+
+### Run the evaluation
+
+```bash
+ssh dcv-isaac "docker run --gpus all --rm \
+  --network host \
+  -v /mnt/efs:/mnt/efs:ro \
+  --shm-size=8g \
+  --entrypoint /bin/sh \
+  $EcrImageUri \
+  -c 'cd /workspace/gr00t-repo && python3 -m gr00t.eval.open_loop_eval \
+    --host 127.0.0.1 \
+    --port 5555 \
+    --model-path None \
+    --embodiment-tag NEW_EMBODIMENT \
+    --dataset-path $DATASET_PATH \
+    --modality-keys single_arm gripper'"
+```
+
+> **Note:** The module is `gr00t.eval.open_loop_eval` (not `robot_eval`). Use
+> `--entrypoint /bin/sh` because the container's default entrypoint invokes a uv-managed
+> Python that can't be exec'd directly. The `--embodiment-tag` is case-sensitive and must
+> be `NEW_EMBODIMENT` (uppercase). `--model-path None` tells the eval to use the running
+> policy server (`--host`/`--port`) instead of loading the model directly.
+
+## Phase 8b: Closed-Loop Smoke Test (Headless)
+
+This runs a single headless simulation episode to verify that IsaacSim launches, connects
+to the policy server, and completes without crashing. It is a **smoke test only** — success
+rate is irrelevant at this stage.
+
+> **Important:** Do NOT use `run-isaaclab.sh` for automated evaluation — it launches an
+> interactive bash shell and routes arguments through `runheadless.sh` (the Kit launcher),
+> which does not execute the Python eval script. Use the direct `docker run` command below
+> with `--entrypoint` set to `python.sh`.
+
+`run-isaaclab.sh` handles leisaac package install, scene asset download, and repo clone
+on first launch. Run it once interactively to set up prerequisites if they haven't been
+installed yet:
+```bash
+ssh dcv-isaac "run-isaaclab.sh -c 'echo prerequisites installed'"
+```
+
+**Run one episode headlessly via SSH:**
+```bash
+# Detect the DCV display number (varies between deployments: :0 or :1)
+DCV_DISPLAY=$(ssh dcv-isaac "ls /tmp/.X11-unix/ | sed 's/X/:/'" | head -1)
+echo "Using DISPLAY=$DCV_DISPLAY"
+
+ssh dcv-isaac "docker run --gpus all --rm --network host \
+  -e ACCEPT_EULA=Y -e PRIVACY_CONSENT=Y \
+  -e PYTHONPATH=/workspace/isaaclab-pkgs \
+  -e PYTHONUNBUFFERED=1 \
+  -e DISPLAY=$DCV_DISPLAY \
+  -v /tmp/.X11-unix:/tmp/.X11-unix:ro \
+  -v /home/ubuntu/isaaclab-pkgs:/workspace/isaaclab-pkgs:rw \
+  -v /home/ubuntu/leisaac-repo/scripts:/workspace/scripts:ro \
+  -v /home/ubuntu/leisaac-assets:/assets:ro \
+  -v /mnt/efs:/mnt/efs \
+  -e LEISAAC_ASSETS_ROOT=/assets \
+  --shm-size=8g \
+  --entrypoint /workspace/isaaclab/_isaac_sim/python.sh \
+  nvcr.io/nvidia/isaac-lab:2.3.0 \
+  /workspace/scripts/evaluation/policy_inference.py \
     --task=LeIsaac-SO101-PickOrange-v0 \
-    --eval_rounds=10 \
+    --eval_rounds=1 \
     --policy_type=gr00tn1.6 \
     --policy_host=localhost \
     --policy_port=5555 \
     --policy_action_horizon=16 \
-    --policy_language_instruction="Pick up the orange and place it on the plate" \
+    --policy_language_instruction='Pick up the orange and place it on the plate' \
     --device=cuda \
-    --enable_cameras
+    --enable_cameras 2>&1 | tee /mnt/efs/gr00t/eval-results.log"
 ```
 
-**Expected:** Per-episode success/failure and a final success rate (e.g. `Final success rate: 0.700 [7/10]`).
+> `DISPLAY` and the X11 socket mount are required because `--enable_cameras` uses
+> Vulkan rendering for camera frames, which needs an active display. DCV picks
+> display `:0` or `:1` depending on what's available at boot — the detection
+> command above reads it from `/tmp/.X11-unix/`. Without these flags, the render
+> loop blocks silently with 0% GPU utilization despite allocating VRAM.
+>
+> `PYTHONUNBUFFERED=1` ensures eval output streams in real time over SSH.
+> First run takes ~5 minutes for IsaacSim shader compilation before the episode begins.
+
+**Expected:** The episode completes (success or timeout) without errors. If it runs to
+completion, the simulation pipeline is working correctly. Proceed to Phase 8c for visual
+inspection.
 
 For eval parameters and format details, see [../references/eval-format.md](../references/eval-format.md).
 
+## Phase 8c: Visual Policy Inspection (GUI)
+
+> **Prompt the user:** "Would you like to visually inspect the trained policy in the
+> simulator? This opens the DCV desktop where you can watch the robot arm execute actions
+> in real time — the best way to qualitatively evaluate policy performance."
+
+This is the primary way to evaluate whether the policy has learned useful behavior.
+The DCV desktop renders the full IsaacSim environment so you can watch the robot arm
+interact with objects in real time.
+
+### Connect to the DCV desktop
+
+- If deployed with default `public_dcv_access=true`: open `https://<$InstancePublicIP>:8443`
+  (accept the self-signed certificate warning)
+- If deployed with `--context public_dcv_access=false`: start an SSH port forward first:
+  `ssh -f -N -L 8443:localhost:8443 dcv-isaac`, then open `https://localhost:8443`
+
+Log in with the DCV credentials from the stack outputs (`$DCVCredentials`).
+
+### Run the evaluation from the DCV terminal
+
+1. Open a terminal in the DCV desktop
+2. Launch the IsaacLab container:
+   ```bash
+   run-isaaclab.sh
+   ```
+3. Inside the container, run the evaluation:
+   ```bash
+   /workspace/isaaclab/_isaac_sim/python.sh \
+     /workspace/scripts/evaluation/policy_inference.py \
+       --task=LeIsaac-SO101-PickOrange-v0 \
+       --eval_rounds=1 \
+       --policy_type=gr00tn1.6 \
+       --policy_host=localhost \
+       --policy_port=5555 \
+       --policy_action_horizon=16 \
+       --policy_language_instruction='Pick up the orange and place it on the plate' \
+       --device=cuda \
+       --enable_cameras
+   ```
+
+> First GUI run takes ~5 minutes for IsaacSim shader compilation. These shaders are
+> cached in the Docker volumes mounted by `run-isaaclab.sh`, so subsequent runs start
+> much faster.
+
+A simulation window will appear showing the robot arm, the table scene, and the orange.
+Watch the arm's behavior to judge whether the policy has learned the intended task.
+Increase `--eval_rounds` to run multiple episodes for a more thorough assessment.
+
 ## Cleanup: Tearing Down Stacks
 
-### Step 1: Destroy stacks (DCV first, then Batch)
+### Step 1: Stop running containers
+
+```bash
+ssh dcv-isaac "docker rm -f gr00t-policy-server wandb-local 2>/dev/null; echo 'Containers stopped'"
+```
+
+### Step 2: Destroy stacks (DCV first, then Batch)
 
 ```bash
 aws ec2 modify-instance-attribute --instance-id $InstanceId --no-disable-api-termination
@@ -508,7 +750,7 @@ npx cdk destroy IsaacLabDcvStack --force
 npx cdk destroy IsaacGr00tBatchStack --force
 ```
 
-### Step 2: Clean up retained resources
+### Step 3: Clean up retained resources
 
 Three resources have `RemovalPolicy.RETAIN` and survive stack deletion:
 
