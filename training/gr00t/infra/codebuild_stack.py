@@ -33,7 +33,7 @@ class CodeBuildStack(Construct):
         Args:
             ecr_repository_name: Name for the ECR repository (default: gr00t-finetune)
             use_stable: Use stable GR00T commit vs latest (default: True)
-            build_target: "n15" for N1.5 Dockerfile, "n16" for N16/Dockerfile (default: n15)
+            build_target: "n15" for N1.5 Dockerfile, "n16" for N16/, "n17" for N17/ (default: n15)
         """
         super().__init__(scope, construct_id)
 

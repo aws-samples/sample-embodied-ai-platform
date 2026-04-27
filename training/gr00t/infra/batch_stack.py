@@ -150,7 +150,7 @@ class BatchStack(Stack):
         else:
             # Automatically build container using CodeBuild
             # This works on any architecture (x86, ARM) since build happens in the cloud
-            # build_target: "n15" for N1.5 Dockerfile (default), "n16" for N1.6 Dockerfile
+            # build_target: "n15" for N1.5 Dockerfile (default), "n16" for N1.6, "n17" for N1.7
             ctx_build_target = self.node.try_get_context("build_target") or os.getenv("BUILD_TARGET", "n15")
             codebuild_stack = CodeBuildStack(
                 self,
