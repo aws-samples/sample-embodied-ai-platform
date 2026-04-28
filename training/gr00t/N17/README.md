@@ -8,6 +8,16 @@ Fine-tune NVIDIA Isaac GR00T N1.7 VLA models using teleoperation/simulation data
 - Infrastructure and deployment: [infra/README.md](infra/README.md)
 - Workflow scripts: [run_finetune_workflow.sh](run_finetune_workflow.sh), [finetune_gr00t.py](finetune_gr00t.py), [so101_modality_config.py](so101_modality_config.py)
 
+## Prerequisites
+
+> **HuggingFace token required:** N1.7's VLM backbone (`nvidia/Cosmos-Reason2-2B`) is a gated model on HuggingFace. Before running training or evaluation, each user must:
+> 1. Create a free account at https://huggingface.co/join
+> 2. Accept the license at https://huggingface.co/nvidia/Cosmos-Reason2-2B
+> 3. Generate a token at https://huggingface.co/settings/tokens
+> 4. Pass `HF_TOKEN` as an environment variable when submitting jobs and starting the policy server
+
+This is different from N1.6, which used the Eagle backbone (not gated, no token needed).
+
 ## Deployment
 
 See [infra/README.md](infra/README.md).
@@ -197,6 +207,7 @@ docker run --gpus all -d \
   --shm-size=8g \
   --network host \
   --entrypoint /bin/sh \
+  -e HF_TOKEN=$HF_TOKEN \
   -v "$CHECKPOINT_PATH:/workspace/checkpoint" \
   $ECR_URI \
   -c '/workspace/gr00t-repo/.venv/bin/python gr00t/eval/run_gr00t_server.py \
@@ -206,6 +217,7 @@ docker run --gpus all -d \
 ```
 
 > [!IMPORTANT]
+> - **HF_TOKEN is required** — the policy server loads the Cosmos-Reason2-2B backbone at startup, which is gated on HuggingFace.
 > - Use `--entrypoint /bin/sh` — the NGC base image's `/usr/bin/bash` is broken.
 > - The server CLI expects **uppercase** `NEW_EMBODIMENT` (tyro parses enum names, not values).
 > - Pass `--host 0.0.0.0` to allow remote clients. The default is `127.0.0.1` (localhost only).
@@ -236,7 +248,7 @@ run-isaaclab.sh
 /workspace/isaaclab/_isaac_sim/python.sh /workspace/scripts/evaluation/policy_inference.py \
     --task=LeIsaac-SO101-PickOrange-v0 \
     --eval_rounds=10 \
-    --policy_type=gr00tn1.7 \
+    --policy_type=gr00tn1.6 \
     --policy_host=localhost \
     --policy_port=5555 \
     --policy_action_horizon=16 \
@@ -245,11 +257,10 @@ run-isaaclab.sh
     --enable_cameras
 ```
 
-> [!WARNING]
-> **LeIsaac N1.7 compatibility**: The `policy_type` flag for N1.7 may need updating
-> depending on LeIsaac support. Check the LeIsaac documentation for available policy
-> types. If `gr00tn1.7` is not yet supported, use `gr00tn1.6` as N1.7 is backward
-> compatible with the N1.6 observation format.
+> [!NOTE]
+> **LeIsaac N1.7 compatibility**: LeIsaac does not yet have a native `gr00tn1.7` policy
+> client. Use `gr00tn1.6` — N1.7 is backward compatible with the N1.6 observation format.
+> Update to `gr00tn1.7` once LeIsaac adds support.
 
 See [SKILL.md](SKILL.md) for detailed setup instructions and troubleshooting.
 

@@ -471,6 +471,7 @@ ssh dcv-isaac "docker run --gpus all -d \
   --shm-size=8g \
   --network host \
   --entrypoint /bin/sh \
+  -e HF_TOKEN=\$HF_TOKEN \
   -v /mnt/efs:/mnt/efs \
   $EcrImageUri \
   -c 'cd /workspace/gr00t-repo && python3 -m gr00t.eval.run_gr00t_server \
@@ -483,6 +484,10 @@ ssh dcv-isaac "docker run --gpus all -d \
 > uv-managed Python that can't be exec'd directly. The server module is
 > `gr00t.eval.run_gr00t_server` which wraps `Gr00tPolicy` in a `PolicyServer` (ZMQ).
 > Allow ~60 seconds for model loading before the server begins accepting connections.
+>
+> **HF_TOKEN is required** — the N1.7 model loads the Cosmos-Reason2-2B backbone at
+> startup, which is a gated HuggingFace model. Set `HF_TOKEN` in your shell before
+> running the command above, or replace `\$HF_TOKEN` with your token directly.
 
 Verify the server is listening:
 ```bash
@@ -659,7 +664,7 @@ ssh dcv-isaac "docker run --gpus all --rm --network host \
   /workspace/scripts/evaluation/policy_inference.py \
     --task=LeIsaac-SO101-PickOrange-v0 \
     --eval_rounds=1 \
-    --policy_type=gr00tn1.7 \
+    --policy_type=gr00tn1.6 \
     --policy_host=localhost \
     --policy_port=5555 \
     --policy_action_horizon=16 \
@@ -668,6 +673,10 @@ ssh dcv-isaac "docker run --gpus all --rm --network host \
     --enable_cameras 2>&1 | tee /mnt/efs/gr00t/eval-results.log"
 ```
 
+> **policy_type=gr00tn1.6:** LeIsaac does not yet have a native `gr00tn1.7` policy
+> client. Use `gr00tn1.6` — N1.7 is backward compatible with the N1.6 observation
+> format. Update to `gr00tn1.7` once LeIsaac adds support.
+>
 > `DISPLAY` and the X11 socket mount are required because `--enable_cameras` uses
 > Vulkan rendering for camera frames, which needs an active display. DCV picks
 > display `:0` or `:1` depending on what's available at boot — the detection
@@ -715,7 +724,7 @@ Log in with the DCV credentials from the stack outputs (`$DCVCredentials`).
      /workspace/scripts/evaluation/policy_inference.py \
        --task=LeIsaac-SO101-PickOrange-v0 \
        --eval_rounds=1 \
-       --policy_type=gr00tn1.7 \
+       --policy_type=gr00tn1.6 \
        --policy_host=localhost \
        --policy_port=5555 \
        --policy_action_horizon=16 \

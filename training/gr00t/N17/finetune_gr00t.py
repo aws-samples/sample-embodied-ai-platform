@@ -257,8 +257,8 @@ class FinetuneWorkflow:
         config.model.color_jitter_params = ft.color_jitter_params
         config.model.load_bf16 = False
         config.model.reproject_vision = False
-        config.model.eagle_collator = True
-        config.model.model_name = "nvidia/Eagle-Block2A-2B-v2"
+        # N1.7 uses Cosmos-Reason2-2B backbone (not Eagle) — don't override model_name
+        # or eagle_collator; let the N1.7 defaults handle backbone config.
         config.model.backbone_trainable_params_fp32 = True
         config.model.use_relative_action = True
 
