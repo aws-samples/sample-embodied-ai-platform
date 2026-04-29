@@ -61,6 +61,14 @@ pip install -r training/gr00t/infra/requirements.txt
 pip install -r dcv/requirements.txt
 ```
 
+**HuggingFace token (required for N1.7 evaluation):** The N1.7 model loads the
+gated [nvidia/Cosmos-Reason2-2B](https://huggingface.co/nvidia/Cosmos-Reason2-2B)
+backbone at inference time. You need a HuggingFace account with access granted to
+this model. Set your token in the current shell — it will be used in Phase 8:
+```bash
+export HF_TOKEN=<your-huggingface-token>
+```
+
 Also confirm CDK has been bootstrapped in the target account/region:
 ```bash
 aws cloudformation describe-stacks --stack-name CDKToolkit --query 'Stacks[0].StackStatus' --output text
@@ -471,7 +479,7 @@ ssh dcv-isaac "docker run --gpus all -d \
   --shm-size=8g \
   --network host \
   --entrypoint /bin/sh \
-  -e HF_TOKEN=\$HF_TOKEN \
+  -e HF_TOKEN=$HF_TOKEN \
   -v /mnt/efs:/mnt/efs \
   $EcrImageUri \
   -c 'cd /workspace/gr00t-repo && python3 -m gr00t.eval.run_gr00t_server \
@@ -486,8 +494,9 @@ ssh dcv-isaac "docker run --gpus all -d \
 > Allow ~60 seconds for model loading before the server begins accepting connections.
 >
 > **HF_TOKEN is required** — the N1.7 model loads the Cosmos-Reason2-2B backbone at
-> startup, which is a gated HuggingFace model. Set `HF_TOKEN` in your shell before
-> running the command above, or replace `\$HF_TOKEN` with your token directly.
+> startup, which is a gated HuggingFace model. `$HF_TOKEN` must be set in your
+> local shell (see Phase 1 prerequisites). The token is expanded locally and passed
+> to the container via the SSH command.
 
 Verify the server is listening:
 ```bash
