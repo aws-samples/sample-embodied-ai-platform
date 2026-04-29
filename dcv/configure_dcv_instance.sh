@@ -213,7 +213,7 @@ EOF
 # which may be an untested driver branch (e.g. 595.x broke RTX scenedb).
 must "install-nvidia-driver" '
   apt_install ubuntu-drivers-common
-  apt_install nvidia-driver-580 linux-modules-nvidia-580-open-$(uname -r)
+  apt_install nvidia-driver-580-open linux-modules-nvidia-580-open-aws
 '
 
 # Load NVIDIA kernel module (nouveau already blacklisted above)
