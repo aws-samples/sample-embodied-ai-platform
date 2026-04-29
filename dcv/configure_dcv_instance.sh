@@ -208,9 +208,12 @@ EOF
 '
 
 # 2) NVIDIA driver (critical)
+# Pin to 580 series — Isaac Sim 5.1.0 is validated against R580.
+# Do NOT use "ubuntu-drivers autoinstall" as it pulls whatever is latest,
+# which may be an untested driver branch (e.g. 595.x broke RTX scenedb).
 must "install-nvidia-driver" '
   apt_install ubuntu-drivers-common
-  ubuntu-drivers autoinstall
+  apt_install nvidia-driver-580 linux-modules-nvidia-580-open-$(uname -r)
 '
 
 # Load NVIDIA kernel module (nouveau already blacklisted above)
