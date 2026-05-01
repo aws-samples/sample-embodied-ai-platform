@@ -210,7 +210,7 @@ EOF
 # 2) NVIDIA driver (critical)
 must "install-nvidia-driver" '
   apt_install ubuntu-drivers-common
-  ubuntu-drivers autoinstall
+  apt_install nvidia-driver-580-open linux-modules-nvidia-580-open-aws
 '
 
 # Load NVIDIA kernel module (nouveau already blacklisted above)
