@@ -17,6 +17,7 @@ infrastructure, setting up SSH access to the GPU workstation, submitting trainin
 visualizing metrics with TensorBoard, and running closed-loop model evaluations.
 
 > **For N1.6 (GR00T N1.6 / IsaacSim 5.1.0):** See [N16/SKILL.md](N16/SKILL.md).
+> **For N1.7 (GR00T N1.7 / Cosmos-Reason2-2B backbone):** See [N17/SKILL.md](N17/SKILL.md).
 
 The two stacks are:
 - **IsaacGr00tBatchStack** — VPC, EFS, ECR, CodeBuild, AWS Batch compute environment and job queue
