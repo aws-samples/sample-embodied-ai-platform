@@ -18,7 +18,7 @@ pip install -r requirements.txt
 # Bootstrap CDK (one-time per account/region)
 AWS_DEFAULT_REGION=us-west-2 cdk bootstrap --profile <your-profile>
 
-# Deploy with defaults (IsaacSim 5.1.0, IsaacLab v2.3.2, g6.4xlarge)
+# Deploy with defaults (IsaacSim 5.1.0, IsaacLab v2.3.0, g6.4xlarge)
 AWS_DEFAULT_REGION=us-west-2 cdk deploy --profile <your-profile>
 ```
 
@@ -38,8 +38,8 @@ All parameters are optional and can be set via CDK context:
 ```bash
 AWS_DEFAULT_REGION=us-west-2 cdk deploy --profile <your-profile> \
   --context instance_type=g6.2xlarge \
-  --context isaac_sim_version=4.5.0 \
-  --context isaac_lab_version=v2.1.1 \
+  --context isaac_sim_version=5.1.0 \
+  --context isaac_lab_version=v2.3.0 \
   --context vpc_id=vpc-12345 \
   --context efs_id=fs-12345 \
   --context efs_sg_id=sg-12345 \
@@ -52,7 +52,7 @@ AWS_DEFAULT_REGION=us-west-2 cdk deploy --profile <your-profile> \
 |-----------|---------|-------------|
 | `instance_type` | `g6.4xlarge` | EC2 instance type (must be GPU: g4dn, g5, g6, p-series) |
 | `isaac_sim_version` | `5.1.0` | NVIDIA IsaacSim version |
-| `isaac_lab_version` | `v2.3.2` | NVIDIA IsaacLab version |
+| `isaac_lab_version` | `v2.3.0` | NVIDIA IsaacLab version |
 | `python_version` | Auto-derived | Python version (derived from IsaacSim compatibility matrix) |
 | `vpc_id` | Auto-create | Existing VPC ID (if omitted, creates a new VPC) |
 | `efs_id` | None | Existing EFS file system ID for persistent storage |
@@ -65,7 +65,7 @@ The module validates version compatibility at CDK synthesis time. Unsupported co
 
 | IsaacSim | IsaacLab | Python | PyTorch | CUDA |
 |----------|----------|--------|---------|------|
-| 5.1.0 | v2.3.0 — v2.3.2 | 3.11 | 2.10.0 | 12.8 |
+| 5.1.0 | v2.3.0 — v2.3.2 | 3.11 | 2.7.0 | 12.8 |
 | 5.0.0 | v2.2.0 — v2.2.2 | 3.10 | 2.7.0 | 12.8 |
 | 4.5.0 | v2.1.0 — v2.1.1 | 3.10 | 2.5.1 | 11.8 |
 
@@ -88,8 +88,8 @@ class MyTrainingDcvStack(Stack):
             efs_id=batch_stack.efs_id,        # Share EFS
             efs_sg_id=batch_stack.efs_sg_id,  # Share security group
             instance_type="g6.4xlarge",
-            isaac_sim_version="4.5.0",
-            isaac_lab_version="v2.1.1",
+            isaac_sim_version="5.1.0",
+            isaac_lab_version="v2.3.0",
             leisaac_enabled=True,
         )
 

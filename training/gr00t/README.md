@@ -1,11 +1,15 @@
 # NVIDIA Isaac GR00T Training Component
 
-Fine-tune NVIDIA Isaac GR00T VLA models using teleoperation/simulation datasets. Supports AWS Batch training with GPU and Amazon DCV for monitoring/evaluation. Use this README as a bridge: high-level usage and structure here; detailed infrastructure/deployment in `infra/README.md`.
+Fine-tune NVIDIA Isaac GR00T VLA models (N1.5 and N1.6) using teleoperation/simulation datasets. Supports AWS Batch training with GPU and Amazon DCV for monitoring/evaluation. Use this README as a bridge: high-level usage and structure here; detailed infrastructure/deployment in `infra/README.md`.
 
 ## Links
 
 - Component docs (this): [README.md](README.md)
 - Infrastructure and deployment: [infra/README.md](infra/README.md)
+- N1.5 deployment guide (agent): [SKILL.md](SKILL.md)
+- N1.6 deployment guide (agent): [N16/SKILL.md](N16/SKILL.md)
+- Observation/response format: [references/eval-format.md](references/eval-format.md)
+- Troubleshooting: [references/troubleshooting.md](references/troubleshooting.md)
 - Workflow scripts: [run_finetune_workflow.sh](run_finetune_workflow.sh), [finetune_gr00t.py](finetune_gr00t.py)
 
 ## Deployment
@@ -17,17 +21,26 @@ See [infra/README.md](infra/README.md).
 ```text
 training/gr00t/
 ├── README.md                  # GR00T training overview
-├── Dockerfile                 # Training container
+├── SKILL.md                   # N1.5 deployment guide (agent automation)
+├── Dockerfile                 # N1.5 training container
 ├── build_container.sh         # Build/test/push helper
 ├── env.example                # Example environment variables
-├── finetune_gr00t.py          # GR00T training script
+├── finetune_gr00t.py          # GR00T N1.5 training script
 ├── run_finetune_workflow.sh   # Entrypoint: dataset, auth, uploads
+├── so101_modality_config.py   # SO-101 modality config for evaluation
+├── references/                # Shared reference docs (N1.5 + N1.6)
+│   ├── eval-format.md         # Observation/response format reference
+│   ├── policy-server-test.md  # Direct policy server test
+│   └── troubleshooting.md     # Common issues and fixes
+├── N16/                       # N1.6-specific files
+│   ├── SKILL.md               # N1.6 deployment guide (agent automation)
+│   ├── Dockerfile             # N1.6 training container
+│   └── ...
 └── infra/                     # AWS CDK stacks for Batch and DCV
     ├── README.md              # Deployment guide (paths 1–3, troubleshooting)
-    ├── app.py
+    ├── app.py                 # CDK entry point
     ├── batch_stack.py
-    ├── dcv_stack.py
-    ├── configure_dcv_instance.sh
+    ├── codebuild_stack.py
     ├── requirements.txt
     ├── cdk.json               # Context (VPC/EFS/SG IDs) when importing existing resources
     └── architecture.drawio.png
@@ -111,6 +124,19 @@ aws logs tail /aws/batch/job --follow \
 ```
 
 > Default: 6000 steps (~2 hours on g6e.4xlarge using the provided dataset). Checkpoints saved every 2000 steps at `/mnt/efs/gr00t/checkpoints`.
+
+## Evaluation
+
+After training, evaluate checkpoints using the policy server and LeIsaac simulation:
+
+- **N1.5**: `inference_service.py --server` with TensorBoard. See [SKILL.md](SKILL.md) Phase 8.
+- **N1.6**: `run_gr00t_server.py` with W&B. See [N16/SKILL.md](N16/SKILL.md) Phase 8.
+
+Both versions use the same eval container (`isaac-lab:2.3.0`) and `leisaac v0.3.0` for
+LeIsaac closed-loop simulation. They serve trained checkpoints as ZMQ policy servers on
+port 5555 — only the training container and `--policy_type` flag (`gr00tn1.5` vs `gr00tn1.6`)
+differ. See [references/eval-format.md](references/eval-format.md) for format details and
+[references/policy-server-test.md](references/policy-server-test.md) for direct inference testing.
 
 ## Configuration (env vars)
 

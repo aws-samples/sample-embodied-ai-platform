@@ -150,11 +150,14 @@ class BatchStack(Stack):
         else:
             # Automatically build container using CodeBuild
             # This works on any architecture (x86, ARM) since build happens in the cloud
+            # build_target: "n15" for N1.5 Dockerfile (default), "n16" for N1.6 Dockerfile
+            ctx_build_target = self.node.try_get_context("build_target") or os.getenv("BUILD_TARGET", "n15")
             codebuild_stack = CodeBuildStack(
                 self,
                 "CodeBuild",
                 ecr_repository_name="gr00t-finetune",
                 use_stable=True,
+                build_target=ctx_build_target,
             )
             # Use the built image
             container_image = ecs.ContainerImage.from_ecr_repository(

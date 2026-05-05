@@ -10,12 +10,6 @@ phases:
       - echo "Build started on $(date)"
       - echo "Logging in to Amazon ECR..."
 
-      # Configure Docker registry mirror to avoid rate limiting
-      - 'echo ''{"registry-mirrors": ["https://public-mirror.ratelimitshield.io"]}'' | tee /etc/docker/daemon.json'
-      - pkill -SIGHUP dockerd || echo "Docker daemon reload attempted"
-      - sleep 5
-      - echo "Docker daemon configured with RateLimitShield mirror."
-
       # Get AWS account ID and region
       - export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
       - "export AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-west-2}"
@@ -41,8 +35,13 @@ phases:
       - echo "Building Docker image using build_container.sh..."
 
       # Use the existing build_container.sh script to maintain consistency with Path 3
-      # The script is in the root of the source directory
-      - cd $CODEBUILD_SRC_DIR
+      # Select the build directory based on BUILD_TARGET (n16 uses N16/Dockerfile; default is n15)
+      - |
+        if [ "${BUILD_TARGET}" = "n16" ]; then
+          cd $CODEBUILD_SRC_DIR/N16
+        else
+          cd $CODEBUILD_SRC_DIR
+        fi
       - chmod +x build_container.sh
 
       # Build with the script, passing appropriate flags

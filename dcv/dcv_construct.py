@@ -1,8 +1,13 @@
-"""L3 construct for GPU-accelerated DCV workstation. Phase 1: Skeleton with VPC resolution only."""
+"""L3 construct for GPU-accelerated DCV workstation with containerized IsaacLab.
+
+Bootstrap flow (Phase 3):
+- Static prerequisites (drivers, Docker, CLI, EFS, cfn-bootstrap) from configure_dcv_instance.sh
+- Dynamic application steps (container, tools, EFS mount, DCV, cfn-signal) via add_commands
+"""
 import os
 import re
 from typing import Optional
-from aws_cdk import aws_ec2 as ec2, aws_iam as iam, Stack, CfnOutput
+from aws_cdk import aws_ec2 as ec2, aws_iam as iam, aws_s3_assets as s3_assets, Stack, CfnOutput, CfnCreationPolicy, CfnResourceSignal
 from constructs import Construct
 try:
     from .versions import validate_version_config
@@ -18,11 +23,14 @@ class DcvWorkstationProps:
         vpc_id: Optional VPC ID for lookup (for standalone mode)
         instance_type: EC2 instance type (default: g6.4xlarge). Must be a GPU instance type.
         isaac_sim_version: IsaacSim version (default: 5.1.0)
-        isaac_lab_version: IsaacLab version (default: v2.3.2)
-        python_version: Python version (default: auto-derived from IsaacSim version)
+        isaac_lab_version: IsaacLab version (default: v2.3.0)
+        python_version: Python version (kept for backwards compatibility, unused)
         efs_id: Optional EFS file system ID (for persistent storage mode)
         efs_sg_id: Optional EFS security group ID (required with efs_id)
         leisaac_enabled: Enable leisaac installation (default: False)
+        availability_zone: Optional AZ to constrain subnet selection (e.g. "us-west-2b")
+        public_dcv_access: Open ports 8443/6006/8080 publicly (default: True for blog compatibility).
+            Set to False for SSM-only access via SSH port forwarding.
     """
 
     def __init__(
@@ -31,11 +39,13 @@ class DcvWorkstationProps:
         vpc_id: Optional[str] = None,
         instance_type: str = "g6.4xlarge",
         isaac_sim_version: str = "5.1.0",
-        isaac_lab_version: str = "v2.3.2",
+        isaac_lab_version: str = "v2.3.0",
         python_version: Optional[str] = None,
         efs_id: Optional[str] = None,
         efs_sg_id: Optional[str] = None,
         leisaac_enabled: bool = False,
+        availability_zone: Optional[str] = None,
+        public_dcv_access: bool = True,
     ):
         self.vpc = vpc
         self.vpc_id = vpc_id
@@ -46,17 +56,21 @@ class DcvWorkstationProps:
         self.efs_id = efs_id
         self.efs_sg_id = efs_sg_id
         self.leisaac_enabled = leisaac_enabled
+        self.availability_zone = availability_zone
+        self.public_dcv_access = public_dcv_access
 
 
 class DcvWorkstation(Construct):
-    """L3 construct for GPU-accelerated DCV workstation. Phase 1: Skeleton with VPC resolution only.
+    """L3 construct for GPU-accelerated DCV workstation.
 
     This construct provides a reusable DCV workstation that can be used in two modes:
     1. Standalone: Deploy independently with auto-created or looked-up VPC
     2. Integrated: Import into another CDK app and provide VPC reference
 
-    Phase 1 implements only VPC resolution to validate the architecture.
-    Full DCV instance infrastructure will be added in Phase 2.
+    Bootstrap flow:
+    - Static prerequisites (drivers, Docker, CLI, EFS, cfn-bootstrap) from configure_dcv_instance.sh
+    - Dynamic application steps (container, tools, EFS mount, DCV, cfn-signal) via add_commands
+    - CloudFormation CreationPolicy waits for cfn-signal before marking stack CREATE_COMPLETE
     """
 
     def __init__(
@@ -86,15 +100,11 @@ class DcvWorkstation(Construct):
                 f"Got efs_id={props.efs_id}, efs_sg_id={props.efs_sg_id}"
             )
 
-        # Resolve Python version (use explicit or derive from matrix)
-        python_version = props.python_version or version_config["python"]
-
-        # Extract derived versions from compatibility matrix
-        pytorch_version = version_config["pytorch"]
-        cuda_index = version_config["cuda_index"]
+        # Extract version config fields
+        container_image = version_config["container_image"]
         dcv_version_build = version_config["dcv"]
         dcv_version, dcv_build = dcv_version_build.split("-")
-        leisaac_version = version_config.get("leisaac", "v0.2.0")
+        leisaac_commit = version_config.get("leisaac", "v0.3.0")
 
         # Import EFS file system if provided
         efs_fs = None
@@ -158,81 +168,209 @@ class DcvWorkstation(Construct):
             ],
         )
 
-        # UserData Script
-        # Load bootstrap script and inject all version parameters
+        # ================================================================
+        # UserData: Static bootstrap from .sh file + dynamic add_commands
+        # ================================================================
+
+        # Read the static bootstrap script and inject parameters
         user_data_path = os.path.join(os.path.dirname(__file__), "configure_dcv_instance.sh")
         with open(user_data_path, "r") as f:
-            user_data_script = f.read()
+            bootstrap_script = f.read()
 
-        # Generate password using account ID (alphanumeric only, safe for bash)
         password = f"dcv{Stack.of(self).account}"
+        bootstrap_script = bootstrap_script.replace("__PASSWORD__", password)
+        bootstrap_script = bootstrap_script.replace("__DCV_VERSION__", dcv_version)
+        bootstrap_script = bootstrap_script.replace("__DCV_BUILD__", dcv_build)
 
-        # Inject all parameters using string replacement
-        user_data_script = user_data_script.replace("__PASSWORD__", password)
-        user_data_script = user_data_script.replace("__PYTHON_VERSION__", python_version)
-        user_data_script = user_data_script.replace("__ISAAC_SIM_VERSION__", props.isaac_sim_version)
-        user_data_script = user_data_script.replace("__ISAAC_LAB_VERSION__", props.isaac_lab_version)
-        user_data_script = user_data_script.replace("__PYTORCH_VERSION__", pytorch_version)
-        user_data_script = user_data_script.replace("__CUDA_INDEX__", cuda_index)
-        user_data_script = user_data_script.replace("__DCV_VERSION__", dcv_version)
-        user_data_script = user_data_script.replace("__DCV_BUILD__", dcv_build)
-        user_data_script = user_data_script.replace(
-            "__LEISAAC_ENABLED__",
-            "true" if props.leisaac_enabled else "false"
-        )
-        user_data_script = user_data_script.replace("__LEISAAC_VERSION__", leisaac_version)
-
-        # Validate no unresolved placeholders (catches bugs in replacement logic)
-        unresolved = re.findall(r'__[A-Z_]+__', user_data_script)
+        # Validate no unresolved placeholders
+        unresolved = re.findall(r'__[A-Z_]+__', bootstrap_script)
         if unresolved:
             raise ValueError(
                 f"Unresolved placeholders in UserData script: {unresolved}. "
                 "This indicates a bug in version replacement logic."
             )
 
-        # Create UserData object
+        # Inline the bootstrap script directly into UserData (no S3 asset needed —
+        # the trimmed script fits within the 16KB UserData limit)
         self._user_data = ec2.UserData.for_linux()
-        self._user_data.add_commands(user_data_script)
+        # Skip the shebang — CDK's for_linux() already adds #!/bin/bash
+        lines = bootstrap_script.split('\n')
+        if lines and lines[0].startswith('#!'):
+            lines = lines[1:]
+        self._user_data.add_commands(*lines)
 
-        # Add EFS mounting commands (only if EFS is provided)
-        if efs_fs is not None:
+        # ================================================================
+        # Dynamic steps: container pull, helper script, leisaac
+        # These use CDK token resolution (f-strings with props) so they
+        # must be in add_commands, not in the static .sh file.
+        # ================================================================
+
+        # Pull the NVIDIA IsaacLab container from NGC
+        self._user_data.add_commands(
+            f'must "pull-isaaclab-container" "docker pull {container_image}"',
+        )
+
+        # Create /usr/local/bin/run-isaaclab.sh helper script from S3 asset
+        # The script is too large to inline in UserData (16KB limit), so we
+        # upload it as an S3 asset and download it during bootstrap.
+        helper_tpl_path = os.path.join(os.path.dirname(__file__), "run-isaaclab.sh.tpl")
+        with open(helper_tpl_path, "r") as f:
+            helper_content = f.read()
+        helper_content = helper_content.replace("__CONTAINER_IMAGE__", container_image)
+        helper_content = helper_content.replace("__LEISAAC_COMMIT__", leisaac_commit)
+
+        # Write rendered helper to a temp file for the S3 asset
+        import tempfile
+        helper_tmp = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".sh", prefix="run-isaaclab-", delete=False
+        )
+        helper_tmp.write(helper_content)
+        helper_tmp.close()
+
+        helper_asset = s3_assets.Asset(
+            self, "HelperScriptAsset",
+            path=helper_tmp.name,
+        )
+        # Grant the instance role read access to the S3 asset
+        helper_asset.grant_read(self._instance_role)
+
+        self._user_data.add_commands(
+            f'must "download-helper-script" "aws s3 cp s3://{helper_asset.s3_bucket_name}/{helper_asset.s3_object_key} /usr/local/bin/run-isaaclab.sh"',
+            'chmod +x /usr/local/bin/run-isaaclab.sh',
+            'must "create-helper-script" "test -x /usr/local/bin/run-isaaclab.sh"',
+        )
+
+        # Create persistent package directory for container volume mount
+        self._user_data.add_commands(
+            'mkdir -p /home/ubuntu/isaaclab-pkgs',
+            'chown ubuntu:ubuntu /home/ubuntu/isaaclab-pkgs',
+        )
+
+        # Install uv package manager for ubuntu user
+        self._user_data.add_commands(
+            'su - ubuntu -c "curl -LsSf https://astral.sh/uv/install.sh | sh"',
+        )
+
+        # Create host venv with tensorboard and wandb
+        # --seed: pre-installs setuptools+pip+wheel
+        self._user_data.add_commands(
+            'su - ubuntu -c "/home/ubuntu/.local/bin/uv venv --seed /home/ubuntu/.venv"',
+            'su - ubuntu -c "/home/ubuntu/.local/bin/uv pip install --python /home/ubuntu/.venv/bin/python \'setuptools<82\' tensorboard wandb"',
+        )
+
+        # Add host venv to ubuntu user's PATH
+        self._user_data.add_commands(
+            "grep -q '/home/ubuntu/.venv/bin' /home/ubuntu/.bashrc || "
+            "echo 'export PATH=\"/home/ubuntu/.venv/bin:$PATH\"' >> /home/ubuntu/.bashrc",
+        )
+
+        # EFS mount — lives in UserData so CloudFormation resolves the
+        # cross-stack EFS ID token at deploy time.
+        if props.efs_id:
             self._user_data.add_commands(
-                "# Mount EFS file system with TLS",
-                "echo 'Setting up EFS mount with TLS...'",
-                "echo 'STEP_INFO:EFS:Configuring fstab and mounting' >> /var/log/dcv-bootstrap.summary || true",
                 "mkdir -p /mnt/efs",
-                f"echo '{efs_fs.file_system_id}:/ /mnt/efs efs _netdev,tls 0 0' >> /etc/fstab",
-                (
-                    "if mount -a; then\n"
-                    "  echo 'STEP_OK:EFS mount' >> /var/log/dcv-bootstrap.summary;\n"
-                    "  echo 'EFS mounted at /mnt/efs' | tee -a /var/log/dcv-bootstrap.log;\n"
-                    "else\n"
-                    "  echo 'STEP_FAIL:EFS mount' >> /var/log/dcv-bootstrap.summary;\n"
-                    "fi"
-                ),
+                # nofail prevents boot hang if DNS is not ready at fstab mount time.
+                # efs-ensure-mount.service (installed below) retries after network-online.target.
+                f"grep -q '{props.efs_id}' /etc/fstab || echo '{props.efs_id}:/ /mnt/efs efs _netdev,tls,nofail 0 0' >> /etc/fstab",
+                # Install the retry-mount service (function defined in configure_dcv_instance.sh)
+                "install_efs_ensure_mount_service",
+                "mount /mnt/efs || true",
                 "chown ubuntu:ubuntu /mnt/efs || true",
             )
 
+        # ================================================================
+        # DCV Desktop Installation (Phase 3 — runs AFTER all other steps)
+        # These call must/try_step/install_auto_dcv_service defined in the
+        # static .sh file inlined above.
+        # ================================================================
+
+        self._user_data.add_commands(
+            'must "install-desktop" \'',
+            '  apt_install ubuntu-desktop gdm3 dbus-x11',
+            '  sed -i "s/^#\\(WaylandEnable=false\\)/\\1/" /etc/gdm3/custom.conf || true',
+            "'",
+        )
+
+        self._user_data.add_commands(
+            'try_step "disable-gnome-initial-setup" \'',
+            '  apt-get remove --purge -yq gnome-initial-setup || true',
+            '  sed -i "s/^X-GNOME-Autostart-enabled=true/X-GNOME-Autostart-enabled=false/" /etc/xdg/autostart/gnome-initial-setup-first-login.desktop || true',
+            '  systemctl restart gdm3 || true',
+            "'",
+        )
+
+        self._user_data.add_commands(
+            f'must "install-nice-dcv" \'',
+            f'  DCV_URL="https://d1uj6qtbmh3dt5.cloudfront.net/{dcv_version}/Servers/nice-dcv-{dcv_version}-{dcv_build}-ubuntu2204-x86_64.tgz"',
+            '  cd /tmp',
+            '  wget -q "$DCV_URL" -O /tmp/dcv.tgz',
+            '  tar -xzf /tmp/dcv.tgz -C /tmp',
+            f'  cd /tmp/nice-dcv-{dcv_version}-{dcv_build}-ubuntu2204-x86_64',
+            '  apt_install libpulse-mainloop-glib0 libpulse0 libgstreamer-plugins-base1.0-0 libcrack2 libxcb-damage0 libxcb-xkb1 libxcb-xtest0 keyutils',
+            '  apt_install alsa-utils',
+            '  apt-get install -yq ./*.deb',
+            '  usermod -aG video dcv || true',
+            '  systemctl enable dcvserver',
+            '  systemctl restart dcvserver',
+            "'",
+        )
+
+        self._user_data.add_commands(
+            'try_step "configure-dcv" \'',
+            '  sed -i "/^\\[display\\]/a max-head-resolution = \\"(4096, 2160)\\"\\nweb-client-max-head-resolution = \\"(4096, 4096)\\"" /etc/dcv/dcv.conf || true',
+            '  if ! grep -q "\\[display/linux\\]" /etc/dcv/dcv.conf; then',
+            '    cat <<DCVEOF >>/etc/dcv/dcv.conf',
+            '[display/linux]',
+            'disable-local-console=false',
+            'DCVEOF',
+            '  fi',
+            # Auto-create a console session on every DCV server start (covers stop/start).
+            # Console sessions attach to GDM3 which provides the GNOME desktop automatically.
+            '  if ! grep -q "\\[session-management/automatic-console-session\\]" /etc/dcv/dcv.conf; then',
+            '    cat <<DCVEOF >>/etc/dcv/dcv.conf',
+            '',
+            '[session-management/automatic-console-session]',
+            'create-session = true',
+            'owner = ubuntu',
+            'DCVEOF',
+            '  fi',
+            '  systemctl restart dcvserver || true',
+            "'",
+        )
+
+        self._user_data.add_commands(
+            'must "install-auto-dcv-service" install_auto_dcv_service',
+        )
+
         # Security Group
-        # Controls network access to the instance
-        # Allows DCV (8443) and TensorBoard (6006) from any IP for development
-        # Production deployments should restrict source IPs
+        # Controls network access to the instance.
+        # When public_dcv_access=True (default), 
+        # opens ports 8443 (DCV), 6006 (TensorBoard), and 8080 (W&B)
+        # for direct browser access. DCV is password-protected.
+        # When public_dcv_access=False, no public ports are opened — use SSH port
+        # forwarding through SSM instead (see SKILL.md Phase 5).
         self._security_group = ec2.SecurityGroup(
             self, "SecurityGroup",
             vpc=self._vpc,
-            description="Allow DCV and TensorBoard access",
+            description="Allow DCV, TensorBoard, and W&B access",
             allow_all_outbound=True,
         )
-        self._security_group.add_ingress_rule(
-            ec2.Peer.any_ipv4(),
-            ec2.Port.tcp(8443),
-            "Allow Amazon DCV access",
-        )
-        self._security_group.add_ingress_rule(
-            ec2.Peer.any_ipv4(),
-            ec2.Port.tcp(6006),
-            "Allow TensorBoard access",
-        )
+        if props.public_dcv_access:
+            self._security_group.add_ingress_rule(
+                ec2.Peer.any_ipv4(),
+                ec2.Port.tcp(8443),
+                "Allow Amazon DCV access",
+            )
+            self._security_group.add_ingress_rule(
+                ec2.Peer.any_ipv4(),
+                ec2.Port.tcp(6006),
+                "Allow TensorBoard access",
+            )
+            self._security_group.add_ingress_rule(
+                ec2.Peer.any_ipv4(),
+                ec2.Port.tcp(8080),
+                "Allow W&B local server access",
+            )
 
         # Allow EFS access from DCV instance (only if EFS provided)
         if efs_fs is not None:
@@ -240,6 +378,14 @@ class DcvWorkstation(Construct):
 
         # EC2 Instance
         # GPU-accelerated instance for Isaac Sim and DCV visualization
+        if props.availability_zone:
+            subnet_selection = ec2.SubnetSelection(
+                subnet_type=ec2.SubnetType.PUBLIC,
+                availability_zones=[props.availability_zone],
+            )
+        else:
+            subnet_selection = ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC)
+
         self._instance = ec2.Instance(
             self, "Instance",
             instance_type=ec2.InstanceType(props.instance_type),
@@ -248,14 +394,14 @@ class DcvWorkstation(Construct):
                 owners=["099720109477"],  # Canonical
             ),
             vpc=self._vpc,
-            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC),
+            vpc_subnets=subnet_selection,
             role=self._instance_role,
             security_group=self._security_group,
             user_data=self._user_data,
             block_devices=[
                 ec2.BlockDevice(
                     device_name="/dev/sda1",
-                    volume=ec2.BlockDeviceVolume.ebs(100, delete_on_termination=True),
+                    volume=ec2.BlockDeviceVolume.ebs(150, delete_on_termination=True),
                 )
             ],
         )
@@ -269,8 +415,43 @@ class DcvWorkstation(Construct):
             instance_id=self._instance.instance_id,
         )
 
+        # ================================================================
+        # CreationPolicy: CloudFormation waits for bootstrap signal (D-04)
+        # ================================================================
+        cfn_instance = self._instance.node.default_child
+        cfn_instance.cfn_options.creation_policy = CfnCreationPolicy(
+            resource_signal=CfnResourceSignal(
+                count=1,
+                timeout="PT20M"  # observed ~13 min; 25 min gives buffer for slow NGC pulls
+            )
+        )
+
+        # cfn-signal command in UserData (must reference logical_id token)
+        logical_id = cfn_instance.logical_id
+        stack_name = Stack.of(self).stack_name
+        region = Stack.of(self).region
+
+        self._user_data.add_commands(
+            f'/usr/local/bin/cfn-signal --stack {stack_name} --resource {logical_id} --region {region} -e 0 || true',
+            'echo "STEP_OK:cfn-signal" >> "$SUMMARY"',
+        )
+
+        self._user_data.add_commands(
+            'date -Iseconds > /var/lib/dcv-bootstrap/ALL_DONE',
+            'log "Bootstrap complete. ALL_DONE marker written."',
+            # Reboot to load the NVIDIA kernel module. cfn-signal was already sent,
+            # so CloudFormation marks CREATE_COMPLETE before the instance goes down.
+            # The driver persists — subsequent stop/start cycles don't need this.
+            'log "Rebooting to activate NVIDIA kernel module..."',
+            'shutdown -r +1 "Bootstrap complete — rebooting for NVIDIA driver"',
+        )
+
+        self._user_data.add_commands(
+            'log "==== SUMMARY (also in $SUMMARY) ===="',
+            'cat "$SUMMARY" || true',
+        )
+
         # CloudFormation Outputs
-        # Expose connection details to users
         password = f"dcv{Stack.of(self).account}"
 
         CfnOutput(
@@ -296,11 +477,7 @@ class DcvWorkstation(Construct):
 
     @property
     def vpc(self) -> ec2.IVpc:
-        """VPC where the DCV workstation is deployed.
-
-        Returns:
-            The resolved VPC (provided, looked-up, or auto-created)
-        """
+        """VPC where the DCV workstation is deployed."""
         return self._vpc
 
     @property

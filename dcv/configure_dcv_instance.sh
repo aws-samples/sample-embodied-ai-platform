@@ -1,60 +1,32 @@
 #!/bin/bash
-# Bootstrap script for Amazon DCV on Ubuntu 22.04 with IsaacLab and EFS
-# - Robust logging to /var/log/dcv-bootstrap.log and concise step summary
-# - Retries for apt and network operations
-# - Non-fatal GUI tweaks; separation of critical vs optional steps
+# Bootstrap script for Amazon DCV on Ubuntu 22.04 — static infrastructure steps.
+# Installs: NVIDIA drivers, Docker+toolkit, AWS CLI, EFS utils, cfn-bootstrap.
+# DCV desktop is installed by dcv_construct.py add_commands.
 #
-# USAGE GUIDE (read this if something failed)
+# TROUBLESHOOTING
 # ============================================================
-# Where to look:
-#   - Summary (quick, one line per step): /var/log/dcv-bootstrap.summary
-#       Entries are prefixed with one of: STEP_OK, STEP_WARN, STEP_FAIL
-#         * STEP_OK  : step completed successfully
-#         * STEP_WARN: step failed but was non-fatal and intentionally ignored
-#         * STEP_FAIL: critical step failed; see detailed log
-#   - Detailed log: /var/log/dcv-bootstrap.log
-#   - Auto session service log: journalctl -u auto-dcv.service -e --no-pager
+# Logs:
+#   Summary (one line per step):  sudo cat /var/log/dcv-bootstrap.summary
+#     Prefixes: STEP_OK (success), STEP_WARN (non-fatal), STEP_FAIL (critical)
+#   Detailed log:                 sudo less +G /var/log/dcv-bootstrap.log
+#   Auto-DCV session service:     sudo journalctl -u auto-dcv.service -e --no-pager
 #
-# How to interpret and fix:
-#   1) Session Manager/EC2 Instance Connect/SSH into the instance and review the summary:
-#        sudo cat /var/log/dcv-bootstrap.summary
-#   2) For each STEP_FAIL, open the detailed log around the time it ran:
-#        sudo less +G /var/log/dcv-bootstrap.log
-#   3) Fix the underlying issue (e.g., networking, package mirror, permissions).
+# Step-specific debugging:
+#   View logs for a step:         sudo grep -A 50 "== START: <step-name> ==" /var/log/dcv-bootstrap.log
+#   View failure context:         sudo grep -A 100 -B 10 "== FAIL: <step-name> ==" /var/log/dcv-bootstrap.log
+#   Check step completion:        ls -la /var/lib/dcv-bootstrap/
+#   Check specific step state:    test -f "/var/lib/dcv-bootstrap/<step-name>.done" && echo "done"
 #
-# Step-specific log viewing commands:
-#   - View logs for a specific step:
-#        sudo grep -A 50 "== START: <step-name> ==" /var/log/dcv-bootstrap.log
-#        sudo grep -A 100 -B 10 "== FAIL: <step-name> ==" /var/log/dcv-bootstrap.log
-#   - Examples:
-#        sudo grep -A 50 "== START: install-nice-dcv ==" /var/log/dcv-bootstrap.log
-#   - View step completion status:
-#        ls -la /var/lib/dcv-bootstrap/
-#   - Check specific step state:
-#        test -f "/var/lib/dcv-bootstrap/<step-name>.done" && echo "Step completed" || echo "Step not done"
-#
-# Re-running only the failed steps (idempotent):
-#   - This script creates state markers in: /var/lib/dcv-bootstrap/<step-name>.done
-#   - Re-running the entire script will SKIP steps already marked done.
-#   - To force re-run a specific step, delete its marker and re-run the script:
-#        sudo rm "/var/lib/dcv-bootstrap/<step-name>.done"
-#        sudo bash /var/lib/cloud/instance/scripts/part-001
-#     Examples:
-#        sudo rm "/var/lib/dcv-bootstrap/install-nice-dcv.done" && \
-#          sudo bash /var/lib/cloud/instance/scripts/part-001
-#        sudo rm "/var/lib/dcv-bootstrap/install-desktop.done" && \
-#          sudo bash /var/lib/cloud/instance/scripts/part-001
-#   - Note: The path /var/lib/cloud/instance/scripts/part-001 is the cloud-init
-#           copy of this user-data. If unavailable, paste the script or
-#           store it as /usr/local/sbin/dcv-bootstrap.sh and execute that.
+# Re-running failed steps (idempotent):
+#   State markers live in /var/lib/dcv-bootstrap/<step>.done — completed steps are skipped.
+#   To force re-run a step:
+#     sudo rm "/var/lib/dcv-bootstrap/<step-name>.done"
+#     sudo bash /var/lib/cloud/instance/scripts/part-001
 #
 # Common checks:
-#   - DCV server status:    sudo systemctl status dcvserver --no-pager
-#   - DCV sessions:         sudo dcv list-sessions
-#   - Auto session service: sudo systemctl status auto-dcv.service --no-pager
-#                           sudo journalctl -u auto-dcv.service -e --no-pager
-#   - EFS mount:            mount | grep ' /mnt/efs '  (should show type efs,tls)
-#                           sudo tail -n 200 /var/log/amazon/efs/mount.log
+#   DCV server:    sudo systemctl status dcvserver --no-pager
+#   DCV sessions:  sudo dcv list-sessions
+#   EFS mount:     mount | grep ' /mnt/efs '
 # ============================================================
 
 set -Eeuo pipefail
@@ -175,6 +147,14 @@ else
   echo "DCV session ${SESSION_ID} already exists."
 fi
 
+# Copy DCV xauth to ~/.Xauthority so Docker can mount it as a file.
+# DCV writes its X11 cookie to /run/user/1000/dcv/console.xauth (not ~/.Xauthority).
+# Without this, Docker bind-mounting ~/.Xauthority creates a directory instead.
+if [[ -f /run/user/1000/dcv/console.xauth ]]; then
+  cp /run/user/1000/dcv/console.xauth /home/${owner}/.Xauthority
+  chown ${owner}:${owner} /home/${owner}/.Xauthority
+fi
+
 # Optional: GUI tweaks (non-fatal)
 sudo -u "${owner}" dbus-launch gsettings set org.gnome.desktop.lockdown disable-lock-screen true || true
 sudo -u "${owner}" dbus-launch gsettings set org.gnome.desktop.interface gtk-theme Yaru-dark || true
@@ -230,78 +210,23 @@ EOF
 # 2) NVIDIA driver (critical)
 must "install-nvidia-driver" '
   apt_install ubuntu-drivers-common
-  ubuntu-drivers autoinstall
+  apt_install nvidia-driver-580-open linux-modules-nvidia-580-open-aws
 '
 
-# 3) Desktop + GDM (Wayland off) (critical)
-must "install-desktop" '
-  apt_install ubuntu-desktop gdm3 dbus-x11
-  sed -i "s/^#\\(WaylandEnable=false\\)/\\1/" /etc/gdm3/custom.conf || true
-'
-
-# 4) Remove GNOME first-run wizard (non-fatal)
-try_step "disable-gnome-initial-setup" '
-  apt-get remove --purge -yq gnome-initial-setup || true
-  sed -i "s/^X-GNOME-Autostart-enabled=true/X-GNOME-Autostart-enabled=false/" /etc/xdg/autostart/gnome-initial-setup-first-login.desktop || true
-  systemctl restart gdm3 || true
-'
-
-# 5) Amazon DCV server (critical)
-must "install-nice-dcv" '
-  DCV_URL="https://d1uj6qtbmh3dt5.cloudfront.net/__DCV_VERSION__/Servers/nice-dcv-__DCV_VERSION__-__DCV_BUILD__-ubuntu2204-x86_64.tgz"
-  cd /tmp
-  wget -q "$DCV_URL" -O /tmp/dcv.tgz
-  tar -xzf /tmp/dcv.tgz -C /tmp
-  cd /tmp/nice-dcv-__DCV_VERSION__-__DCV_BUILD__-ubuntu2204-x86_64
-  apt_install libpulse-mainloop-glib0 libpulse0 libgstreamer-plugins-base1.0-0 libcrack2 libxcb-damage0 libxcb-xkb1 libxcb-xtest0 keyutils
-  apt_install alsa-utils
-  apt-get install -yq ./*.deb
-  usermod -aG video dcv || true
-  systemctl enable dcvserver
-  systemctl restart dcvserver
-'
-
-# 6) DCV config (non-fatal)
-try_step "configure-dcv" '
-  sed -i "/^\\[display\\]/a max-head-resolution = \"(4096, 2160)\"\\nweb-client-max-head-resolution = \"(4096, 4096)\"" /etc/dcv/dcv.conf || true
-  if ! grep -q "\\[display/linux\\]" /etc/dcv/dcv.conf; then
-    cat <<EOF >>/etc/dcv/dcv.conf
-[display/linux]
-disable-local-console=false
-EOF
+# Load NVIDIA kernel module (nouveau already blacklisted above)
+if ! is_done "nvidia-driver-loaded"; then
+  modprobe nvidia 2>/dev/null || true
+  if nvidia-smi > /dev/null 2>&1; then
+    log "nvidia-smi OK -- driver loaded via modprobe"
+    mark_done "nvidia-driver-loaded"
+  else
+    log "WARNING: nvidia-smi failed after modprobe -- driver will load after next reboot"
+    echo "STEP_WARN:nvidia-driver-loaded:nvidia-smi-failed-will-retry-after-reboot" >> "$SUMMARY"
   fi
-  systemctl restart dcvserver || true
-'
+fi
 
-# 7) Auto-create DCV virtual session service (critical)
-must "install-auto-dcv-service" install_auto_dcv_service
-
-# 8) AWS CLI v2 (critical)
-must "install-aws-cli-v2" '
-  apt_update
-  apt_install unzip
-  TMP_DIR="$(mktemp -d)"
-  cd "$TMP_DIR"
-  curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-  unzip -q awscliv2.zip
-  ./aws/install --update
-  aws --version
-'
-
-# 9) amazon-efs-utils (critical for EFS mount)
-must "install-efs-utils" '
-  apt_update
-  apt_install git binutils rustc cargo pkg-config libssl-dev ca-certificates cmake golang-go build-essential
-  rm -rf /tmp/efs-utils
-  git clone --branch v2.4.0 --single-branch https://github.com/aws/efs-utils /tmp/efs-utils
-  cd /tmp/efs-utils
-  ./build-deb.sh
-  apt-get install -yq /tmp/efs-utils/build/amazon-efs-utils*deb
-'
-
-# For using IsaacSim/Lab in a container
-# 10) Docker + NVIDIA Container Toolkit (non-fatal)
-try_step "install-docker-nvidia-toolkit" '
+# 3) Docker + NVIDIA Container Toolkit (critical for container-based workflow)
+must "install-docker-nvidia-toolkit" '
   curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
   sh /tmp/get-docker.sh
   systemctl enable docker
@@ -315,104 +240,70 @@ try_step "install-docker-nvidia-toolkit" '
   systemctl restart docker
 '
 
-# Alternatively, steps 11-15 for using IsaacSim/Lab on host
-# 11) Miniforge (critical for Python/pip)
-must "install-miniforge" '
-  if [[ ! -x /opt/conda/bin/conda ]]; then
-    TMP_INSTALLER="/tmp/Miniforge3.sh"
-    curl -fsSL https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh -o "$TMP_INSTALLER"
-    bash "$TMP_INSTALLER" -b -p /opt/conda
-    ln -sf /opt/conda/bin/conda /usr/local/bin/conda
-  fi
-  chown -R ubuntu:ubuntu /opt/conda
+# 4) AWS CLI v2 (critical)
+must "install-aws-cli-v2" '
+  apt_update
+  apt_install unzip
+  TMP_DIR="$(mktemp -d)"
+  cd "$TMP_DIR"
+  curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+  unzip -q awscliv2.zip
+  ./aws/install --update
+  aws --version
 '
 
-# 12) Create conda env and configure default activation (critical for Python/pip)
-must "create-conda-env-isaac" '
-  /opt/conda/bin/conda info >/dev/null
-  if ! /opt/conda/bin/conda env list | awk "{print $1}" | grep -q "^isaac$"; then
-    su - ubuntu -c "/opt/conda/bin/conda create -y -n isaac python=__PYTHON_VERSION__"
-  fi
-  /opt/conda/bin/conda config --system --set auto_activate_base false
-  su - ubuntu -c "touch ~/.bashrc"
-  if ! grep -q "conda activate isaac" /home/ubuntu/.bashrc; then
-    su - ubuntu -c "echo \"conda activate isaac\" >> ~/.bashrc"
-  fi
+# 5) amazon-efs-utils (critical for EFS mount)
+must "install-efs-utils" '
+  apt_update
+  apt_install git binutils rustc cargo pkg-config libssl-dev ca-certificates cmake golang-go build-essential
+  rm -rf /tmp/efs-utils
+  git clone --branch v2.4.0 --single-branch https://github.com/aws/efs-utils /tmp/efs-utils
+  cd /tmp/efs-utils
+  ./build-deb.sh
+  apt-get install -yq /tmp/efs-utils/build/amazon-efs-utils*deb
 '
 
-# 13) PyTorch + IsaacSim via pip (non-fatal)
-try_step "install-pytorch-isaacsim" '
-  su - ubuntu -c "/opt/conda/bin/conda run -n isaac python -V"
-  su - ubuntu -c "/opt/conda/bin/conda run -n isaac python -m pip install --upgrade pip"
-  su - ubuntu -c "/opt/conda/bin/conda run -n isaac pip install torch==__PYTORCH_VERSION__ torchvision --index-url https://download.pytorch.org/whl/__CUDA_INDEX__"
-  su - ubuntu -c "/opt/conda/bin/conda run -n isaac pip install 'isaacsim[all,extscache]==__ISAAC_SIM_VERSION__' --extra-index-url https://pypi.nvidia.com"
-'
-
-# 14) Isaac Lab (non-fatal)
-try_step "install-isaaclab" '
-  apt_install cmake build-essential
-  cd /home/ubuntu
-  if [[ ! -d IsaacLab ]]; then
-    su - ubuntu -c "git clone https://github.com/isaac-sim/IsaacLab.git"
-  fi
-  su - ubuntu -c "cd /home/ubuntu/IsaacLab && git fetch --tags || true"
-  su - ubuntu -c "cd /home/ubuntu/IsaacLab && git checkout __ISAAC_LAB_VERSION__ || true"
-  su - ubuntu -c "cd /home/ubuntu/IsaacLab && OMNI_KIT_ACCEPT_EULA=YES /opt/conda/bin/conda run -n isaac ./isaaclab.sh --install || true"
-'
-
-# 15) leisaac (install + assets, non-fatal)
-# Only install if explicitly enabled via CDK parameter
-if [[ "__LEISAAC_ENABLED__" == "true" ]]; then
-  try_step "install-leisaac" '
-    cd /home/ubuntu
-    if [[ ! -d leisaac ]]; then
-      su - ubuntu -c "git clone https://github.com/LightwheelAI/leisaac.git"
-    fi
-    su - ubuntu -c "cd /home/ubuntu/leisaac && git fetch --tags || true"
-    su - ubuntu -c "cd /home/ubuntu/leisaac && git checkout __LEISAAC_VERSION__ || true"
-    su - ubuntu -c "cd /home/ubuntu/leisaac && /opt/conda/bin/conda run -n isaac pip install -e \"source/leisaac[gr00t,lerobot-async]\" || true"
-    su - ubuntu -c "/opt/conda/bin/conda run -n isaac pip install pynput pyserial deepdiff feetech-servo-sdk || true"
-    su - ubuntu -c "/opt/conda/bin/conda run -n isaac pip install tensorboard || true"
-
-    mkdir -p /home/ubuntu/leisaac/assets/robots
-    mkdir -p /home/ubuntu/leisaac/assets/scenes
-
-    apt_update || true
-    apt_install unzip wget || true
-
-    ROBOT_URL="https://github.com/LightwheelAI/leisaac/releases/download/v0.1.0/so101_follower.usd"
-    SCENE_ZIP_URL="https://github.com/LightwheelAI/leisaac/releases/download/v0.1.0/kitchen_with_orange.zip"
-
-    if [[ ! -f /home/ubuntu/leisaac/assets/robots/so101_follower.usd ]]; then
-      su - ubuntu -c "wget -qO /home/ubuntu/leisaac/assets/robots/so101_follower.usd \"${ROBOT_URL}\""
-    fi
-
-    if [[ ! -d /home/ubuntu/leisaac/assets/scenes/kitchen_with_orange ]]; then
-      TMP_ZIP="$(mktemp -u /tmp/kitchen_with_orange.XXXXXX.zip)"
-      wget -qO "$TMP_ZIP" "${SCENE_ZIP_URL}"
-      unzip -oq "$TMP_ZIP" -d /home/ubuntu/leisaac/assets/scenes
-      rm -f "$TMP_ZIP"
-    fi
-
-    chown -R ubuntu:ubuntu /home/ubuntu/leisaac/assets
-  '
-else
-  log "SKIP: leisaac installation (disabled via __LEISAAC_ENABLED__=false)"
-fi
-
-# 16) Firefox browser (non-fatal)
+# 6) Firefox browser (non-fatal)
 try_step "install-firefox" '
   apt_update
   apt_install firefox
 '
 
-# Final: summary and optional reboot
-log "==== SUMMARY (also in $SUMMARY) ===="
-cat "$SUMMARY" || true
+# 7) cfn-bootstrap (critical for CloudFormation signaling)
+must "install-cfn-bootstrap" '
+  apt_install python3-pip
+  pip3 install https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-py3-latest.tar.gz
+  test -x /usr/local/bin/cfn-signal
+'
 
-if [[ $FAILURES -gt 0 ]]; then
-  log "One or more critical steps failed ($FAILURES). Not rebooting automatically."
-else
-  log "All critical steps OK. Scheduling a reboot to finalize configuration."
-  nohup shutdown -r +1 "Rebooting to finalize configuration" >/dev/null 2>&1 &
-fi
+# Install a systemd service that ensures /mnt/efs is mounted after network is ready.
+# This handles stop/start scenarios where DNS resolution may fail during the early
+# fstab mount phase (network.target vs network-online.target timing).
+install_efs_ensure_mount_service() {
+  cat >/etc/systemd/system/efs-ensure-mount.service <<'EOF'
+[Unit]
+Description=Ensure /mnt/efs is mounted after network is available
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Retry up to 10 times (10 x 10s = ~100s) until the mount is established
+ExecStart=/bin/bash -c '\
+  for i in $(seq 1 10); do \
+    mount | grep -q " /mnt/efs " && exit 0; \
+    mount /mnt/efs 2>/dev/null && exit 0; \
+    sleep 10; \
+  done; \
+  mount /mnt/efs'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl enable efs-ensure-mount.service
+}
+
+# DCV desktop, container pull, host tools, EFS mount, cfn-signal, and ALL_DONE
+# are handled dynamically by dcv_construct.py add_commands.

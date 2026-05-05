@@ -19,6 +19,7 @@ class CodeBuildStack(Construct):
         construct_id: str,
         ecr_repository_name: str = "gr00t-finetune",
         use_stable: bool = True,
+        build_target: str = "n15",
     ) -> None:
         """
         CDK construct for AWS CodeBuild project to build GR00T fine-tuning container.
@@ -32,6 +33,7 @@ class CodeBuildStack(Construct):
         Args:
             ecr_repository_name: Name for the ECR repository (default: gr00t-finetune)
             use_stable: Use stable GR00T commit vs latest (default: True)
+            build_target: "n15" for N1.5 Dockerfile, "n16" for N16/Dockerfile (default: n15)
         """
         super().__init__(scope, construct_id)
 
@@ -116,6 +118,7 @@ class CodeBuildStack(Construct):
                     value="true" if use_stable else "false"
                 ),
                 "IMAGE_TAG": codebuild.BuildEnvironmentVariable(value="latest"),
+                "BUILD_TARGET": codebuild.BuildEnvironmentVariable(value=build_target),
             },
             # Timeout (building flash-attn takes time)
             timeout=Duration.hours(2),
@@ -174,14 +177,15 @@ class CodeBuildStack(Construct):
                     f"{build_project.project_name}-build-{source_asset.s3_object_key}"
                 ),
             ),
-            # Also trigger on UPDATE when the physical resource ID changes (i.e., when asset hash changes)
+            # on_update: no-op — only trigger builds on CREATE (first deploy) or when source files
+            # change (asset hash changes → physical resource ID changes → replacement → on_create fires).
+            # Using batchGetProjects as a read-only no-op so repeated deploys don't re-trigger builds.
             on_update=cr.AwsSdkCall(
                 service="CodeBuild",
-                action="startBuild",
+                action="batchGetProjects",
                 parameters={
-                    "projectName": build_project.project_name,
+                    "names": [build_project.project_name],
                 },
-                # Use the same dynamic physical resource ID based on S3 object key hash
                 physical_resource_id=cr.PhysicalResourceId.of(
                     f"{build_project.project_name}-build-{source_asset.s3_object_key}"
                 ),

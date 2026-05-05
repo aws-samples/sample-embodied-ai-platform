@@ -36,6 +36,8 @@ class DcvStack(Stack):
         efs_sg_id = self.node.try_get_context("efs_sg_id")
         # Read optional leisaac context value
         leisaac_enabled = self.node.try_get_context("leisaac_enabled") or False
+        # Read optional AZ context value
+        availability_zone = self.node.try_get_context("availability_zone")
 
         # Create props with optional vpc_id, instance_type, and version parameters
         props = DcvWorkstationProps(
@@ -47,6 +49,7 @@ class DcvStack(Stack):
             efs_id=efs_id,
             efs_sg_id=efs_sg_id,
             leisaac_enabled=leisaac_enabled,
+            availability_zone=availability_zone,
         )
 
         # Instantiate the DcvWorkstation construct

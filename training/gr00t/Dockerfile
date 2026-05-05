@@ -4,7 +4,7 @@ FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
 
 # Build argument to control GR00T version (stable vs latest)
 ARG USE_STABLE=true
-ARG STABLE_COMMIT=db107f03d165060998df166292578f1d7fb3c79a
+ARG STABLE_COMMIT=4af2b622892f7dcb5aae5a3fb70bcb02dc217b96
 
 # Setting the frontend to be non-interactive
 # This is to avoid any user input required during the installation of packages

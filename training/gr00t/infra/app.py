@@ -61,15 +61,23 @@ class IsaacLabDcvStack(Stack):
         super().__init__(scope, construct_id, **kwargs)
 
         # Configure DCV workstation with gr00t-specific settings
-        # IMPORTANT: Use old versions to preserve exact behavior (zero regression)
+        # isaac_sim_version="5.1.0", isaac_lab_version="v2.3.0" for both N1.5 and N1.6
+        # public_dcv_access: True (default) opens ports 8443/6006/8080 publicly.
+        # Deploy with --context public_dcv_access=false for SSM-only access.
+        public_dcv = self.node.try_get_context("public_dcv_access")
+        public_dcv_access = public_dcv != "false"  # Default True unless explicitly "false"
+
         props = DcvWorkstationProps(
             vpc=batch_stack.vpc,              # Share VPC with Batch
             efs_id=batch_stack.efs_id,        # Share EFS with Batch
             efs_sg_id=batch_stack.efs_sg_id,  # Share security group
-            instance_type="g6.4xlarge",       # Same as before
-            isaac_sim_version="4.5.0",        # OLD version (preserve behavior)
-            isaac_lab_version="v2.1.1",       # OLD version (preserve behavior)
+            # Preferred: g6.4xlarge, g6.2xlarge, g5.2xlarge or larger.
+            # If capacity errors occur, try changing availability_zone between us-west-2a/b/c/d.
+            instance_type="g6.4xlarge",       # Fall back to g6/g5.2xlarge if capacity unavailable.
+            isaac_sim_version="5.1.0",        # Latest version with valid NGC container
+            isaac_lab_version="v2.3.0",       # Matches isaac-lab:2.3.0 on NGC
             leisaac_enabled=True,             # Required for gr00t
+            public_dcv_access=public_dcv_access,
         )
 
         self.dcv_workstation = DcvWorkstation(self, "DCV", props)
