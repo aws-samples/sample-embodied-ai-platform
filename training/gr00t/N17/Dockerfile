@@ -3,6 +3,7 @@
 FROM nvcr.io/nvidia/pytorch:25.04-py3
 
 ARG USE_STABLE=true
+# https://github.com/NVIDIA/Isaac-GR00T/releases/tag/n1.7-release
 ARG STABLE_COMMIT=23ace64f17aa5015259b8609d371eb61a357c776
 
 ENV DEBIAN_FRONTEND=noninteractive

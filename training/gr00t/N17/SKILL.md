@@ -32,6 +32,17 @@ Batch first, DCV second. Destroy order is reversed: DCV first, Batch second.
 
 ## Phase 1: Prerequisites
 
+> **Prompt the user:** "How should the instance's service ports — DCV (8443),
+> W&B (8080), and TensorBoard (6006) — be exposed?
+> 1. **Public** (default) — all three ports open to `0.0.0.0/0`. Simplest but
+>    least secure. The DCV web console is reachable directly at `https://<ip>:8443`.
+> 2. **SSM-only** — no public ports. All access (DCV desktop included) goes
+>    through SSH port forwarding over SSM. Pass `--context public_dcv_access=false`
+>    in Phase 3 Step 2."
+>
+> Record the choice — it affects the Phase 3 deploy flags and how Phase 6/7a/8c
+> connect to DCV and W&B.
+
 Before deploying, verify these are in place.
 
 > **Region selection:** Deploy in a region with g6e GPU instances for training
@@ -61,12 +72,19 @@ pip install -r training/gr00t/infra/requirements.txt
 pip install -r dcv/requirements.txt
 ```
 
-**HuggingFace token (required for N1.7 evaluation):** The N1.7 model loads the
-gated [nvidia/Cosmos-Reason2-2B](https://huggingface.co/nvidia/Cosmos-Reason2-2B)
-backbone at inference time. You need a HuggingFace account with access granted to
-this model. Set your token in the current shell — it will be used in Phase 8:
+**HuggingFace token (required for N1.7 training AND evaluation):** The N1.7 model
+loads the gated [nvidia/Cosmos-Reason2-2B](https://huggingface.co/nvidia/Cosmos-Reason2-2B)
+backbone at both training start (Phase 7) and inference (Phase 8). Grant your HF
+account access to the model, then write the token to `.env` at the repo root — subprocess shells don't inherit `export`s, so a file is
+the reliable way to pass it between phases:
 ```bash
-export HF_TOKEN=<your-huggingface-token>
+echo "HF_TOKEN=<your-huggingface-token>" >> .env && chmod 600 .env
+```
+
+Phases 7 and 8 load it via:
+```bash
+set -a && source "$(git rev-parse --show-toplevel)/.env" && set +a
+test -n "$HF_TOKEN" || { echo "ERROR: HF_TOKEN missing from .env"; exit 1; }
 ```
 
 Also confirm CDK has been bootstrapped in the target account/region:
@@ -400,11 +418,20 @@ Do not submit a Batch job until the build shows `SUCCEEDED`.
 
 ### 7b. Submit the training job
 
+The training job loads the gated `nvidia/Cosmos-Reason2-2B` backbone at startup,
+so `HF_TOKEN` **must** be passed into the container. Without it the job fails
+~30s in with a 401 on `config.json`. Validate the token exists, then inject it
+via `--container-overrides`:
+
 ```bash
+set -a && source "$(git rev-parse --show-toplevel)/.env" && set +a
+test -n "$HF_TOKEN" || { echo "ERROR: HF_TOKEN missing from .env"; exit 1; }
+
 JOB_ID=$(aws batch submit-job \
   --job-name "IsaacGr00tFinetuning" \
   --job-queue "IsaacGr00tJobQueue" \
   --job-definition "IsaacGr00tJobDefinition" \
+  --container-overrides "environment=[{name=HF_TOKEN,value=$HF_TOKEN}]" \
   --query 'jobId' --output text)
 echo "Job submitted: $JOB_ID"
 ```
@@ -467,6 +494,9 @@ observations in the nested format the server expects natively, and the wrapper w
 cause a key mismatch error.
 
 ```bash
+set -a && source "$(git rev-parse --show-toplevel)/.env" && set +a
+test -n "$HF_TOKEN" || { echo "ERROR: HF_TOKEN missing from .env"; exit 1; }
+
 CHECKPOINT=/mnt/efs/gr00t/checkpoints/$JOB_ID/checkpoint-6000
 
 ssh dcv-isaac "aws ecr get-login-password --region $AWS_DEFAULT_REGION | \
@@ -493,10 +523,10 @@ ssh dcv-isaac "docker run --gpus all -d \
 > `gr00t.eval.run_gr00t_server` which wraps `Gr00tPolicy` in a `PolicyServer` (ZMQ).
 > Allow ~60 seconds for model loading before the server begins accepting connections.
 >
-> **HF_TOKEN is required** — the N1.7 model loads the Cosmos-Reason2-2B backbone at
-> startup, which is a gated HuggingFace model. `$HF_TOKEN` must be set in your
-> local shell (see Phase 1 prerequisites). The token is expanded locally and passed
-> to the container via the SSH command.
+> **HF_TOKEN is required** — the N1.7 model loads the gated Cosmos-Reason2-2B
+> backbone at startup. The token is loaded from `.env` (see Phase 1), expanded
+> locally by the outer shell, and passed into the remote container via the SSH
+> command's `-e HF_TOKEN=...`.
 
 Verify the server is listening:
 ```bash
@@ -732,7 +762,7 @@ Log in with the DCV credentials from the stack outputs (`$DCVCredentials`).
    /workspace/isaaclab/_isaac_sim/python.sh \
      /workspace/scripts/evaluation/policy_inference.py \
        --task=LeIsaac-SO101-PickOrange-v0 \
-       --eval_rounds=1 \
+       --eval_rounds=10 \
        --policy_type=gr00tn1.6 \
        --policy_host=localhost \
        --policy_port=5555 \
@@ -748,7 +778,10 @@ Log in with the DCV credentials from the stack outputs (`$DCVCredentials`).
 
 A simulation window will appear showing the robot arm, the table scene, and the orange.
 Watch the arm's behavior to judge whether the policy has learned the intended task.
-Increase `--eval_rounds` to run multiple episodes for a more thorough assessment.
+
+**Tip:** Click the IsaacSim window and press **`r`** to immediately reset the scene with a
+new randomized layout — useful for spot-checking behavior across different object positions
+without waiting for the episode timeout.
 
 ## Cleanup: Tearing Down Stacks
 

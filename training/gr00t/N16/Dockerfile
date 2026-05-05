@@ -3,7 +3,8 @@
 FROM nvcr.io/nvidia/pytorch:25.04-py3
 
 ARG USE_STABLE=true
-ARG STABLE_COMMIT=e8e625f4f21898c506a1d8f7d20a289c97a52acf
+# https://github.com/NVIDIA/Isaac-GR00T/releases/tag/n1.6.1-release
+ARG STABLE_COMMIT=5dc80c4afd726b34faad1d8f7e007a13b34e4c88
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV NVIDIA_DRIVER_CAPABILITIES=graphics,utility,compute
