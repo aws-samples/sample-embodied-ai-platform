@@ -1,15 +1,15 @@
-# Isaac-GR00T N1.6 Fine-tuning Container
+# Isaac-GR00T N1.7 Fine-tuning Container
 # Based on upstream: https://github.com/NVIDIA/Isaac-GR00T/blob/main/Dockerfile
 FROM nvcr.io/nvidia/pytorch:25.04-py3
 
 ARG USE_STABLE=true
-# https://github.com/NVIDIA/Isaac-GR00T/releases/tag/n1.6.1-release
-ARG STABLE_COMMIT=5dc80c4afd726b34faad1d8f7e007a13b34e4c88
+# https://github.com/NVIDIA/Isaac-GR00T/releases/tag/n1.7-release
+ARG STABLE_COMMIT=23ace64f17aa5015259b8609d371eb61a357c776
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV NVIDIA_DRIVER_CAPABILITIES=graphics,utility,compute
 
-# System deps (N1.6 upstream + our additions: aws-cli, git-lfs, vim/htop)
+# System deps (N1.7 upstream + our additions: aws-cli, git-lfs, vim/htop)
 RUN apt-get update && apt-get install -y \
     build-essential yasm cmake libtool git git-lfs pkg-config \
     libass-dev libfreetype6-dev libvorbis-dev \
@@ -25,17 +25,17 @@ RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2
 # UV package manager
 RUN pip install uv
 
-# Upstream dep fixes (from N1.6 Dockerfile)
+# Upstream dep fixes (from N1.7 Dockerfile)
 RUN sed -i s/dill==0.3.9/dill==0.3.8/g /etc/pip/constraint.txt && \
     sed -i s/scipy==1.15.2/scipy==1.15.3/g /etc/pip/constraint.txt && \
     sed -i '/flash.attn/d' /etc/pip/constraint.txt
 
-# N1.6 pip deps (from upstream Dockerfile)
+# N1.7 pip deps (from upstream Dockerfile)
 RUN pip install imageio h5py boto3 transformers[torch] deepspeed timm peft \
     diffusers wandb tianshou dm_tree openai \
     albumentations==1.4.18 decord==0.6.0 torchcodec==0.4.0
 
-# PyTorch3D from source (N1.6 requirement)
+# PyTorch3D from source (N1.7 requirement)
 # MAX_JOBS=2 limits parallel C++ compilation to avoid OOM in memory-constrained build envs
 RUN cd /opt && git clone https://github.com/facebookresearch/pytorch3d.git && \
     cd pytorch3d && MAX_JOBS=2 pip install .
@@ -59,11 +59,11 @@ RUN cd /workspace/gr00t-repo && uv sync && uv pip install -e .
 ENV VIRTUAL_ENV="/workspace/gr00t-repo/.venv"
 ENV PATH="/workspace/gr00t-repo/.venv/bin:${PATH}"
 
-# flash-attn (required by GR00T N1.6; in pyproject.toml but needs explicit install)
+# flash-attn (required by GR00T N1.7; in pyproject.toml but needs explicit install)
 # Use uv pip to bypass /etc/pip/constraint.txt which pins an older flash-attn version
 RUN uv pip install flash-attn==2.7.4.post1 --no-build-isolation
 
-# EGL/Vulkan setup (from N1.6 Dockerfile)
+# EGL/Vulkan setup (from N1.7 Dockerfile)
 RUN mkdir -p /usr/share/glvnd/egl_vendor.d && \
     echo '{"file_format_version":"1.0.0","ICD":{"library_path":"libEGL_nvidia.so.0"}}' \
     > /usr/share/glvnd/egl_vendor.d/10_nvidia.json
@@ -85,7 +85,7 @@ WORKDIR /workspace/gr00t-repo
 ENV PYTHONPATH="/workspace/gr00t-repo:/workspace"
 ENV DATASET_LOCAL_DIR="/workspace/train"
 ENV OUTPUT_DIR="/workspace/checkpoints"
-ENV BASE_MODEL_PATH="nvidia/GR00T-N1.6-3B"
+ENV BASE_MODEL_PATH="nvidia/GR00T-N1.7-3B"
 
 RUN mkdir -p ${DATASET_LOCAL_DIR} ${OUTPUT_DIR}
 

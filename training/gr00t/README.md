@@ -1,6 +1,6 @@
 # NVIDIA Isaac GR00T Training Component
 
-Fine-tune NVIDIA Isaac GR00T VLA models (N1.5 and N1.6) using teleoperation/simulation datasets. Supports AWS Batch training with GPU and Amazon DCV for monitoring/evaluation. Use this README as a bridge: high-level usage and structure here; detailed infrastructure/deployment in `infra/README.md`.
+Fine-tune NVIDIA Isaac GR00T VLA models (N1.5, N1.6, and N1.7) using teleoperation/simulation datasets. Supports AWS Batch training with GPU and Amazon DCV for monitoring/evaluation. Use this README as a bridge: high-level usage and structure here; detailed infrastructure/deployment in `infra/README.md`.
 
 ## Links
 
@@ -8,6 +8,7 @@ Fine-tune NVIDIA Isaac GR00T VLA models (N1.5 and N1.6) using teleoperation/simu
 - Infrastructure and deployment: [infra/README.md](infra/README.md)
 - N1.5 deployment guide (agent): [SKILL.md](SKILL.md)
 - N1.6 deployment guide (agent): [N16/SKILL.md](N16/SKILL.md)
+- N1.7 deployment guide (agent): [N17/SKILL.md](N17/SKILL.md)
 - Observation/response format: [references/eval-format.md](references/eval-format.md)
 - Troubleshooting: [references/troubleshooting.md](references/troubleshooting.md)
 - Workflow scripts: [run_finetune_workflow.sh](run_finetune_workflow.sh), [finetune_gr00t.py](finetune_gr00t.py)
@@ -35,6 +36,10 @@ training/gr00t/
 ├── N16/                       # N1.6-specific files
 │   ├── SKILL.md               # N1.6 deployment guide (agent automation)
 │   ├── Dockerfile             # N1.6 training container
+│   └── ...
+├── N17/                       # N1.7-specific files (Cosmos-Reason2-2B backbone)
+│   ├── SKILL.md               # N1.7 deployment guide (agent automation)
+│   ├── Dockerfile             # N1.7 training container
 │   └── ...
 └── infra/                     # AWS CDK stacks for Batch and DCV
     ├── README.md              # Deployment guide (paths 1–3, troubleshooting)
@@ -131,6 +136,7 @@ After training, evaluate checkpoints using the policy server and LeIsaac simulat
 
 - **N1.5**: `inference_service.py --server` with TensorBoard. See [SKILL.md](SKILL.md) Phase 8.
 - **N1.6**: `run_gr00t_server.py` with W&B. See [N16/SKILL.md](N16/SKILL.md) Phase 8.
+- **N1.7**: `run_gr00t_server.py` with W&B (requires HuggingFace token for Cosmos-Reason2-2B). See [N17/SKILL.md](N17/SKILL.md) Phase 8.
 
 Both versions use the same eval container (`isaac-lab:2.3.0`) and `leisaac v0.3.0` for
 LeIsaac closed-loop simulation. They serve trained checkpoints as ZMQ policy servers on

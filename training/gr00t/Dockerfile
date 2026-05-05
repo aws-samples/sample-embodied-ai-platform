@@ -4,6 +4,7 @@ FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
 
 # Build argument to control GR00T version (stable vs latest)
 ARG USE_STABLE=true
+# https://github.com/NVIDIA/Isaac-GR00T/releases/tag/n1.5-release
 ARG STABLE_COMMIT=4af2b622892f7dcb5aae5a3fb70bcb02dc217b96
 
 # Setting the frontend to be non-interactive
