@@ -6,13 +6,13 @@ A reusable AWS CDK module for deploying GPU-accelerated EC2 instances with Amazo
 
 This module can be used in two ways:
 
-1. **Standalone** — Deploy independently from `dcv/` with its own VPC
+1. **Standalone** — Deploy independently from `workstation/` with its own VPC
 2. **Integrated** — Import the `DcvWorkstation` construct into another CDK app (e.g., gr00t training pipeline)
 
 ## Quick Start (Standalone)
 
 ```bash
-cd dcv
+cd workstation
 pip install -r requirements.txt
 
 # Bootstrap CDK (one-time per account/region)
@@ -65,7 +65,7 @@ The module validates version compatibility at CDK synthesis time. Unsupported co
 
 | IsaacSim | IsaacLab | Python | PyTorch | CUDA |
 |----------|----------|--------|---------|------|
-| 5.1.0 | v2.3.0 — v2.3.2 | 3.11 | 2.7.0 | 12.8 |
+| 5.1.0 | v2.3.0 | 3.11 | 2.7.0 | 12.8 |
 | 5.0.0 | v2.2.0 — v2.2.2 | 3.10 | 2.7.0 | 12.8 |
 | 4.5.0 | v2.1.0 — v2.1.1 | 3.10 | 2.5.1 | 11.8 |
 
@@ -77,7 +77,7 @@ To use the DCV workstation in another CDK app (e.g., alongside a Batch training 
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../.."))
 
-from dcv import DcvWorkstation, DcvWorkstationProps
+from workstation import DcvWorkstation, DcvWorkstationProps
 
 class MyTrainingDcvStack(Stack):
     def __init__(self, scope, id, batch_stack, **kwargs):
@@ -153,7 +153,7 @@ AWS_DEFAULT_REGION=us-west-2 cdk destroy --profile <your-profile> --force
 ## Module Structure
 
 ```
-dcv/
+workstation/
 ├── __init__.py              # Exports DcvWorkstation, DcvWorkstationProps
 ├── dcv_construct.py         # L3 CDK Construct (core infrastructure logic)
 ├── dcv_stack.py             # Thin Stack wrapper for standalone deployment

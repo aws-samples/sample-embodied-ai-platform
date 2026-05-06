@@ -9,11 +9,11 @@ This directory contains AWS Cloud Development Kit (CDK) stacks to deploy infrast
 The infrastructure consists of two CDK stacks:
 
 1. **BatchStack** (`batch_stack.py`) - Creates AWS Batch resources for scalable fine-tuning jobs
-2. **IsaacLabDcvStack** (defined in `app.py`) - Deploys an Amazon EC2 instance with Amazon DCV for visualization and evaluation, powered by the **standalone DCV module** at [`dcv/`](../../../dcv/)
+2. **IsaacLabDcvStack** (defined in `app.py`) - Deploys an Amazon EC2 instance with Amazon DCV for visualization and evaluation, powered by the **standalone workstation module** at [`workstation/`](../../../workstation/)
 
 Both stacks share common resources (VPC, EFS, Security Groups) to enable seamless data flow between training and evaluation workflows.
 
-> **Note**: The DCV workstation infrastructure was extracted into a standalone, reusable module at `dcv/` in the repo root. The gr00t `app.py` imports and consumes this module — N1.5 (IsaacSim 4.5.0 / v2.2.0) by default, or N1.6 (5.1.0 / v2.3.0) by editing `app.py`. See [`dcv/README.md`](../../../dcv/README.md) for standalone usage and full documentation.
+> **Note**: The DCV workstation infrastructure was extracted into a standalone, reusable module at `workstation/` in the repo root. The gr00t `app.py` imports and consumes this module — N1.5 (IsaacSim 4.5.0 / v2.2.0) by default, or N1.6 (5.1.0 / v2.3.0) by editing `app.py`. See [`workstation/README.md`](../../../workstation/README.md) for standalone usage and full documentation.
 
 ## Stack Dependencies
 
@@ -32,8 +32,8 @@ Creates the following resources:
 
 **Dependencies**: None (fully self-contained)
 
-### IsaacLabDcvStack (via standalone `dcv/` module)
-Consumes the standalone DCV module at `dcv/` and creates:
+### IsaacLabDcvStack (via standalone `workstation/` module)
+Consumes the standalone workstation module at `workstation/` and creates:
 - Amazon EC2 instance (g6.4xlarge with GPU and Amazon DCV) for remote visualization
 - Security group for DCV (port 8443) and TensorBoard (port 6006) access
 - Elastic IP for stable connectivity
@@ -45,7 +45,7 @@ Consumes the standalone DCV module at `dcv/` and creates:
 - VPC from BatchStack (shared network)
 - EFS and Security Group from BatchStack (for shared storage with Batch jobs)
 
-**Configuration**: Gr00t-specific settings are in `app.py` — N1.5 (IsaacSim 4.5.0 / v2.2.0) by default, leisaac enabled. For N1.6, edit `DcvWorkstationProps` to use `isaac_sim_version="5.1.0"`, `isaac_lab_version="v2.3.0"`. The standalone `dcv/` module supports IsaacSim 5.1.0 and 4.5.0 — see [`dcv/README.md`](../../../dcv/README.md) for the full version compatibility matrix.
+**Configuration**: Gr00t-specific settings are in `app.py` — N1.5 (IsaacSim 4.5.0 / v2.2.0) by default, leisaac enabled. For N1.6, edit `DcvWorkstationProps` to use `isaac_sim_version="5.1.0"`, `isaac_lab_version="v2.3.0"`. The standalone `workstation/` module supports IsaacSim 5.1.0 and 4.5.0 — see [`workstation/README.md`](../../../workstation/README.md) for the full version compatibility matrix.
 
 ## Deployment Paths
 
@@ -149,12 +149,12 @@ cdk deploy IsaacLabDcvStack
 Deploy just a DCV workstation without the Batch training pipeline, using the standalone module:
 
 ```bash
-cd dcv
+cd workstation
 pip install -r requirements.txt
 AWS_DEFAULT_REGION=us-west-2 cdk deploy --profile <your-profile>
 ```
 
-See [`dcv/README.md`](../../../dcv/README.md) for full standalone usage, configuration options, and version selection.
+See [`workstation/README.md`](../../../workstation/README.md) for full standalone usage, configuration options, and version selection.
 
 ## Deployment Context
 

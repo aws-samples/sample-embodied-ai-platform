@@ -4,11 +4,11 @@ Provides reusable L3 construct for GPU-accelerated DCV workstations
 with NVIDIA drivers, IsaacSim, and IsaacLab.
 
 Usage (standalone):
-    cd dcv
+    cd workstation
     cdk deploy
 
 Usage (imported):
-    from dcv import DcvWorkstation, DcvWorkstationProps
+    from workstation import DcvWorkstation, DcvWorkstationProps
     DcvWorkstation(self, "DCV", props=DcvWorkstationProps(...))
 """
 from .dcv_construct import DcvWorkstation, DcvWorkstationProps

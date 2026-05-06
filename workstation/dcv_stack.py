@@ -8,7 +8,7 @@ class DcvStack(Stack):
     """Thin stack wrapper for standalone DCV deployment.
 
     This stack enables standalone deployment of the DCV workstation module
-    via 'cdk deploy' from the dcv/ directory. It wraps the DcvWorkstation
+    via 'cdk deploy' from the workstation/ directory. It wraps the DcvWorkstation
     construct and provides CloudFormation outputs.
 
     The stack reads optional context values to configure the deployment:
@@ -29,7 +29,7 @@ class DcvStack(Stack):
         instance_type = self.node.try_get_context("instance_type") or "g6.4xlarge"
         # Read optional version context values
         isaac_sim_version = self.node.try_get_context("isaac_sim_version") or "5.1.0"
-        isaac_lab_version = self.node.try_get_context("isaac_lab_version") or "v2.3.2"
+        isaac_lab_version = self.node.try_get_context("isaac_lab_version") or "v2.3.0"
         python_version = self.node.try_get_context("python_version")  # None = auto-derive
         # Read optional EFS context values
         efs_id = self.node.try_get_context("efs_id")

@@ -2,12 +2,12 @@
 import sys
 import os
 
-# Add dcv module to Python path for import
+# Add workstation module to Python path for import
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../../.."))
 
 from aws_cdk import App, Environment, Stack
 from batch_stack import BatchStack
-from dcv import DcvWorkstation, DcvWorkstationProps
+from workstation import DcvWorkstation, DcvWorkstationProps
 
 app = App()
 
@@ -47,7 +47,7 @@ batch_stack = BatchStack(
 class IsaacLabDcvStack(Stack):
     """DCV stack for gr00t visualization, integrated with BatchStack.
 
-    Consumes the standalone DCV module from dcv/ and shares VPC/EFS
+    Consumes the standalone workstation module from workstation/ and shares VPC/EFS
     with the gr00t BatchStack.
     """
 
