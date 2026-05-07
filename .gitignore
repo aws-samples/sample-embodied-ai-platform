@@ -57,7 +57,7 @@ CATKIN_IGNORE
 # AWS CDK
 training/**/infra/cdk.out/*
 training/**/infra/cdk.context.json
-dcv/cdk.out/*
+workstation/cdk.out/*
 
 # Kiro IDE settings
 .kiro/

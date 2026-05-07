@@ -69,7 +69,7 @@ ls -la "$REPO_ROOT/.venv/bin/python"
 cd "$REPO_ROOT" && python3 -m venv .venv
 source .venv/bin/activate
 pip install -r training/gr00t/infra/requirements.txt
-pip install -r dcv/requirements.txt
+pip install -r workstation/requirements.txt
 ```
 
 **HuggingFace token (required for N1.7 training AND evaluation):** The N1.7 model
@@ -109,7 +109,7 @@ npx cdk synth --quiet
 
 If synth fails, fix the error before proceeding. Common issues:
 - Missing Python dependencies -> `pip install -r requirements.txt`
-- Version validation errors -> check `dcv/versions.py` for supported IsaacSim versions
+- Version validation errors -> check `workstation/versions.py` for supported IsaacSim versions
 
 ## Phase 2.5: Probe GPU Instance Capacity
 
