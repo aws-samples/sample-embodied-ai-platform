@@ -568,6 +568,12 @@ class RLBatchMNPStack(Stack):
                 "SageMakerServiceEnv",
                 service_environment_name="GR00T-RL-SageMaker-ServiceEnv",
                 service_environment_type="SAGEMAKER_TRAINING",
+                capacity_limits=[
+                    batch.CfnServiceEnvironment.CapacityLimitProperty(
+                        capacity_unit="NUM_INSTANCES",
+                        max_capacity=1 + num_rollout_nodes,
+                    )
+                ],
             )
 
             # --- CfnJobQueue with SAGEMAKER_TRAINING type ---
