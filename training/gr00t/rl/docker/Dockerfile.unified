@@ -5,8 +5,7 @@
 #
 # Build requirements:
 #   - CodeBuild X2_LARGE (72 vCPU, 145 GB RAM, 824 GB disk) — no GPU needed
-#   - NGC_API_KEY for pulling base image from nvcr.io
-#   - Internet access for PyPI and GitHub Releases downloads
+#   - Internet access for PyPI, GitHub Releases, and nvcr.io (public, no auth needed)
 FROM nvcr.io/nvidia/isaac-sim:5.1.0
 
 USER root

@@ -75,3 +75,4 @@ workstation/cdk.out/*
 CLAUDE.md
 .planningworkstation/cdk.context.json
 workstation/cdk.context.json
+.planning/

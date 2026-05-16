@@ -297,10 +297,6 @@ class RLBatchMNPStack(Stack):
                         value="Dockerfile.unified"
                     ),
                     "IMAGE_TAG": codebuild.BuildEnvironmentVariable(value="latest"),
-                    "NGC_API_KEY": codebuild.BuildEnvironmentVariable(
-                        value="/gr00t-rl/ngc-api-key",
-                        type=codebuild.BuildEnvironmentVariableType.PARAMETER_STORE,
-                    ),
                 },
                 timeout=Duration.hours(3),
                 # Note: No local cache — not supported on X2_LARGE compute type
