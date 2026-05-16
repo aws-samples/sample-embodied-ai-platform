@@ -24,6 +24,9 @@ phases:
       - mkdir -p /mnt/efs/third_party
       - rm -rf /mnt/efs/third_party/RLinf
       - git clone https://github.com/RLinf/RLinf.git /mnt/efs/third_party/RLinf && cd /mnt/efs/third_party/RLinf && git checkout 649e7579775997ade74efff33a7c23e90c61e60a || true
+      - echo "Staging Isaac-GR00T..."
+      - rm -rf /mnt/efs/third_party/Isaac-GR00T
+      - git clone https://github.com/NVIDIA/Isaac-GR00T.git /mnt/efs/third_party/Isaac-GR00T && cd /mnt/efs/third_party/Isaac-GR00T && git checkout 4af2b622892f7dcb5aae5a3fb70bcb02dc217b96 || true
       - echo "Staging model checkpoint..."
       - if [ -f "$MODEL_DIR/config.json" ]; then echo "Model already staged"; else mkdir -p "$MODEL_DIR" && hf download "$MODEL_REPO" --local-dir "$MODEL_DIR"; fi
       - ln -sfn "$I4H_DIR/workflows" /mnt/efs/workflows || true

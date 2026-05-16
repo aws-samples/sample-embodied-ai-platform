@@ -46,11 +46,12 @@ if [ -d "/isaac-sim" ]; then
     }
 fi
 
-# Configure PYTHONPATH for RLinf and task extensions
+# Configure PYTHONPATH for RLinf, Isaac-GR00T, and task extensions
 export RLINF_PATH="${EFS_MOUNT}/third_party/RLinf"
+export GROOT_PATH="${EFS_MOUNT}/third_party/Isaac-GR00T"
 export EMBODIED_PATH="${RLINF_PATH}/examples/embodiment"
 export ISAACLAB_PATH="${EFS_MOUNT}/third_party/IsaacLab"
-export PYTHONPATH="${RLINF_PATH}:${EFS_MOUNT}/workflows/rheo/scripts:${EFS_MOUNT}/workflows/rheo/scripts/simulation/rl:${PYTHONPATH:-}"
+export PYTHONPATH="${RLINF_PATH}:${GROOT_PATH}:${EFS_MOUNT}/workflows/rheo/scripts:${EFS_MOUNT}/workflows/rheo/scripts/simulation/rl:${PYTHONPATH:-}"
 export RLINF_EXT_MODULE=rlinf_ext
 
 # Isaac Sim env (for rollout nodes)
