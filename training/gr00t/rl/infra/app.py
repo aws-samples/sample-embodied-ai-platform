@@ -9,9 +9,9 @@ Context parameters:
   vpc_id              - Existing VPC ID (creates new if omitted)
   efs_id              - Existing EFS file system ID (creates new if omitted)
   efs_sg_id           - EFS security group ID (required if efs_id provided)
-  learner_image_uri   - Pre-built ECR URI for learner (skips CodeBuild if provided)
-  rollout_image_uri   - Pre-built ECR URI for rollout (skips CodeBuild if provided)
+  image_uri           - Pre-built ECR URI for unified image (skips CodeBuild if provided)
   num_rollout_nodes   - Number of rollout child nodes (default: 4)
+  compute_backend     - "batch-mnp" (default) or "sagemaker"
 """
 import os
 import aws_cdk as cdk
@@ -30,8 +30,7 @@ stack = RLBatchMNPStack(
     vpc_id=app.node.try_get_context("vpc_id"),
     efs_id=app.node.try_get_context("efs_id"),
     efs_sg_id=app.node.try_get_context("efs_sg_id"),
-    learner_image_uri=app.node.try_get_context("learner_image_uri"),
-    rollout_image_uri=app.node.try_get_context("rollout_image_uri"),
+    image_uri=app.node.try_get_context("image_uri"),
     num_rollout_nodes=int(app.node.try_get_context("num_rollout_nodes") or 4),
     env=env,
 )
