@@ -2,6 +2,11 @@
 # Used for batch-mnp backend where all nodes must run the same image.
 # Contains: Isaac Sim + RLinf + GR00T + Ray + torch 2.8 + flash-attn
 # Based on the i4h-workflows Rheo Dockerfile (workflows/rheo/docker/Dockerfile.x86)
+#
+# Build requirements:
+#   - CodeBuild X2_LARGE (72 vCPU, 145 GB RAM, 824 GB disk) — no GPU needed
+#   - NGC_API_KEY for pulling base image from nvcr.io
+#   - Internet access for PyPI and GitHub Releases downloads
 FROM nvcr.io/nvidia/isaac-sim:5.1.0
 
 USER root
@@ -13,21 +18,42 @@ RUN mkdir -p /var/lib/apt/lists/partial \
     git git-lfs cmake sudo curl wget \
     && rm -rf /var/lib/apt/lists/*
 
-# Upgrade PyTorch to 2.8.0 (Isaac Sim ships 2.7.0, but flash-attn 2.8.3 needs 2.8.0)
+# Upgrade PyTorch to 2.8.0 (Isaac Sim ships 2.7.0, but flash-attn 2.8.3 needs 2.8.0 ABI)
 RUN /isaac-sim/python.sh -m pip install --no-cache-dir --no-build-isolation --use-pep517 \
     torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0
 
-# flash-attn (compiled against torch 2.8.0 — requires CUDA toolkit present in Isaac Sim image)
-ENV CUDA_HOME=/usr/local/cuda
-RUN /isaac-sim/python.sh -m pip install --no-cache-dir --no-build-isolation flash-attn==2.8.3
+# flash-attn 2.8.3 via pre-built wheel (no compilation, no GPU requirement)
+# Wheel: cu12 + torch 2.8 + CXX11 ABI TRUE + Python 3.11 + linux x86_64
+# Source: https://github.com/Dao-AILab/flash-attention/releases/tag/v2.8.3
+RUN /isaac-sim/python.sh -m pip install --no-cache-dir \
+    "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp311-cp311-linux_x86_64.whl"
 
 # Ray (RLinf minimum 2.47.0) — use --ignore-installed to avoid Isaac Sim conflicts
 RUN /isaac-sim/python.sh -m pip install --no-cache-dir --ignore-installed "ray[default]==2.47.0"
 
 # GR00T + RLinf dependencies (pinned to match i4h-workflows v0.5.0)
 COPY requirements-unified.txt /tmp/requirements-unified.txt
-RUN /isaac-sim/python.sh -m pip install --no-cache-dir -r /tmp/requirements-unified.txt \
-    && /isaac-sim/python.sh -c "import ray; from transformers import AutoModelForVision2Seq; print(f'OK: ray {ray.__version__}')"
+RUN /isaac-sim/python.sh -m pip install --no-cache-dir -r /tmp/requirements-unified.txt
+
+# CRITICAL: Remove Isaac Sim prebundle torch to prevent version conflicts at runtime.
+# Isaac Sim bundles old torch/functorch/typing_extensions in extension directories that
+# shadow pip-installed packages on the Python path.
+RUN rm -rf /isaac-sim/exts/omni.isaac.ml_archive/pip_prebundle/torch* \
+           /isaac-sim/exts/omni.isaac.ml_archive/pip_prebundle/functorch* \
+           /isaac-sim/exts/omni.isaac.ml_archive/pip_prebundle/typing_extensions* \
+           /isaac-sim/exts/omni.pip.cloud/pip_prebundle/typing_extensions*
+
+# Import verification (BUILD-02): fail the build if any critical import breaks
+RUN /isaac-sim/python.sh -c "\
+import torch; \
+assert torch.__version__.startswith('2.8'), f'Expected torch 2.8.x, got {torch.__version__}'; \
+import flash_attn; \
+assert flash_attn.__version__ == '2.8.3', f'Expected flash_attn 2.8.3, got {flash_attn.__version__}'; \
+import ray; \
+assert ray.__version__ == '2.47.0', f'Expected ray 2.47.0, got {ray.__version__}'; \
+from transformers import AutoModelForVision2Seq; \
+print(f'VERIFIED: torch={torch.__version__}, flash_attn={flash_attn.__version__}, ray={ray.__version__}, transformers OK') \
+"
 
 # AWS utilities
 RUN /isaac-sim/python.sh -m pip install --no-cache-dir awscli boto3
