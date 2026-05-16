@@ -73,4 +73,5 @@ workstation/cdk.out/*
 # agents settings
 .mcp.json
 CLAUDE.md
-.planning
+.planningworkstation/cdk.context.json
+workstation/cdk.context.json

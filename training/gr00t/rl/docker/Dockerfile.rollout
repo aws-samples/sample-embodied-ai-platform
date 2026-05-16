@@ -1,0 +1,33 @@
+# GR00T RL Rollout Worker — Isaac Sim + RLinf + GR00T + Ray
+# Runs on g6e.4xlarge (1× L40S) as rollout worker nodes.
+FROM nvcr.io/nvidia/isaac-sim:5.1.0
+
+# System dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git git-lfs cmake sudo curl wget \
+    && rm -rf /var/lib/apt/lists/*
+
+# Ray for distributed coordination (use Isaac Sim's bundled Python)
+RUN /isaac-sim/python.sh -m pip install --no-cache-dir "ray[default]==2.44.1"
+
+# GR00T model dependencies (subset needed for rollout inference)
+RUN /isaac-sim/python.sh -m pip install --no-cache-dir \
+    transformers>=4.48.0 \
+    accelerate>=1.2.0 \
+    safetensors \
+    huggingface-hub \
+    albumentations \
+    flash-attn --no-build-isolation
+
+# AWS utilities
+RUN /isaac-sim/python.sh -m pip install --no-cache-dir awscli boto3
+
+# IsaacLab (installed from EFS mount at runtime)
+# RLinf (installed from EFS mount at runtime)
+
+WORKDIR /workspace
+
+COPY entrypoint.sh /workspace/entrypoint.sh
+RUN chmod +x /workspace/entrypoint.sh
+
+ENTRYPOINT ["/workspace/entrypoint.sh"]

@@ -1,0 +1,403 @@
+import os
+from aws_cdk import (
+    aws_ec2 as ec2,
+    aws_batch as batch,
+    aws_ecr as ecr,
+    aws_iam as iam,
+    aws_efs as efs,
+    aws_ecs as ecs,
+    aws_s3 as s3,
+    Stack,
+    CfnOutput,
+    Duration,
+    Size,
+    RemovalPolicy,
+)
+from constructs import Construct
+
+
+class RLBatchMNPStack(Stack):
+    """AWS Batch Multi-Node Parallel stack for GR00T RL post-training via RLinf.
+
+    Architecture:
+      - Main node (g7e.48xlarge): Ray head + RLinf learner with intra-node FSDP
+      - Child nodes (g6e.4xlarge): Ray workers + RLinf rollout workers with Isaac Sim
+
+    The MNP job gang-schedules the entire cluster as a single job:
+      - All nodes start together or not at all
+      - AWS_BATCH_JOB_MAIN_NODE_PRIVATE_IPV4_ADDRESS injected into all containers
+      - Single job ID for observability (CloudWatch, logs)
+
+    Three-tier artifact flow:
+      - Ray object store: trajectories (in-memory, low-latency for on-policy PPO)
+      - EFS: checkpoints, TensorBoard logs (shared, persistent)
+      - S3: episode logs, eval videos, sim renders (durable, for Cosmos Transfer)
+    """
+
+    def __init__(
+        self,
+        scope: Construct,
+        construct_id: str,
+        vpc_id: str = None,
+        efs_id: str = None,
+        efs_sg_id: str = None,
+        learner_image_uri: str = None,
+        rollout_image_uri: str = None,
+        num_rollout_nodes: int = 4,
+        **kwargs,
+    ) -> None:
+        super().__init__(scope, construct_id, **kwargs)
+
+        # ==============================================================
+        # region 1. VPC and EFS (reuse from Part 1 or create new)
+        # ==============================================================
+        if vpc_id:
+            vpc = ec2.Vpc.from_lookup(self, "VPC", vpc_id=vpc_id)
+        else:
+            vpc = ec2.Vpc(
+                self,
+                "VPC",
+                vpc_name="GR00T-RL-VPC",
+                max_azs=2,
+                ip_addresses=ec2.IpAddresses.cidr("10.1.0.0/16"),
+                nat_gateways=1,
+                subnet_configuration=[
+                    ec2.SubnetConfiguration(
+                        name="Public", subnet_type=ec2.SubnetType.PUBLIC
+                    ),
+                    ec2.SubnetConfiguration(
+                        name="Private",
+                        subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS,
+                    ),
+                ],
+            )
+
+        self.vpc = vpc
+
+        if efs_id:
+            efs_sg = ec2.SecurityGroup.from_security_group_id(
+                self, "EFSSecurityGroup", efs_sg_id, mutable=True
+            )
+            efs_fs = efs.FileSystem.from_file_system_attributes(
+                self,
+                "EFS",
+                file_system_id=efs_id,
+                security_group=efs_sg,
+            )
+        else:
+            efs_sg = ec2.SecurityGroup(
+                self,
+                "EFSSecurityGroup",
+                vpc=vpc,
+                description="Security group for EFS mount targets",
+            )
+            efs_fs = efs.FileSystem(
+                self,
+                "EFS",
+                file_system_name="GR00T-RL-EFS",
+                vpc=vpc,
+                security_group=efs_sg,
+                performance_mode=efs.PerformanceMode.GENERAL_PURPOSE,
+                throughput_mode=efs.ThroughputMode.ELASTIC,
+                removal_policy=RemovalPolicy.RETAIN,
+            )
+            efs_sg.add_ingress_rule(
+                peer=efs_sg,
+                connection=ec2.Port.tcp(2049),
+                description="NFS within EFS SG",
+            )
+        # endregion
+
+        # ==============================================================
+        # region 2. S3 bucket for episode artifacts
+        # ==============================================================
+        artifact_bucket = s3.Bucket(
+            self,
+            "RLArtifactBucket",
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            encryption=s3.BucketEncryption.S3_MANAGED,
+            enforce_ssl=True,
+            versioned=True,
+            removal_policy=RemovalPolicy.RETAIN,
+            auto_delete_objects=False,
+        )
+        # endregion
+
+        # ==============================================================
+        # region 3. Security group for inter-node communication
+        # ==============================================================
+        batch_sg = ec2.SecurityGroup(
+            self,
+            "BatchSecurityGroup",
+            vpc=vpc,
+            description="SG for Batch MNP nodes — Ray, NCCL, RLinf inter-node traffic",
+            allow_all_outbound=True,
+        )
+        # Ray requires arbitrary TCP ports for GCS, object store, worker communication
+        batch_sg.add_ingress_rule(
+            peer=batch_sg,
+            connection=ec2.Port.all_tcp(),
+            description="All TCP between MNP nodes (Ray GCS, object store, NCCL, FSDP)",
+        )
+        batch_sg.add_ingress_rule(
+            peer=batch_sg,
+            connection=ec2.Port.all_udp(),
+            description="All UDP between MNP nodes (NCCL)",
+        )
+        # Allow EFS access from batch nodes
+        efs_fs.connections.allow_default_port_from(batch_sg)
+        # endregion
+
+        # ==============================================================
+        # region 4. Launch template (larger EBS for container images)
+        # ==============================================================
+        launch_template = ec2.LaunchTemplate(
+            self,
+            "RLLaunchTemplate",
+            security_group=batch_sg,
+            block_devices=[
+                ec2.BlockDevice(
+                    device_name="/dev/xvda",
+                    volume=ec2.BlockDeviceVolume.ebs(
+                        volume_size=200,
+                        delete_on_termination=True,
+                        volume_type=ec2.EbsDeviceVolumeType.GP3,
+                    ),
+                )
+            ],
+        )
+        # endregion
+
+        # ==============================================================
+        # region 5. IAM roles
+        # ==============================================================
+        instance_role = iam.Role(
+            self,
+            "BatchInstanceRole",
+            assumed_by=iam.ServicePrincipal("ec2.amazonaws.com"),
+            managed_policies=[
+                iam.ManagedPolicy.from_aws_managed_policy_name(
+                    "service-role/AmazonEC2ContainerServiceforEC2Role"
+                ),
+                iam.ManagedPolicy.from_aws_managed_policy_name(
+                    "AmazonSSMManagedInstanceCore"
+                ),
+            ],
+        )
+
+        job_role = iam.Role(
+            self,
+            "RLJobRole",
+            assumed_by=iam.ServicePrincipal("ecs-tasks.amazonaws.com"),
+        )
+        artifact_bucket.grant_read_write(job_role)
+        # endregion
+
+        # ==============================================================
+        # region 6. Compute environment (single pool, heterogeneous via MNP)
+        # ==============================================================
+        compute_env = batch.ManagedEc2EcsComputeEnvironment(
+            self,
+            "RLComputeEnvironment",
+            compute_environment_name="GR00T-RL-ComputeEnv",
+            vpc=vpc,
+            vpc_subnets=ec2.SubnetSelection(
+                subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
+            ),
+            launch_template=launch_template,
+            security_groups=[batch_sg],
+            images=[
+                batch.EcsMachineImage(
+                    image_type=batch.EcsMachineImageType.ECS_AL2_NVIDIA,
+                )
+            ],
+            instance_types=[
+                # Learner node
+                ec2.InstanceType("g6e.48xlarge"),  # 8× L40S, 192 vCPU, 1.5TB RAM
+                # Rollout nodes
+                ec2.InstanceType("g6e.4xlarge"),  # 1× L40S, 16 vCPU, 64GB RAM
+                ec2.InstanceType("g6e.8xlarge"),  # 1× L40S, 32 vCPU, 128GB RAM
+            ],
+            minv_cpus=0,
+            maxv_cpus=512,
+            instance_role=instance_role,
+        )
+        # endregion
+
+        # ==============================================================
+        # region 7. Job queue
+        # ==============================================================
+        job_queue = batch.JobQueue(
+            self,
+            "RLJobQueue",
+            job_queue_name="GR00T-RL-JobQueue",
+            compute_environments=[
+                batch.OrderedComputeEnvironment(
+                    compute_environment=compute_env, order=1
+                )
+            ],
+            priority=1,
+        )
+        # endregion
+
+        # ==============================================================
+        # region 8. Container images
+        # ==============================================================
+        if learner_image_uri:
+            repo_tag = learner_image_uri.split("/")[-1]
+            repo_name = repo_tag.split(":")[0] if ":" in repo_tag else repo_tag
+            tag = repo_tag.split(":")[1] if ":" in repo_tag else "latest"
+            learner_repo = ecr.Repository.from_repository_name(
+                self, "LearnerRepo", repository_name=repo_name
+            )
+            learner_image = ecs.ContainerImage.from_ecr_repository(
+                learner_repo, tag=tag
+            )
+        else:
+            learner_image_uri = "PLACEHOLDER — build and push learner image to ECR first"
+            learner_image = None
+
+        if rollout_image_uri:
+            repo_tag = rollout_image_uri.split("/")[-1]
+            repo_name = repo_tag.split(":")[0] if ":" in repo_tag else repo_tag
+            tag = repo_tag.split(":")[1] if ":" in repo_tag else "latest"
+            rollout_repo = ecr.Repository.from_repository_name(
+                self, "RolloutRepo", repository_name=repo_name
+            )
+            rollout_image = ecs.ContainerImage.from_ecr_repository(
+                rollout_repo, tag=tag
+            )
+        else:
+            rollout_image_uri = "PLACEHOLDER — build and push rollout image to ECR first"
+            rollout_image = None
+        # endregion
+
+        # ==============================================================
+        # region 9. EFS volume
+        # ==============================================================
+        efs_volume = batch.EcsVolume.efs(
+            name="rl-efs", file_system=efs_fs, container_path="/mnt/efs"
+        )
+        # endregion
+
+        # ==============================================================
+        # region 10. MNP Job Definition
+        # ==============================================================
+        shared_env = {
+            "EFS_MOUNT": "/mnt/efs",
+            "S3_BUCKET": artifact_bucket.bucket_name,
+            "S3_PREFIX": "rl-training",
+            "RAY_PORT": "6379",
+            "RAY_DASHBOARD_PORT": "8265",
+            "NCCL_SOCKET_IFNAME": "eth0",
+            "NCCL_IB_DISABLE": "1",
+            "NCCL_DEBUG": "WARN",
+            "TORCH_ALLOW_TF32_CUBLAS_OVERRIDE": "1",
+            "MODEL_PATH": "/mnt/efs/models/GR00T-N1.5-RL-Rheo-AssembleTrocar",
+            "CONFIG_NAME": "isaaclab_ppo_gr00t_assemble_trocar",
+            "NUM_ROLLOUT_ENVS": "64",
+        }
+
+        # MNP job: node 0 = learner (main), nodes 1..N = rollout workers
+        total_nodes = 1 + num_rollout_nodes
+
+        if learner_image and rollout_image:
+            job_def = batch.MultiNodeJobDefinition(
+                self,
+                "RLTrainingJobDef",
+                main_node=0,
+                instance_type=ec2.InstanceType("g6e.48xlarge"),
+                containers=[
+                    # Main node (learner)
+                    batch.MultiNodeContainer(
+                        container=batch.EcsEc2ContainerDefinition(
+                            self,
+                            "LearnerContainer",
+                            image=learner_image,
+                            memory=Size.gibibytes(1400),
+                            cpu=192,
+                            gpu=8,
+                            job_role=job_role,
+                            environment={
+                                **shared_env,
+                                "NODE_ROLE": "learner",
+                                "CUDA_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7",
+                            },
+                            volumes=[efs_volume],
+                            linux_parameters=batch.LinuxParameters(
+                                self,
+                                "LearnerLinuxParams",
+                                shared_memory_size=Size.gibibytes(128),
+                            ),
+                        ),
+                        start_node=0,
+                        end_node=0,
+                    ),
+                    # Rollout nodes
+                    batch.MultiNodeContainer(
+                        container=batch.EcsEc2ContainerDefinition(
+                            self,
+                            "RolloutContainer",
+                            image=rollout_image,
+                            memory=Size.gibibytes(56),
+                            cpu=14,
+                            gpu=1,
+                            job_role=job_role,
+                            environment={
+                                **shared_env,
+                                "NODE_ROLE": "rollout",
+                                "CUDA_VISIBLE_DEVICES": "0",
+                            },
+                            volumes=[efs_volume],
+                            linux_parameters=batch.LinuxParameters(
+                                self,
+                                "RolloutLinuxParams",
+                                shared_memory_size=Size.gibibytes(32),
+                            ),
+                        ),
+                        start_node=1,
+                        end_node=total_nodes - 1,
+                    ),
+                ],
+                retry_attempts=1,
+                timeout=Duration.hours(24),
+            )
+        else:
+            job_def = None
+        # endregion
+
+        # ==============================================================
+        # region 11. ECR repositories for container images
+        # ==============================================================
+        learner_ecr = ecr.Repository(
+            self,
+            "LearnerECR",
+            repository_name="gr00t-rl-learner",
+            removal_policy=RemovalPolicy.RETAIN,
+            empty_on_delete=False,
+        )
+        rollout_ecr = ecr.Repository(
+            self,
+            "RolloutECR",
+            repository_name="gr00t-rl-rollout",
+            removal_policy=RemovalPolicy.RETAIN,
+            empty_on_delete=False,
+        )
+        # endregion
+
+        # ==============================================================
+        # region 12. Outputs
+        # ==============================================================
+        CfnOutput(self, "VpcId", value=vpc.vpc_id)
+        CfnOutput(self, "EFSFileSystemId", value=efs_fs.file_system_id)
+        CfnOutput(self, "ArtifactBucket", value=artifact_bucket.bucket_name)
+        CfnOutput(self, "JobQueueName", value=job_queue.job_queue_name)
+        CfnOutput(
+            self, "ComputeEnvironmentName", value=compute_env.compute_environment_name
+        )
+        CfnOutput(self, "LearnerECRUri", value=learner_ecr.repository_uri)
+        CfnOutput(self, "RolloutECRUri", value=rollout_ecr.repository_uri)
+        if job_def:
+            CfnOutput(self, "JobDefinitionArn", value=job_def.job_definition_arn)
+        CfnOutput(self, "NumRolloutNodes", value=str(num_rollout_nodes))
+        # endregion

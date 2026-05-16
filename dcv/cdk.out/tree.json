@@ -1,0 +1,967 @@
+{
+  "version": "tree-0.1",
+  "tree": {
+    "id": "App",
+    "path": "",
+    "children": {
+      "DcvStack": {
+        "id": "DcvStack",
+        "path": "DcvStack",
+        "children": {
+          "DcvWorkstation": {
+            "id": "DcvWorkstation",
+            "path": "DcvStack/DcvWorkstation",
+            "children": {
+              "EFSSecurityGroup": {
+                "id": "EFSSecurityGroup",
+                "path": "DcvStack/DcvWorkstation/EFSSecurityGroup",
+                "children": {
+                  "from DcvStackDcvWorkstationSecurityGroupD3928B1A:2049": {
+                    "id": "from DcvStackDcvWorkstationSecurityGroupD3928B1A:2049",
+                    "path": "DcvStack/DcvWorkstation/EFSSecurityGroup/from DcvStackDcvWorkstationSecurityGroupD3928B1A:2049",
+                    "attributes": {
+                      "aws:cdk:cloudformation:type": "AWS::EC2::SecurityGroupIngress",
+                      "aws:cdk:cloudformation:props": {
+                        "description": "from DcvStackDcvWorkstationSecurityGroupD3928B1A:2049",
+                        "fromPort": 2049,
+                        "groupId": "sg-12345678",
+                        "ipProtocol": "tcp",
+                        "sourceSecurityGroupId": {
+                          "Fn::GetAtt": [
+                            "DcvWorkstationSecurityGroup4A30BFE6",
+                            "GroupId"
+                          ]
+                        },
+                        "toPort": 2049
+                      }
+                    },
+                    "constructInfo": {
+                      "fqn": "aws-cdk-lib.aws_ec2.CfnSecurityGroupIngress",
+                      "version": "2.177.0"
+                    }
+                  }
+                },
+                "constructInfo": {
+                  "fqn": "aws-cdk-lib.Resource",
+                  "version": "2.177.0"
+                }
+              },
+              "ImportedEFS": {
+                "id": "ImportedEFS",
+                "path": "DcvStack/DcvWorkstation/ImportedEFS",
+                "constructInfo": {
+                  "fqn": "aws-cdk-lib.Resource",
+                  "version": "2.177.0"
+                }
+              },
+              "AutoVpc": {
+                "id": "AutoVpc",
+                "path": "DcvStack/DcvWorkstation/AutoVpc",
+                "children": {
+                  "Resource": {
+                    "id": "Resource",
+                    "path": "DcvStack/DcvWorkstation/AutoVpc/Resource",
+                    "attributes": {
+                      "aws:cdk:cloudformation:type": "AWS::EC2::VPC",
+                      "aws:cdk:cloudformation:props": {
+                        "cidrBlock": "10.0.0.0/16",
+                        "enableDnsHostnames": true,
+                        "enableDnsSupport": true,
+                        "instanceTenancy": "default",
+                        "tags": [
+                          {
+                            "key": "Name",
+                            "value": "DcvStack/DcvWorkstation/AutoVpc"
+                          }
+                        ]
+                      }
+                    },
+                    "constructInfo": {
+                      "fqn": "aws-cdk-lib.aws_ec2.CfnVPC",
+                      "version": "2.177.0"
+                    }
+                  },
+                  "PublicSubnet1": {
+                    "id": "PublicSubnet1",
+                    "path": "DcvStack/DcvWorkstation/AutoVpc/PublicSubnet1",
+                    "children": {
+                      "Subnet": {
+                        "id": "Subnet",
+                        "path": "DcvStack/DcvWorkstation/AutoVpc/PublicSubnet1/Subnet",
+                        "attributes": {
+                          "aws:cdk:cloudformation:type": "AWS::EC2::Subnet",
+                          "aws:cdk:cloudformation:props": {
+                            "availabilityZone": "us-west-2a",
+                            "cidrBlock": "10.0.0.0/24",
+                            "mapPublicIpOnLaunch": true,
+                            "tags": [
+                              {
+                                "key": "aws-cdk:subnet-name",
+                                "value": "Public"
+                              },
+                              {
+                                "key": "aws-cdk:subnet-type",
+                                "value": "Public"
+                              },
+                              {
+                                "key": "Name",
+                                "value": "DcvStack/DcvWorkstation/AutoVpc/PublicSubnet1"
+                              }
+                            ],
+                            "vpcId": {
+                              "Ref": "DcvWorkstationAutoVpc506BB4AC"
+                            }
+                          }
+                        },
+                        "constructInfo": {
+                          "fqn": "aws-cdk-lib.aws_ec2.CfnSubnet",
+                          "version": "2.177.0"
+                        }
+                      },
+                      "Acl": {
+                        "id": "Acl",
+                        "path": "DcvStack/DcvWorkstation/AutoVpc/PublicSubnet1/Acl",
+                        "constructInfo": {
+                          "fqn": "aws-cdk-lib.Resource",
+                          "version": "2.177.0"
+                        }
+                      },
+                      "RouteTable": {
+                        "id": "RouteTable",
+                        "path": "DcvStack/DcvWorkstation/AutoVpc/PublicSubnet1/RouteTable",
+                        "attributes": {
+                          "aws:cdk:cloudformation:type": "AWS::EC2::RouteTable",
+                          "aws:cdk:cloudformation:props": {
+                            "tags": [
+                              {
+                                "key": "Name",
+                                "value": "DcvStack/DcvWorkstation/AutoVpc/PublicSubnet1"
+                              }
+                            ],
+                            "vpcId": {
+                              "Ref": "DcvWorkstationAutoVpc506BB4AC"
+                            }
+                          }
+                        },
+                        "constructInfo": {
+                          "fqn": "aws-cdk-lib.aws_ec2.CfnRouteTable",
+                          "version": "2.177.0"
+                        }
+                      },
+                      "RouteTableAssociation": {
+                        "id": "RouteTableAssociation",
+                        "path": "DcvStack/DcvWorkstation/AutoVpc/PublicSubnet1/RouteTableAssociation",
+                        "attributes": {
+                          "aws:cdk:cloudformation:type": "AWS::EC2::SubnetRouteTableAssociation",
+                          "aws:cdk:cloudformation:props": {
+                            "routeTableId": {
+                              "Ref": "DcvWorkstationAutoVpcPublicSubnet1RouteTableDF0C3775"
+                            },
+                            "subnetId": {
+                              "Ref": "DcvWorkstationAutoVpcPublicSubnet1SubnetACCF27F3"
+                            }
+                          }
+                        },
+                        "constructInfo": {
+                          "fqn": "aws-cdk-lib.aws_ec2.CfnSubnetRouteTableAssociation",
+                          "version": "2.177.0"
+                        }
+                      },
+                      "DefaultRoute": {
+                        "id": "DefaultRoute",
+                        "path": "DcvStack/DcvWorkstation/AutoVpc/PublicSubnet1/DefaultRoute",
+                        "attributes": {
+                          "aws:cdk:cloudformation:type": "AWS::EC2::Route",
+                          "aws:cdk:cloudformation:props": {
+                            "destinationCidrBlock": "0.0.0.0/0",
+                            "gatewayId": {
+                              "Ref": "DcvWorkstationAutoVpcIGWE65A10F0"
+                            },
+                            "routeTableId": {
+                              "Ref": "DcvWorkstationAutoVpcPublicSubnet1RouteTableDF0C3775"
+                            }
+                          }
+                        },
+                        "constructInfo": {
+                          "fqn": "aws-cdk-lib.aws_ec2.CfnRoute",
+                          "version": "2.177.0"
+                        }
+                      },
+                      "EIP": {
+                        "id": "EIP",
+                        "path": "DcvStack/DcvWorkstation/AutoVpc/PublicSubnet1/EIP",
+                        "attributes": {
+                          "aws:cdk:cloudformation:type": "AWS::EC2::EIP",
+                          "aws:cdk:cloudformation:props": {
+                            "domain": "vpc",
+                            "tags": [
+                              {
+                                "key": "Name",
+                                "value": "DcvStack/DcvWorkstation/AutoVpc/PublicSubnet1"
+                              }
+                            ]
+                          }
+                        },
+                        "constructInfo": {
+                          "fqn": "aws-cdk-lib.aws_ec2.CfnEIP",
+                          "version": "2.177.0"
+                        }
+                      },
+                      "NATGateway": {
+                        "id": "NATGateway",
+                        "path": "DcvStack/DcvWorkstation/AutoVpc/PublicSubnet1/NATGateway",
+                        "attributes": {
+                          "aws:cdk:cloudformation:type": "AWS::EC2::NatGateway",
+                          "aws:cdk:cloudformation:props": {
+                            "allocationId": {
+                              "Fn::GetAtt": [
+                                "DcvWorkstationAutoVpcPublicSubnet1EIP3000845C",
+                                "AllocationId"
+                              ]
+                            },
+                            "subnetId": {
+                              "Ref": "DcvWorkstationAutoVpcPublicSubnet1SubnetACCF27F3"
+                            },
+                            "tags": [
+                              {
+                                "key": "Name",
+                                "value": "DcvStack/DcvWorkstation/AutoVpc/PublicSubnet1"
+                              }
+                            ]
+                          }
+                        },
+                        "constructInfo": {
+                          "fqn": "aws-cdk-lib.aws_ec2.CfnNatGateway",
+                          "version": "2.177.0"
+                        }
+                      }
+                    },
+                    "constructInfo": {
+                      "fqn": "aws-cdk-lib.aws_ec2.PublicSubnet",
+                      "version": "2.177.0"
+                    }
+                  },
+                  "PublicSubnet2": {
+                    "id": "PublicSubnet2",
+                    "path": "DcvStack/DcvWorkstation/AutoVpc/PublicSubnet2",
+                    "children": {
+                      "Subnet": {
+                        "id": "Subnet",
+                        "path": "DcvStack/DcvWorkstation/AutoVpc/PublicSubnet2/Subnet",
+                        "attributes": {
+                          "aws:cdk:cloudformation:type": "AWS::EC2::Subnet",
+                          "aws:cdk:cloudformation:props": {
+                            "availabilityZone": "us-west-2b",
+                            "cidrBlock": "10.0.1.0/24",
+                            "mapPublicIpOnLaunch": true,
+                            "tags": [
+                              {
+                                "key": "aws-cdk:subnet-name",
+                                "value": "Public"
+                              },
+                              {
+                                "key": "aws-cdk:subnet-type",
+                                "value": "Public"
+                              },
+                              {
+                                "key": "Name",
+                                "value": "DcvStack/DcvWorkstation/AutoVpc/PublicSubnet2"
+                              }
+                            ],
+                            "vpcId": {
+                              "Ref": "DcvWorkstationAutoVpc506BB4AC"
+                            }
+                          }
+                        },
+                        "constructInfo": {
+                          "fqn": "aws-cdk-lib.aws_ec2.CfnSubnet",
+                          "version": "2.177.0"
+                        }
+                      },
+                      "Acl": {
+                        "id": "Acl",
+                        "path": "DcvStack/DcvWorkstation/AutoVpc/PublicSubnet2/Acl",
+                        "constructInfo": {
+                          "fqn": "aws-cdk-lib.Resource",
+                          "version": "2.177.0"
+                        }
+                      },
+                      "RouteTable": {
+                        "id": "RouteTable",
+                        "path": "DcvStack/DcvWorkstation/AutoVpc/PublicSubnet2/RouteTable",
+                        "attributes": {
+                          "aws:cdk:cloudformation:type": "AWS::EC2::RouteTable",
+                          "aws:cdk:cloudformation:props": {
+                            "tags": [
+                              {
+                                "key": "Name",
+                                "value": "DcvStack/DcvWorkstation/AutoVpc/PublicSubnet2"
+                              }
+                            ],
+                            "vpcId": {
+                              "Ref": "DcvWorkstationAutoVpc506BB4AC"
+                            }
+                          }
+                        },
+                        "constructInfo": {
+                          "fqn": "aws-cdk-lib.aws_ec2.CfnRouteTable",
+                          "version": "2.177.0"
+                        }
+                      },
+                      "RouteTableAssociation": {
+                        "id": "RouteTableAssociation",
+                        "path": "DcvStack/DcvWorkstation/AutoVpc/PublicSubnet2/RouteTableAssociation",
+                        "attributes": {
+                          "aws:cdk:cloudformation:type": "AWS::EC2::SubnetRouteTableAssociation",
+                          "aws:cdk:cloudformation:props": {
+                            "routeTableId": {
+                              "Ref": "DcvWorkstationAutoVpcPublicSubnet2RouteTable5A26AA6A"
+                            },
+                            "subnetId": {
+                              "Ref": "DcvWorkstationAutoVpcPublicSubnet2Subnet9830AB4B"
+                            }
+                          }
+                        },
+                        "constructInfo": {
+                          "fqn": "aws-cdk-lib.aws_ec2.CfnSubnetRouteTableAssociation",
+                          "version": "2.177.0"
+                        }
+                      },
+                      "DefaultRoute": {
+                        "id": "DefaultRoute",
+                        "path": "DcvStack/DcvWorkstation/AutoVpc/PublicSubnet2/DefaultRoute",
+                        "attributes": {
+                          "aws:cdk:cloudformation:type": "AWS::EC2::Route",
+                          "aws:cdk:cloudformation:props": {
+                            "destinationCidrBlock": "0.0.0.0/0",
+                            "gatewayId": {
+                              "Ref": "DcvWorkstationAutoVpcIGWE65A10F0"
+                            },
+                            "routeTableId": {
+                              "Ref": "DcvWorkstationAutoVpcPublicSubnet2RouteTable5A26AA6A"
+                            }
+                          }
+                        },
+                        "constructInfo": {
+                          "fqn": "aws-cdk-lib.aws_ec2.CfnRoute",
+                          "version": "2.177.0"
+                        }
+                      }
+                    },
+                    "constructInfo": {
+                      "fqn": "aws-cdk-lib.aws_ec2.PublicSubnet",
+                      "version": "2.177.0"
+                    }
+                  },
+                  "PrivateSubnet1": {
+                    "id": "PrivateSubnet1",
+                    "path": "DcvStack/DcvWorkstation/AutoVpc/PrivateSubnet1",
+                    "children": {
+                      "Subnet": {
+                        "id": "Subnet",
+                        "path": "DcvStack/DcvWorkstation/AutoVpc/PrivateSubnet1/Subnet",
+                        "attributes": {
+                          "aws:cdk:cloudformation:type": "AWS::EC2::Subnet",
+                          "aws:cdk:cloudformation:props": {
+                            "availabilityZone": "us-west-2a",
+                            "cidrBlock": "10.0.2.0/24",
+                            "mapPublicIpOnLaunch": false,
+                            "tags": [
+                              {
+                                "key": "aws-cdk:subnet-name",
+                                "value": "Private"
+                              },
+                              {
+                                "key": "aws-cdk:subnet-type",
+                                "value": "Private"
+                              },
+                              {
+                                "key": "Name",
+                                "value": "DcvStack/DcvWorkstation/AutoVpc/PrivateSubnet1"
+                              }
+                            ],
+                            "vpcId": {
+                              "Ref": "DcvWorkstationAutoVpc506BB4AC"
+                            }
+                          }
+                        },
+                        "constructInfo": {
+                          "fqn": "aws-cdk-lib.aws_ec2.CfnSubnet",
+                          "version": "2.177.0"
+                        }
+                      },
+                      "Acl": {
+                        "id": "Acl",
+                        "path": "DcvStack/DcvWorkstation/AutoVpc/PrivateSubnet1/Acl",
+                        "constructInfo": {
+                          "fqn": "aws-cdk-lib.Resource",
+                          "version": "2.177.0"
+                        }
+                      },
+                      "RouteTable": {
+                        "id": "RouteTable",
+                        "path": "DcvStack/DcvWorkstation/AutoVpc/PrivateSubnet1/RouteTable",
+                        "attributes": {
+                          "aws:cdk:cloudformation:type": "AWS::EC2::RouteTable",
+                          "aws:cdk:cloudformation:props": {
+                            "tags": [
+                              {
+                                "key": "Name",
+                                "value": "DcvStack/DcvWorkstation/AutoVpc/PrivateSubnet1"
+                              }
+                            ],
+                            "vpcId": {
+                              "Ref": "DcvWorkstationAutoVpc506BB4AC"
+                            }
+                          }
+                        },
+                        "constructInfo": {
+                          "fqn": "aws-cdk-lib.aws_ec2.CfnRouteTable",
+                          "version": "2.177.0"
+                        }
+                      },
+                      "RouteTableAssociation": {
+                        "id": "RouteTableAssociation",
+                        "path": "DcvStack/DcvWorkstation/AutoVpc/PrivateSubnet1/RouteTableAssociation",
+                        "attributes": {
+                          "aws:cdk:cloudformation:type": "AWS::EC2::SubnetRouteTableAssociation",
+                          "aws:cdk:cloudformation:props": {
+                            "routeTableId": {
+                              "Ref": "DcvWorkstationAutoVpcPrivateSubnet1RouteTable9A2B32B4"
+                            },
+                            "subnetId": {
+                              "Ref": "DcvWorkstationAutoVpcPrivateSubnet1Subnet73F0D939"
+                            }
+                          }
+                        },
+                        "constructInfo": {
+                          "fqn": "aws-cdk-lib.aws_ec2.CfnSubnetRouteTableAssociation",
+                          "version": "2.177.0"
+                        }
+                      },
+                      "DefaultRoute": {
+                        "id": "DefaultRoute",
+                        "path": "DcvStack/DcvWorkstation/AutoVpc/PrivateSubnet1/DefaultRoute",
+                        "attributes": {
+                          "aws:cdk:cloudformation:type": "AWS::EC2::Route",
+                          "aws:cdk:cloudformation:props": {
+                            "destinationCidrBlock": "0.0.0.0/0",
+                            "natGatewayId": {
+                              "Ref": "DcvWorkstationAutoVpcPublicSubnet1NATGateway8F084D9D"
+                            },
+                            "routeTableId": {
+                              "Ref": "DcvWorkstationAutoVpcPrivateSubnet1RouteTable9A2B32B4"
+                            }
+                          }
+                        },
+                        "constructInfo": {
+                          "fqn": "aws-cdk-lib.aws_ec2.CfnRoute",
+                          "version": "2.177.0"
+                        }
+                      }
+                    },
+                    "constructInfo": {
+                      "fqn": "aws-cdk-lib.aws_ec2.PrivateSubnet",
+                      "version": "2.177.0"
+                    }
+                  },
+                  "PrivateSubnet2": {
+                    "id": "PrivateSubnet2",
+                    "path": "DcvStack/DcvWorkstation/AutoVpc/PrivateSubnet2",
+                    "children": {
+                      "Subnet": {
+                        "id": "Subnet",
+                        "path": "DcvStack/DcvWorkstation/AutoVpc/PrivateSubnet2/Subnet",
+                        "attributes": {
+                          "aws:cdk:cloudformation:type": "AWS::EC2::Subnet",
+                          "aws:cdk:cloudformation:props": {
+                            "availabilityZone": "us-west-2b",
+                            "cidrBlock": "10.0.3.0/24",
+                            "mapPublicIpOnLaunch": false,
+                            "tags": [
+                              {
+                                "key": "aws-cdk:subnet-name",
+                                "value": "Private"
+                              },
+                              {
+                                "key": "aws-cdk:subnet-type",
+                                "value": "Private"
+                              },
+                              {
+                                "key": "Name",
+                                "value": "DcvStack/DcvWorkstation/AutoVpc/PrivateSubnet2"
+                              }
+                            ],
+                            "vpcId": {
+                              "Ref": "DcvWorkstationAutoVpc506BB4AC"
+                            }
+                          }
+                        },
+                        "constructInfo": {
+                          "fqn": "aws-cdk-lib.aws_ec2.CfnSubnet",
+                          "version": "2.177.0"
+                        }
+                      },
+                      "Acl": {
+                        "id": "Acl",
+                        "path": "DcvStack/DcvWorkstation/AutoVpc/PrivateSubnet2/Acl",
+                        "constructInfo": {
+                          "fqn": "aws-cdk-lib.Resource",
+                          "version": "2.177.0"
+                        }
+                      },
+                      "RouteTable": {
+                        "id": "RouteTable",
+                        "path": "DcvStack/DcvWorkstation/AutoVpc/PrivateSubnet2/RouteTable",
+                        "attributes": {
+                          "aws:cdk:cloudformation:type": "AWS::EC2::RouteTable",
+                          "aws:cdk:cloudformation:props": {
+                            "tags": [
+                              {
+                                "key": "Name",
+                                "value": "DcvStack/DcvWorkstation/AutoVpc/PrivateSubnet2"
+                              }
+                            ],
+                            "vpcId": {
+                              "Ref": "DcvWorkstationAutoVpc506BB4AC"
+                            }
+                          }
+                        },
+                        "constructInfo": {
+                          "fqn": "aws-cdk-lib.aws_ec2.CfnRouteTable",
+                          "version": "2.177.0"
+                        }
+                      },
+                      "RouteTableAssociation": {
+                        "id": "RouteTableAssociation",
+                        "path": "DcvStack/DcvWorkstation/AutoVpc/PrivateSubnet2/RouteTableAssociation",
+                        "attributes": {
+                          "aws:cdk:cloudformation:type": "AWS::EC2::SubnetRouteTableAssociation",
+                          "aws:cdk:cloudformation:props": {
+                            "routeTableId": {
+                              "Ref": "DcvWorkstationAutoVpcPrivateSubnet2RouteTable663934DA"
+                            },
+                            "subnetId": {
+                              "Ref": "DcvWorkstationAutoVpcPrivateSubnet2Subnet6FDA9A76"
+                            }
+                          }
+                        },
+                        "constructInfo": {
+                          "fqn": "aws-cdk-lib.aws_ec2.CfnSubnetRouteTableAssociation",
+                          "version": "2.177.0"
+                        }
+                      },
+                      "DefaultRoute": {
+                        "id": "DefaultRoute",
+                        "path": "DcvStack/DcvWorkstation/AutoVpc/PrivateSubnet2/DefaultRoute",
+                        "attributes": {
+                          "aws:cdk:cloudformation:type": "AWS::EC2::Route",
+                          "aws:cdk:cloudformation:props": {
+                            "destinationCidrBlock": "0.0.0.0/0",
+                            "natGatewayId": {
+                              "Ref": "DcvWorkstationAutoVpcPublicSubnet1NATGateway8F084D9D"
+                            },
+                            "routeTableId": {
+                              "Ref": "DcvWorkstationAutoVpcPrivateSubnet2RouteTable663934DA"
+                            }
+                          }
+                        },
+                        "constructInfo": {
+                          "fqn": "aws-cdk-lib.aws_ec2.CfnRoute",
+                          "version": "2.177.0"
+                        }
+                      }
+                    },
+                    "constructInfo": {
+                      "fqn": "aws-cdk-lib.aws_ec2.PrivateSubnet",
+                      "version": "2.177.0"
+                    }
+                  },
+                  "IGW": {
+                    "id": "IGW",
+                    "path": "DcvStack/DcvWorkstation/AutoVpc/IGW",
+                    "attributes": {
+                      "aws:cdk:cloudformation:type": "AWS::EC2::InternetGateway",
+                      "aws:cdk:cloudformation:props": {
+                        "tags": [
+                          {
+                            "key": "Name",
+                            "value": "DcvStack/DcvWorkstation/AutoVpc"
+                          }
+                        ]
+                      }
+                    },
+                    "constructInfo": {
+                      "fqn": "aws-cdk-lib.aws_ec2.CfnInternetGateway",
+                      "version": "2.177.0"
+                    }
+                  },
+                  "VPCGW": {
+                    "id": "VPCGW",
+                    "path": "DcvStack/DcvWorkstation/AutoVpc/VPCGW",
+                    "attributes": {
+                      "aws:cdk:cloudformation:type": "AWS::EC2::VPCGatewayAttachment",
+                      "aws:cdk:cloudformation:props": {
+                        "internetGatewayId": {
+                          "Ref": "DcvWorkstationAutoVpcIGWE65A10F0"
+                        },
+                        "vpcId": {
+                          "Ref": "DcvWorkstationAutoVpc506BB4AC"
+                        }
+                      }
+                    },
+                    "constructInfo": {
+                      "fqn": "aws-cdk-lib.aws_ec2.CfnVPCGatewayAttachment",
+                      "version": "2.177.0"
+                    }
+                  }
+                },
+                "constructInfo": {
+                  "fqn": "aws-cdk-lib.aws_ec2.Vpc",
+                  "version": "2.177.0"
+                }
+              },
+              "InstanceRole": {
+                "id": "InstanceRole",
+                "path": "DcvStack/DcvWorkstation/InstanceRole",
+                "children": {
+                  "ImportInstanceRole": {
+                    "id": "ImportInstanceRole",
+                    "path": "DcvStack/DcvWorkstation/InstanceRole/ImportInstanceRole",
+                    "constructInfo": {
+                      "fqn": "aws-cdk-lib.Resource",
+                      "version": "2.177.0"
+                    }
+                  },
+                  "Resource": {
+                    "id": "Resource",
+                    "path": "DcvStack/DcvWorkstation/InstanceRole/Resource",
+                    "attributes": {
+                      "aws:cdk:cloudformation:type": "AWS::IAM::Role",
+                      "aws:cdk:cloudformation:props": {
+                        "assumeRolePolicyDocument": {
+                          "Statement": [
+                            {
+                              "Action": "sts:AssumeRole",
+                              "Effect": "Allow",
+                              "Principal": {
+                                "Service": "ec2.amazonaws.com"
+                              }
+                            }
+                          ],
+                          "Version": "2012-10-17"
+                        },
+                        "managedPolicyArns": [
+                          {
+                            "Fn::Join": [
+                              "",
+                              [
+                                "arn:",
+                                {
+                                  "Ref": "AWS::Partition"
+                                },
+                                ":iam::aws:policy/AmazonS3ReadOnlyAccess"
+                              ]
+                            ]
+                          },
+                          {
+                            "Fn::Join": [
+                              "",
+                              [
+                                "arn:",
+                                {
+                                  "Ref": "AWS::Partition"
+                                },
+                                ":iam::aws:policy/AmazonSSMManagedInstanceCore"
+                              ]
+                            ]
+                          },
+                          {
+                            "Fn::Join": [
+                              "",
+                              [
+                                "arn:",
+                                {
+                                  "Ref": "AWS::Partition"
+                                },
+                                ":iam::aws:policy/AmazonEC2ContainerRegistryPowerUser"
+                              ]
+                            ]
+                          }
+                        ]
+                      }
+                    },
+                    "constructInfo": {
+                      "fqn": "aws-cdk-lib.aws_iam.CfnRole",
+                      "version": "2.177.0"
+                    }
+                  }
+                },
+                "constructInfo": {
+                  "fqn": "aws-cdk-lib.aws_iam.Role",
+                  "version": "2.177.0"
+                }
+              },
+              "SecurityGroup": {
+                "id": "SecurityGroup",
+                "path": "DcvStack/DcvWorkstation/SecurityGroup",
+                "children": {
+                  "Resource": {
+                    "id": "Resource",
+                    "path": "DcvStack/DcvWorkstation/SecurityGroup/Resource",
+                    "attributes": {
+                      "aws:cdk:cloudformation:type": "AWS::EC2::SecurityGroup",
+                      "aws:cdk:cloudformation:props": {
+                        "groupDescription": "Allow DCV and TensorBoard access",
+                        "securityGroupEgress": [
+                          {
+                            "cidrIp": "0.0.0.0/0",
+                            "description": "Allow all outbound traffic by default",
+                            "ipProtocol": "-1"
+                          }
+                        ],
+                        "securityGroupIngress": [
+                          {
+                            "cidrIp": "0.0.0.0/0",
+                            "ipProtocol": "tcp",
+                            "fromPort": 8443,
+                            "toPort": 8443,
+                            "description": "Allow Amazon DCV access"
+                          },
+                          {
+                            "cidrIp": "0.0.0.0/0",
+                            "ipProtocol": "tcp",
+                            "fromPort": 6006,
+                            "toPort": 6006,
+                            "description": "Allow TensorBoard access"
+                          }
+                        ],
+                        "vpcId": {
+                          "Ref": "DcvWorkstationAutoVpc506BB4AC"
+                        }
+                      }
+                    },
+                    "constructInfo": {
+                      "fqn": "aws-cdk-lib.aws_ec2.CfnSecurityGroup",
+                      "version": "2.177.0"
+                    }
+                  }
+                },
+                "constructInfo": {
+                  "fqn": "aws-cdk-lib.aws_ec2.SecurityGroup",
+                  "version": "2.177.0"
+                }
+              },
+              "Instance": {
+                "id": "Instance",
+                "path": "DcvStack/DcvWorkstation/Instance",
+                "children": {
+                  "InstanceProfile": {
+                    "id": "InstanceProfile",
+                    "path": "DcvStack/DcvWorkstation/Instance/InstanceProfile",
+                    "attributes": {
+                      "aws:cdk:cloudformation:type": "AWS::IAM::InstanceProfile",
+                      "aws:cdk:cloudformation:props": {
+                        "roles": [
+                          {
+                            "Ref": "DcvWorkstationInstanceRole47A48FFC"
+                          }
+                        ]
+                      }
+                    },
+                    "constructInfo": {
+                      "fqn": "aws-cdk-lib.aws_iam.CfnInstanceProfile",
+                      "version": "2.177.0"
+                    }
+                  },
+                  "Resource": {
+                    "id": "Resource",
+                    "path": "DcvStack/DcvWorkstation/Instance/Resource",
+                    "attributes": {
+                      "aws:cdk:cloudformation:type": "AWS::EC2::Instance",
+                      "aws:cdk:cloudformation:props": {
+                        "availabilityZone": "us-west-2a",
+                        "blockDeviceMappings": [
+                          {
+                            "deviceName": "/dev/sda1",
+                            "ebs": {
+                              "deleteOnTermination": true,
+                              "volumeSize": 100
+                            }
+                          }
+                        ],
+                        "iamInstanceProfile": {
+                          "Ref": "DcvWorkstationInstanceInstanceProfile88980078"
+                        },
+                        "imageId": "ami-0ffde298a37fd43b7",
+                        "instanceType": "g6.4xlarge",
+                        "securityGroupIds": [
+                          {
+                            "Fn::GetAtt": [
+                              "DcvWorkstationSecurityGroup4A30BFE6",
+                              "GroupId"
+                            ]
+                          }
+                        ],
+                        "subnetId": {
+                          "Ref": "DcvWorkstationAutoVpcPublicSubnet1SubnetACCF27F3"
+                        },
+                        "tags": [
+                          {
+                            "key": "Name",
+                            "value": "DcvStack/DcvWorkstation/Instance"
+                          }
+                        ],
+                        "userData": {
+                          "Fn::Base64": "#!/bin/bash\n#!/bin/bash\n# Bootstrap script for Amazon DCV on Ubuntu 22.04 with IsaacLab and EFS\n# - Robust logging to /var/log/dcv-bootstrap.log and concise step summary\n# - Retries for apt and network operations\n# - Non-fatal GUI tweaks; separation of critical vs optional steps\n#\n# USAGE GUIDE (read this if something failed)\n# ============================================================\n# Where to look:\n#   - Summary (quick, one line per step): /var/log/dcv-bootstrap.summary\n#       Entries are prefixed with one of: STEP_OK, STEP_WARN, STEP_FAIL\n#         * STEP_OK  : step completed successfully\n#         * STEP_WARN: step failed but was non-fatal and intentionally ignored\n#         * STEP_FAIL: critical step failed; see detailed log\n#   - Detailed log: /var/log/dcv-bootstrap.log\n#   - Auto session service log: journalctl -u auto-dcv.service -e --no-pager\n#\n# How to interpret and fix:\n#   1) Session Manager/EC2 Instance Connect/SSH into the instance and review the summary:\n#        sudo cat /var/log/dcv-bootstrap.summary\n#   2) For each STEP_FAIL, open the detailed log around the time it ran:\n#        sudo less +G /var/log/dcv-bootstrap.log\n#   3) Fix the underlying issue (e.g., networking, package mirror, permissions).\n#\n# Step-specific log viewing commands:\n#   - View logs for a specific step:\n#        sudo grep -A 50 \"== START: <step-name> ==\" /var/log/dcv-bootstrap.log\n#        sudo grep -A 100 -B 10 \"== FAIL: <step-name> ==\" /var/log/dcv-bootstrap.log\n#   - Examples:\n#        sudo grep -A 50 \"== START: install-nice-dcv ==\" /var/log/dcv-bootstrap.log\n#   - View step completion status:\n#        ls -la /var/lib/dcv-bootstrap/\n#   - Check specific step state:\n#        test -f \"/var/lib/dcv-bootstrap/<step-name>.done\" && echo \"Step completed\" || echo \"Step not done\"\n#\n# Re-running only the failed steps (idempotent):\n#   - This script creates state markers in: /var/lib/dcv-bootstrap/<step-name>.done\n#   - Re-running the entire script will SKIP steps already marked done.\n#   - To force re-run a specific step, delete its marker and re-run the script:\n#        sudo rm \"/var/lib/dcv-bootstrap/<step-name>.done\"\n#        sudo bash /var/lib/cloud/instance/scripts/part-001\n#     Examples:\n#        sudo rm \"/var/lib/dcv-bootstrap/install-nice-dcv.done\" && \\\n#          sudo bash /var/lib/cloud/instance/scripts/part-001\n#        sudo rm \"/var/lib/dcv-bootstrap/install-desktop.done\" && \\\n#          sudo bash /var/lib/cloud/instance/scripts/part-001\n#   - Note: The path /var/lib/cloud/instance/scripts/part-001 is the cloud-init\n#           copy of this user-data. If unavailable, paste the script or\n#           store it as /usr/local/sbin/dcv-bootstrap.sh and execute that.\n#\n# Common checks:\n#   - DCV server status:    sudo systemctl status dcvserver --no-pager\n#   - DCV sessions:         sudo dcv list-sessions\n#   - Auto session service: sudo systemctl status auto-dcv.service --no-pager\n#                           sudo journalctl -u auto-dcv.service -e --no-pager\n#   - EFS mount:            mount | grep ' /mnt/efs '  (should show type efs,tls)\n#                           sudo tail -n 200 /var/log/amazon/efs/mount.log\n# ============================================================\n\nset -Eeuo pipefail\n\nLOG=\"/var/log/dcv-bootstrap.log\"\nSUMMARY=\"/var/log/dcv-bootstrap.summary\"\nSTATE_DIR=\"/var/lib/dcv-bootstrap\"\nmkdir -p \"$STATE_DIR\"\n\n# Timestamped logging to file and syslog\nexec > >(awk '{ print strftime(\"[%Y-%m-%d %H:%M:%S]\"), $0 }' | tee -a \"$LOG\" | logger -t user-data -s 2>/dev/null) 2>&1\n\nCURRENT_STEP=\"\"\nFAILURES=0\nexport DEBIAN_FRONTEND=noninteractive\n\non_error() {\n  local line=\"$1\" cmd=\"$2\" rc=\"$3\"\n  echo \"ERROR: step='$CURRENT_STEP' line=$line rc=$rc cmd='$cmd'\"\n  echo \"STEP_FAIL:${CURRENT_STEP}:line=${line}:rc=${rc}:cmd=${cmd}\" >> \"$SUMMARY\"\n}\ntrap 'on_error \"$LINENO\" \"$BASH_COMMAND\" \"$?\"' ERR\n\nlog() { echo \"$*\"; }\nmark_done() { touch \"${STATE_DIR}/$1.done\"; }\nis_done() { [[ -f \"${STATE_DIR}/$1.done\" ]]; }\n\nretry() {\n  local tries=\"${3:-5}\" delay=\"${4:-5}\"\n  for ((i=1;i<=tries;i++)); do\n    if eval \"$1\"; then return 0; fi\n    echo \"Retry $i/$tries for: $2\"\n    sleep \"$delay\"\n  done\n  return 1\n}\n\nmust() {\n  local desc=\"$1\"; shift\n  CURRENT_STEP=\"$desc\"\n  if is_done \"$desc\"; then\n    log \"SKIP (done): $desc\"; return 0\n  fi\n  log \"== START: $desc ==\"\n  if eval \"$@\"; then\n    log \"== OK: $desc ==\"\n    echo \"STEP_OK:${desc}\" >> \"$SUMMARY\"\n    mark_done \"$desc\"\n    return 0\n  else\n    FAILURES=$((FAILURES+1))\n    log \"== FAIL: $desc ==\"\n    return 1\n  fi\n}\n\ntry_step() {\n  local desc=\"$1\"; shift\n  CURRENT_STEP=\"$desc\"\n  if is_done \"$desc\"; then\n    log \"SKIP (done): $desc\"; return 0\n  fi\n  log \"== START (non-fatal): $desc ==\"\n  set +e\n  eval \"$@\"\n  local rc=$?\n  set -e\n  if [[ $rc -eq 0 ]]; then\n    log \"== OK: $desc ==\"\n    echo \"STEP_OK:${desc}\" >> \"$SUMMARY\"\n    mark_done \"$desc\"\n  else\n    log \"== WARN (ignored rc=${rc}): $desc ==\"\n    echo \"STEP_WARN:${desc}:rc=${rc}\" >> \"$SUMMARY\"\n  fi\n  return 0\n}\n\napt_ready() {\n  ! fuser /var/lib/dpkg/lock >/dev/null 2>&1 && \\\n  ! fuser /var/lib/apt/lists/lock >/dev/null 2>&1 && \\\n  ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1\n}\napt_update() {\n  retry \"apt-get update -yq\" \"apt update\" 6 8\n}\napt_install() {\n  local pkgs=\"$*\"\n  retry \"apt-get install -yq --no-install-recommends $pkgs\" \"apt install: $pkgs\" 6 8\n}\n\n# Auto-create DCV virtual session service (function definition)\ninstall_auto_dcv_service() {\n  cat >/usr/local/bin/auto-create-virtual-dcv.sh <<'EOF'\n#!/bin/bash\nset -Eeuo pipefail\nLOG=\"/var/log/auto-dcv.log\"\nexec > >(awk '{ print strftime(\"[%Y-%m-%d %H:%M:%S]\"), $0 }' | tee -a \"${LOG}\") 2>&1\n\nSESSION_ID=\"isaac-workspace\"\nowner=\"ubuntu\"\n\nattempts=0\nuntil systemctl is-active --quiet dcvserver; do\n  attempts=$((attempts+1))\n  echo \"Waiting for dcvserver (attempt ${attempts})...\"\n  sleep 3\ndone\n\n# xhost comes from x11-xserver-utils; best-effort\ncommand -v xhost >/dev/null 2>&1 || apt-get update -yq || true\ncommand -v xhost >/dev/null 2>&1 || apt-get install -yq --no-install-recommends x11-xserver-utils || true\n\nif ! dcv list-sessions | grep -q \"^Session: ${SESSION_ID}\"; then\n  echo \"Creating DCV virtual session ${SESSION_ID} ...\"\n  dcv create-session \"${SESSION_ID}\" --type virtual --owner \"${owner}\" --name \"Isaac Sim\"\nelse\n  echo \"DCV session ${SESSION_ID} already exists.\"\nfi\n\n# Optional: GUI tweaks (non-fatal)\nsudo -u \"${owner}\" dbus-launch gsettings set org.gnome.desktop.lockdown disable-lock-screen true || true\nsudo -u \"${owner}\" dbus-launch gsettings set org.gnome.desktop.interface gtk-theme Yaru-dark || true\nsudo -u \"${owner}\" dbus-launch gsettings set org.gnome.desktop.interface color-scheme prefer-dark || true\nEOF\n  chmod +x /usr/local/bin/auto-create-virtual-dcv.sh\n\n  cat >/etc/systemd/system/auto-dcv.service <<'EOF'\n[Unit]\nDescription=Auto-create Amazon DCV virtual session\nWants=network-online.target\nAfter=dcvserver.service network-online.target\n\n[Service]\nType=oneshot\nExecStart=/usr/local/bin/auto-create-virtual-dcv.sh\nRemainAfterExit=yes\nRestart=on-failure\nRestartSec=5s\n\n[Install]\nWantedBy=multi-user.target\nEOF\n\n  systemctl daemon-reload\n  systemctl enable auto-dcv.service\n  systemctl start auto-dcv.service\n}\n\n# 0) Baseline and password (early)\nmust \"baseline-update\" '\n  while ! apt_ready; do sleep 3; done\n  apt_update\n  apt_install ca-certificates curl wget gnupg lsb-release jq\n'\nmust \"set-ubuntu-password\" '\n  test -n \"dcv211125451583\"\n  echo \"ubuntu:dcv211125451583\" | chpasswd\n  passwd -S ubuntu\n'\n\n# 1) Disable nouveau (non-fatal)\ntry_step \"disable-nouveau\" '\n  cat >/etc/modprobe.d/blacklist-nouveau.conf <<EOF\nblacklist nouveau\noptions nouveau modeset=0\nEOF\n  sed -i '\\''s/GRUB_CMDLINE_LINUX_DEFAULT=\"/GRUB_CMDLINE_LINUX_DEFAULT=\"rdblacklist=nouveau /'\\'' /etc/default/grub || true\n  update-initramfs -u || true\n  update-grub || true\n'\n\n# 2) NVIDIA driver (critical)\nmust \"install-nvidia-driver\" '\n  apt_install ubuntu-drivers-common\n  ubuntu-drivers autoinstall\n'\n\n# 3) Desktop + GDM (Wayland off) (critical)\nmust \"install-desktop\" '\n  apt_install ubuntu-desktop gdm3 dbus-x11\n  sed -i \"s/^#\\\\(WaylandEnable=false\\\\)/\\\\1/\" /etc/gdm3/custom.conf || true\n'\n\n# 4) Remove GNOME first-run wizard (non-fatal)\ntry_step \"disable-gnome-initial-setup\" '\n  apt-get remove --purge -yq gnome-initial-setup || true\n  sed -i \"s/^X-GNOME-Autostart-enabled=true/X-GNOME-Autostart-enabled=false/\" /etc/xdg/autostart/gnome-initial-setup-first-login.desktop || true\n  systemctl restart gdm3 || true\n'\n\n# 5) Amazon DCV server (critical)\nmust \"install-nice-dcv\" '\n  DCV_URL=\"https://d1uj6qtbmh3dt5.cloudfront.net/2025.0/Servers/nice-dcv-2025.0-20103-ubuntu2204-x86_64.tgz\"\n  cd /tmp\n  wget -q \"$DCV_URL\" -O /tmp/dcv.tgz\n  tar -xzf /tmp/dcv.tgz -C /tmp\n  cd /tmp/nice-dcv-2025.0-20103-ubuntu2204-x86_64\n  apt_install libpulse-mainloop-glib0 libpulse0 libgstreamer-plugins-base1.0-0 libcrack2 libxcb-damage0 libxcb-xkb1 libxcb-xtest0 keyutils\n  apt_install alsa-utils\n  apt-get install -yq ./*.deb\n  usermod -aG video dcv || true\n  systemctl enable dcvserver\n  systemctl restart dcvserver\n'\n\n# 6) DCV config (non-fatal)\ntry_step \"configure-dcv\" '\n  sed -i \"/^\\\\[display\\\\]/a max-head-resolution = \\\"(4096, 2160)\\\"\\\\nweb-client-max-head-resolution = \\\"(4096, 4096)\\\"\" /etc/dcv/dcv.conf || true\n  if ! grep -q \"\\\\[display/linux\\\\]\" /etc/dcv/dcv.conf; then\n    cat <<EOF >>/etc/dcv/dcv.conf\n[display/linux]\ndisable-local-console=false\nEOF\n  fi\n  systemctl restart dcvserver || true\n'\n\n# 7) Auto-create DCV virtual session service (critical)\nmust \"install-auto-dcv-service\" install_auto_dcv_service\n\n# 8) AWS CLI v2 (critical)\nmust \"install-aws-cli-v2\" '\n  apt_update\n  apt_install unzip\n  TMP_DIR=\"$(mktemp -d)\"\n  cd \"$TMP_DIR\"\n  curl -fsSL \"https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip\" -o \"awscliv2.zip\"\n  unzip -q awscliv2.zip\n  ./aws/install --update\n  aws --version\n'\n\n# 9) amazon-efs-utils (critical for EFS mount)\nmust \"install-efs-utils\" '\n  apt_update\n  apt_install git binutils rustc cargo pkg-config libssl-dev ca-certificates cmake golang-go build-essential\n  rm -rf /tmp/efs-utils\n  git clone --branch v2.4.0 --single-branch https://github.com/aws/efs-utils /tmp/efs-utils\n  cd /tmp/efs-utils\n  ./build-deb.sh\n  apt-get install -yq /tmp/efs-utils/build/amazon-efs-utils*deb\n'\n\n# For using IsaacSim/Lab in a container\n# 10) Docker + NVIDIA Container Toolkit (non-fatal)\ntry_step \"install-docker-nvidia-toolkit\" '\n  curl -fsSL https://get.docker.com -o /tmp/get-docker.sh\n  sh /tmp/get-docker.sh\n  systemctl enable docker\n  systemctl start docker\n  usermod -aG docker ubuntu || true\n  install -m 0755 -d /usr/share/keyrings\n  curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg\n  curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | sed \"s#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g\" | tee /etc/apt/sources.list.d/nvidia-container-toolkit.list >/dev/null\n  apt_update\n  apt_install nvidia-container-toolkit\n  systemctl restart docker\n'\n\n# Alternatively, steps 11-15 for using IsaacSim/Lab on host\n# 11) Miniforge (critical for Python/pip)\nmust \"install-miniforge\" '\n  if [[ ! -x /opt/conda/bin/conda ]]; then\n    TMP_INSTALLER=\"/tmp/Miniforge3.sh\"\n    curl -fsSL https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh -o \"$TMP_INSTALLER\"\n    bash \"$TMP_INSTALLER\" -b -p /opt/conda\n    ln -sf /opt/conda/bin/conda /usr/local/bin/conda\n  fi\n  chown -R ubuntu:ubuntu /opt/conda\n'\n\n# 12) Create conda env and configure default activation (critical for Python/pip)\nmust \"create-conda-env-isaac\" '\n  /opt/conda/bin/conda info >/dev/null\n  if ! /opt/conda/bin/conda env list | awk \"{print $1}\" | grep -q \"^isaac$\"; then\n    su - ubuntu -c \"/opt/conda/bin/conda create -y -n isaac python=3.11\"\n  fi\n  /opt/conda/bin/conda config --system --set auto_activate_base false\n  su - ubuntu -c \"touch ~/.bashrc\"\n  if ! grep -q \"conda activate isaac\" /home/ubuntu/.bashrc; then\n    su - ubuntu -c \"echo \\\"conda activate isaac\\\" >> ~/.bashrc\"\n  fi\n'\n\n# 13) PyTorch + IsaacSim via pip (non-fatal)\ntry_step \"install-pytorch-isaacsim\" '\n  su - ubuntu -c \"/opt/conda/bin/conda run -n isaac python -V\"\n  su - ubuntu -c \"/opt/conda/bin/conda run -n isaac python -m pip install --upgrade pip\"\n  su - ubuntu -c \"/opt/conda/bin/conda run -n isaac pip install torch==2.10.0 torchvision --index-url https://download.pytorch.org/whl/cu128\"\n  su - ubuntu -c \"/opt/conda/bin/conda run -n isaac pip install 'isaacsim[all,extscache]==5.1.0' --extra-index-url https://pypi.nvidia.com\"\n'\n\n# 14) Isaac Lab (non-fatal)\ntry_step \"install-isaaclab\" '\n  apt_install cmake build-essential\n  cd /home/ubuntu\n  if [[ ! -d IsaacLab ]]; then\n    su - ubuntu -c \"git clone https://github.com/isaac-sim/IsaacLab.git\"\n  fi\n  su - ubuntu -c \"cd /home/ubuntu/IsaacLab && git fetch --tags || true\"\n  su - ubuntu -c \"cd /home/ubuntu/IsaacLab && git checkout v2.3.2 || true\"\n  su - ubuntu -c \"cd /home/ubuntu/IsaacLab && OMNI_KIT_ACCEPT_EULA=YES /opt/conda/bin/conda run -n isaac ./isaaclab.sh --install || true\"\n'\n\n# 15) leisaac (install + assets, non-fatal)\n# Only install if explicitly enabled via CDK parameter\nif [[ \"true\" == \"true\" ]]; then\n  try_step \"install-leisaac\" '\n    cd /home/ubuntu\n    if [[ ! -d leisaac ]]; then\n      su - ubuntu -c \"git clone https://github.com/LightwheelAI/leisaac.git\"\n    fi\n    su - ubuntu -c \"cd /home/ubuntu/leisaac && git fetch --tags || true\"\n    su - ubuntu -c \"cd /home/ubuntu/leisaac && git checkout v0.2.0 || true\"\n    su - ubuntu -c \"cd /home/ubuntu/leisaac && /opt/conda/bin/conda run -n isaac pip install -e \\\"source/leisaac[gr00t,lerobot-async]\\\" || true\"\n    su - ubuntu -c \"/opt/conda/bin/conda run -n isaac pip install pynput pyserial deepdiff feetech-servo-sdk || true\"\n    su - ubuntu -c \"/opt/conda/bin/conda run -n isaac pip install tensorboard || true\"\n\n    mkdir -p /home/ubuntu/leisaac/assets/robots\n    mkdir -p /home/ubuntu/leisaac/assets/scenes\n\n    apt_update || true\n    apt_install unzip wget || true\n\n    ROBOT_URL=\"https://github.com/LightwheelAI/leisaac/releases/download/v0.1.0/so101_follower.usd\"\n    SCENE_ZIP_URL=\"https://github.com/LightwheelAI/leisaac/releases/download/v0.1.0/kitchen_with_orange.zip\"\n\n    if [[ ! -f /home/ubuntu/leisaac/assets/robots/so101_follower.usd ]]; then\n      su - ubuntu -c \"wget -qO /home/ubuntu/leisaac/assets/robots/so101_follower.usd \\\"${ROBOT_URL}\\\"\"\n    fi\n\n    if [[ ! -d /home/ubuntu/leisaac/assets/scenes/kitchen_with_orange ]]; then\n      TMP_ZIP=\"$(mktemp -u /tmp/kitchen_with_orange.XXXXXX.zip)\"\n      wget -qO \"$TMP_ZIP\" \"${SCENE_ZIP_URL}\"\n      unzip -oq \"$TMP_ZIP\" -d /home/ubuntu/leisaac/assets/scenes\n      rm -f \"$TMP_ZIP\"\n    fi\n\n    chown -R ubuntu:ubuntu /home/ubuntu/leisaac/assets\n  '\nelse\n  log \"SKIP: leisaac installation (disabled via true=false)\"\nfi\n\n# 16) Firefox browser (non-fatal)\ntry_step \"install-firefox\" '\n  apt_update\n  apt_install firefox\n'\n\n# Final: summary and optional reboot\nlog \"==== SUMMARY (also in $SUMMARY) ====\"\ncat \"$SUMMARY\" || true\n\nif [[ $FAILURES -gt 0 ]]; then\n  log \"One or more critical steps failed ($FAILURES). Not rebooting automatically.\"\nelse\n  log \"All critical steps OK. Scheduling a reboot to finalize configuration.\"\n  nohup shutdown -r +1 \"Rebooting to finalize configuration\" >/dev/null 2>&1 &\nfi\n\n# Mount EFS file system with TLS\necho 'Setting up EFS mount with TLS...'\necho 'STEP_INFO:EFS:Configuring fstab and mounting' >> /var/log/dcv-bootstrap.summary || true\nmkdir -p /mnt/efs\necho 'fs-12345678:/ /mnt/efs efs _netdev,tls 0 0' >> /etc/fstab\nif mount -a; then\n  echo 'STEP_OK:EFS mount' >> /var/log/dcv-bootstrap.summary;\n  echo 'EFS mounted at /mnt/efs' | tee -a /var/log/dcv-bootstrap.log;\nelse\n  echo 'STEP_FAIL:EFS mount' >> /var/log/dcv-bootstrap.summary;\nfi\nchown ubuntu:ubuntu /mnt/efs || true"
+                        }
+                      }
+                    },
+                    "constructInfo": {
+                      "fqn": "aws-cdk-lib.aws_ec2.CfnInstance",
+                      "version": "2.177.0"
+                    }
+                  }
+                },
+                "constructInfo": {
+                  "fqn": "aws-cdk-lib.aws_ec2.Instance",
+                  "version": "2.177.0"
+                }
+              },
+              "EIP": {
+                "id": "EIP",
+                "path": "DcvStack/DcvWorkstation/EIP",
+                "attributes": {
+                  "aws:cdk:cloudformation:type": "AWS::EC2::EIP",
+                  "aws:cdk:cloudformation:props": {
+                    "domain": "vpc"
+                  }
+                },
+                "constructInfo": {
+                  "fqn": "aws-cdk-lib.aws_ec2.CfnEIP",
+                  "version": "2.177.0"
+                }
+              },
+              "EIPAssociation": {
+                "id": "EIPAssociation",
+                "path": "DcvStack/DcvWorkstation/EIPAssociation",
+                "attributes": {
+                  "aws:cdk:cloudformation:type": "AWS::EC2::EIPAssociation",
+                  "aws:cdk:cloudformation:props": {
+                    "allocationId": {
+                      "Fn::GetAtt": [
+                        "DcvWorkstationEIP9E73AD81",
+                        "AllocationId"
+                      ]
+                    },
+                    "instanceId": {
+                      "Ref": "DcvWorkstationInstance23BF9800"
+                    }
+                  }
+                },
+                "constructInfo": {
+                  "fqn": "aws-cdk-lib.aws_ec2.CfnEIPAssociation",
+                  "version": "2.177.0"
+                }
+              },
+              "InstancePublicIP": {
+                "id": "InstancePublicIP",
+                "path": "DcvStack/DcvWorkstation/InstancePublicIP",
+                "constructInfo": {
+                  "fqn": "aws-cdk-lib.CfnOutput",
+                  "version": "2.177.0"
+                }
+              },
+              "DCVWebURL": {
+                "id": "DCVWebURL",
+                "path": "DcvStack/DcvWorkstation/DCVWebURL",
+                "constructInfo": {
+                  "fqn": "aws-cdk-lib.CfnOutput",
+                  "version": "2.177.0"
+                }
+              },
+              "DCVCredentials": {
+                "id": "DCVCredentials",
+                "path": "DcvStack/DcvWorkstation/DCVCredentials",
+                "constructInfo": {
+                  "fqn": "aws-cdk-lib.CfnOutput",
+                  "version": "2.177.0"
+                }
+              },
+              "InstanceId": {
+                "id": "InstanceId",
+                "path": "DcvStack/DcvWorkstation/InstanceId",
+                "constructInfo": {
+                  "fqn": "aws-cdk-lib.CfnOutput",
+                  "version": "2.177.0"
+                }
+              }
+            },
+            "constructInfo": {
+              "fqn": "constructs.Construct",
+              "version": "10.5.1"
+            }
+          },
+          "VpcId": {
+            "id": "VpcId",
+            "path": "DcvStack/VpcId",
+            "constructInfo": {
+              "fqn": "aws-cdk-lib.CfnOutput",
+              "version": "2.177.0"
+            }
+          },
+          "CDKMetadata": {
+            "id": "CDKMetadata",
+            "path": "DcvStack/CDKMetadata",
+            "children": {
+              "Default": {
+                "id": "Default",
+                "path": "DcvStack/CDKMetadata/Default",
+                "constructInfo": {
+                  "fqn": "aws-cdk-lib.CfnResource",
+                  "version": "2.177.0"
+                }
+              }
+            },
+            "constructInfo": {
+              "fqn": "constructs.Construct",
+              "version": "10.5.1"
+            }
+          },
+          "BootstrapVersion": {
+            "id": "BootstrapVersion",
+            "path": "DcvStack/BootstrapVersion",
+            "constructInfo": {
+              "fqn": "aws-cdk-lib.CfnParameter",
+              "version": "2.177.0"
+            }
+          },
+          "CheckBootstrapVersion": {
+            "id": "CheckBootstrapVersion",
+            "path": "DcvStack/CheckBootstrapVersion",
+            "constructInfo": {
+              "fqn": "aws-cdk-lib.CfnRule",
+              "version": "2.177.0"
+            }
+          }
+        },
+        "constructInfo": {
+          "fqn": "aws-cdk-lib.Stack",
+          "version": "2.177.0"
+        }
+      },
+      "Tree": {
+        "id": "Tree",
+        "path": "Tree",
+        "constructInfo": {
+          "fqn": "constructs.Construct",
+          "version": "10.5.1"
+        }
+      }
+    },
+    "constructInfo": {
+      "fqn": "aws-cdk-lib.App",
+      "version": "2.177.0"
+    }
+  }
+}
