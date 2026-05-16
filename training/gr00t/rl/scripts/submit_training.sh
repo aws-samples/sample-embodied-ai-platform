@@ -67,12 +67,15 @@ if [ -z "${JOB_DEF_ARN}" ] || [ "${JOB_DEF_ARN}" = "None" ]; then
 fi
 
 # Submit the MNP job
+# Note: numNodes is NOT included in node-overrides because the job definition uses
+# closed target-node ranges (0:0, 1:4). AWS Batch only allows numNodes override when
+# at least one range has an open end (e.g., "1:"). The node count is already baked
+# into the job definition via CDK (num_rollout_nodes + 1).
 JOB_ID=$(aws batch submit-job \
     --job-name "${JOB_NAME}" \
     --job-queue "${JOB_QUEUE}" \
     --job-definition "${JOB_DEF_ARN}" \
     --node-overrides "{
-        \"numNodes\": ${NUM_NODES},
         \"nodePropertyOverrides\": [
             {
                 \"targetNodes\": \"0:0\",
