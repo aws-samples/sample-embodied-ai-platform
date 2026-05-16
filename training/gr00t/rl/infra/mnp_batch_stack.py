@@ -482,11 +482,32 @@ class RLBatchMNPStack(Stack):
 
         learner_image_uri_resolved = learner_image_uri or f"{learner_ecr.repository_uri}:latest"
         rollout_image_uri_resolved = rollout_image_uri or f"{rollout_ecr.repository_uri}:latest"
+        # For batch-mnp: use unified image (same for all nodes) unless explicit URIs provided
+        unified_image_uri = learner_image_uri or rollout_image_uri or f"{rollout_ecr.repository_uri}:latest"
 
         if compute_backend == "batch-mnp":
-            # Homogeneous MNP: all nodes are g6e.4xlarge (1 GPU each)
-            # Learner node uses 1 GPU — suitable for GR00T 3B in bf16 with smaller batch sizes.
+            # Homogeneous MNP: all nodes use the SAME unified image (g6e.4xlarge, 1 GPU each).
+            # The unified image contains Isaac Sim + RLinf + GR00T + Ray + all deps.
+            # Entrypoint differentiates learner vs rollout by AWS_BATCH_JOB_NODE_INDEX.
             # For production 8-GPU FSDP training, use compute_backend=sagemaker.
+
+            # Resolve unified image: use rollout ECR (holds the unified build)
+            unified_repo_name = "gr00t-rl-rollout"
+            unified_tag = "latest"
+            if learner_image_uri:
+                unified_repo_name = learner_image_uri.split("/")[-1].split(":")[0]
+                unified_tag = learner_image_uri.split(":")[-1] if ":" in learner_image_uri else "latest"
+            elif rollout_image_uri:
+                unified_repo_name = rollout_image_uri.split("/")[-1].split(":")[0]
+                unified_tag = rollout_image_uri.split(":")[-1] if ":" in rollout_image_uri else "latest"
+
+            unified_ecr_ref = ecr.Repository.from_repository_name(
+                self, "UnifiedECRRef", repository_name=unified_repo_name
+            )
+            unified_image = ecs.ContainerImage.from_ecr_repository(
+                unified_ecr_ref, tag=unified_tag
+            )
+
             job_def = batch.MultiNodeJobDefinition(
                 self,
                 "RLTrainingJobDef",
@@ -497,17 +518,7 @@ class RLBatchMNPStack(Stack):
                         container=batch.EcsEc2ContainerDefinition(
                             self,
                             "LearnerContainer",
-                            image=ecs.ContainerImage.from_ecr_repository(
-                                ecr.Repository.from_repository_name(
-                                    self, "LearnerECRRef",
-                                    repository_name="gr00t-rl-learner"
-                                ), tag="latest"
-                            ) if not learner_image_uri else ecs.ContainerImage.from_ecr_repository(
-                                ecr.Repository.from_repository_name(
-                                    self, "LearnerECRRef",
-                                    repository_name=learner_image_uri.split("/")[-1].split(":")[0]
-                                ), tag=learner_image_uri.split(":")[-1] if ":" in learner_image_uri else "latest"
-                            ),
+                            image=unified_image,
                             memory=Size.gibibytes(56),
                             cpu=14,
                             gpu=1,
@@ -532,17 +543,7 @@ class RLBatchMNPStack(Stack):
                         container=batch.EcsEc2ContainerDefinition(
                             self,
                             "RolloutContainer",
-                            image=ecs.ContainerImage.from_ecr_repository(
-                                ecr.Repository.from_repository_name(
-                                    self, "RolloutECRRef",
-                                    repository_name="gr00t-rl-rollout"
-                                ), tag="latest"
-                            ) if not rollout_image_uri else ecs.ContainerImage.from_ecr_repository(
-                                ecr.Repository.from_repository_name(
-                                    self, "RolloutECRRef",
-                                    repository_name=rollout_image_uri.split("/")[-1].split(":")[0]
-                                ), tag=rollout_image_uri.split(":")[-1] if ":" in rollout_image_uri else "latest"
-                            ),
+                            image=unified_image,
                             memory=Size.gibibytes(56),
                             cpu=14,
                             gpu=1,

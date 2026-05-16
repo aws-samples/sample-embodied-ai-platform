@@ -1,0 +1,40 @@
+# Unified GR00T RL Training Container
+# Used for batch-mnp backend where all nodes must run the same image.
+# Contains: Isaac Sim + RLinf + GR00T + Ray + torch 2.8 + flash-attn
+# Based on the i4h-workflows Rheo Dockerfile (workflows/rheo/docker/Dockerfile.x86)
+FROM nvcr.io/nvidia/isaac-sim:5.1.0
+
+USER root
+
+# System dependencies
+RUN mkdir -p /var/lib/apt/lists/partial \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+    git git-lfs cmake sudo curl wget \
+    && rm -rf /var/lib/apt/lists/*
+
+# Upgrade PyTorch to 2.8.0 (Isaac Sim ships 2.7.0, but flash-attn 2.8.3 needs 2.8.0)
+RUN /isaac-sim/python.sh -m pip install --no-cache-dir --no-build-isolation --use-pep517 \
+    torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0
+
+# flash-attn (compiled against torch 2.8.0 — requires CUDA toolkit present in Isaac Sim image)
+ENV CUDA_HOME=/usr/local/cuda
+RUN /isaac-sim/python.sh -m pip install --no-cache-dir --no-build-isolation flash-attn==2.8.3
+
+# Ray (RLinf minimum 2.47.0) — use --ignore-installed to avoid Isaac Sim conflicts
+RUN /isaac-sim/python.sh -m pip install --no-cache-dir --ignore-installed "ray[default]==2.47.0"
+
+# GR00T + RLinf dependencies (pinned to match i4h-workflows v0.5.0)
+COPY requirements-unified.txt /tmp/requirements-unified.txt
+RUN /isaac-sim/python.sh -m pip install --no-cache-dir -r /tmp/requirements-unified.txt \
+    && /isaac-sim/python.sh -c "import ray; from transformers import AutoModelForVision2Seq; print(f'OK: ray {ray.__version__}')"
+
+# AWS utilities
+RUN /isaac-sim/python.sh -m pip install --no-cache-dir awscli boto3
+
+WORKDIR /workspace
+
+COPY entrypoint.sh /workspace/entrypoint.sh
+RUN chmod +x /workspace/entrypoint.sh
+
+ENTRYPOINT ["/workspace/entrypoint.sh"]
