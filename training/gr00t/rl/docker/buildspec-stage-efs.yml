@@ -1,0 +1,61 @@
+version: 0.2
+
+# Stages model checkpoint and training code onto EFS.
+# Runs inside VPC with EFS mounted at /mnt/efs.
+
+env:
+  variables:
+    MODEL_REPO: "nvidia/GR00T-N1.5-RL-Rheo-AssembleTrocar"
+    MODEL_DIR: "/mnt/efs/models/GR00T-N1.5-RL-Rheo-AssembleTrocar"
+    I4H_REPO: "https://github.com/isaac-for-healthcare/i4h-workflows.git"
+    I4H_DIR: "/mnt/efs/i4h-workflows"
+
+phases:
+  install:
+    commands:
+      - pip install huggingface-hub
+
+  pre_build:
+    commands:
+      - echo "EFS staging started on $(date)"
+      - df -h /mnt/efs
+      - echo "Model repo: $MODEL_REPO"
+      - echo "Model dir: $MODEL_DIR"
+
+  build:
+    commands:
+      # Stage i4h-workflows (contains RLinf, IsaacLab, task definitions)
+      - |
+        if [ -d "$I4H_DIR/.git" ]; then
+          echo "i4h-workflows already staged, pulling latest..."
+          cd "$I4H_DIR" && git pull --rebase origin main || true
+        else
+          echo "Cloning i4h-workflows..."
+          git clone --depth 1 "$I4H_REPO" "$I4H_DIR"
+        fi
+      - |
+        cd "$I4H_DIR" && git submodule update --init --recursive --depth 1 || true
+
+      # Stage model checkpoint
+      - |
+        if [ -f "$MODEL_DIR/config.json" ]; then
+          echo "Model already staged at $MODEL_DIR"
+        else
+          echo "Downloading model from HuggingFace..."
+          mkdir -p "$MODEL_DIR"
+          huggingface-cli download "$MODEL_REPO" --local-dir "$MODEL_DIR"
+        fi
+
+      # Create symlinks for expected paths
+      - mkdir -p /mnt/efs/third_party
+      - ln -sfn "$I4H_DIR/third_party/RLinf" /mnt/efs/third_party/RLinf || true
+      - ln -sfn "$I4H_DIR/third_party/IsaacLab" /mnt/efs/third_party/IsaacLab || true
+      - ln -sfn "$I4H_DIR/workflows" /mnt/efs/workflows || true
+
+  post_build:
+    commands:
+      - echo "EFS staging complete on $(date)"
+      - echo "Model staged at $MODEL_DIR"
+      - ls -la "$MODEL_DIR"
+      - echo "Code staged at $I4H_DIR"
+      - du -sh /mnt/efs/models/ /mnt/efs/third_party/ 2>/dev/null || true

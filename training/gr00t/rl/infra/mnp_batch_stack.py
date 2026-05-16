@@ -535,6 +535,100 @@ class RLBatchMNPStack(Stack):
         # endregion
 
         # ==============================================================
+        # region 11. EFS staging via CodeBuild (model + code)
+        # ==============================================================
+        stage_source = s3_assets.Asset(
+            self,
+            "StageEFSSourceAsset",
+            path=docker_dir,
+            exclude=["*.pyc", "__pycache__", "Dockerfile.*"],
+        )
+
+        efs_stage_sg = ec2.SecurityGroup(
+            self,
+            "EFSStageSG",
+            vpc=vpc,
+            description="SG for CodeBuild EFS staging project",
+            allow_all_outbound=True,
+        )
+        efs_fs.connections.allow_default_port_from(efs_stage_sg)
+
+        efs_stage_build = codebuild.Project(
+            self,
+            "EFSStageBuild",
+            project_name="GR00T-RL-Stage-EFS",
+            description="Stage model checkpoint and training code onto EFS",
+            source=codebuild.Source.s3(
+                bucket=stage_source.bucket,
+                path=stage_source.s3_object_key,
+            ),
+            environment=codebuild.BuildEnvironment(
+                build_image=codebuild.LinuxBuildImage.STANDARD_7_0,
+                compute_type=codebuild.ComputeType.LARGE,
+                privileged=True,  # Required for EFS mount
+            ),
+            build_spec=codebuild.BuildSpec.from_source_filename(
+                "buildspec-stage-efs.yml"
+            ),
+            vpc=vpc,
+            subnet_selection=ec2.SubnetSelection(
+                subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
+            ),
+            security_groups=[efs_stage_sg],
+            file_system_locations=[
+                codebuild.FileSystemLocation.efs(
+                    identifier="efs_mount",
+                    location=f"{efs_fs.file_system_id}.efs.{Stack.of(self).region}.amazonaws.com:/",
+                    mount_point="/mnt/efs",
+                    mount_options="nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2",
+                ),
+            ],
+            timeout=Duration.hours(1),
+        )
+        stage_source.grant_read(efs_stage_build.role)
+        efs_stage_build.role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "elasticfilesystem:ClientMount",
+                    "elasticfilesystem:ClientWrite",
+                    "elasticfilesystem:ClientRootAccess",
+                ],
+                resources=[
+                    f"arn:aws:elasticfilesystem:{Stack.of(self).region}:{Stack.of(self).account}:file-system/{efs_fs.file_system_id}"
+                ],
+            )
+        )
+
+        # Auto-trigger EFS staging on first deploy
+        efs_stage_trigger = cr.AwsCustomResource(
+            self,
+            "EFSStageTrigger",
+            policy=cr.AwsCustomResourcePolicy.from_sdk_calls(
+                resources=cr.AwsCustomResourcePolicy.ANY_RESOURCE
+            ),
+            timeout=Duration.minutes(5),
+            on_create=cr.AwsSdkCall(
+                service="CodeBuild",
+                action="startBuild",
+                parameters={"projectName": efs_stage_build.project_name},
+                physical_resource_id=cr.PhysicalResourceId.of(
+                    f"{efs_stage_build.project_name}-initial"
+                ),
+            ),
+            on_update=cr.AwsSdkCall(
+                service="CodeBuild",
+                action="batchGetProjects",
+                parameters={"names": [efs_stage_build.project_name]},
+                physical_resource_id=cr.PhysicalResourceId.of(
+                    f"{efs_stage_build.project_name}-initial"
+                ),
+            ),
+            install_latest_aws_sdk=True,
+        )
+        efs_stage_trigger.node.add_dependency(efs_stage_build)
+        # endregion
+
+        # ==============================================================
         # region 12. Outputs
         # ==============================================================
         CfnOutput(self, "VpcId", value=vpc.vpc_id)
@@ -550,6 +644,7 @@ class RLBatchMNPStack(Stack):
         if rollout_build:
             CfnOutput(self, "RolloutECRUri", value=rollout_ecr.repository_uri)
             CfnOutput(self, "RolloutBuildProject", value=rollout_build.project_name)
+        CfnOutput(self, "EFSStageProject", value=efs_stage_build.project_name)
         CfnOutput(self, "JobDefinitionArn", value=job_def.job_definition_arn)
         CfnOutput(self, "NumRolloutNodes", value=str(num_rollout_nodes))
         # endregion
