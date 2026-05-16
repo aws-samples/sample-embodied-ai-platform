@@ -14,14 +14,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 \
     && update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1
 
-# PyTorch + CUDA 12.4 (compatible with CUDA 12.8 runtime)
-RUN pip install --no-cache-dir \
-    torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
+# PyTorch + CUDA 12.8 (matching i4h-workflows Rheo Dockerfile)
+RUN pip install --no-cache-dir --no-build-isolation --use-pep517 \
+    torch==2.8.0 torchvision==0.23.0
 
 # All other dependencies from pinned requirements file
 COPY requirements-learner.txt /tmp/requirements-learner.txt
 RUN pip install --no-cache-dir -r /tmp/requirements-learner.txt \
     && python3 -c "from transformers import AutoModelForVision2Seq; import ray; print(f'OK: transformers + ray {ray.__version__}')"
+
+# flash-attn requires --no-build-isolation and CUDA toolkit (available in this image)
+ENV CUDA_HOME=/usr/local/cuda
+RUN pip install --no-cache-dir --no-build-isolation flash-attn==2.8.3
 
 WORKDIR /workspace
 
