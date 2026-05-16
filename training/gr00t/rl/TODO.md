@@ -1,5 +1,28 @@
 # RL Training Stack - TODOs
 
+## CRITICAL: Fix SageMaker backend implementation
+
+The current `sagemaker` backend in `mnp_batch_stack.py` is WRONG. It uses `CfnComputeEnvironment`
+with type "SAGEMAKER" which doesn't exist. The correct API is:
+
+- `CfnServiceEnvironment` (CDK L1 available) with `service_environment_type="SAGEMAKER_TRAINING"`
+- Job queue with `job_queue_type="SAGEMAKER_TRAINING"` and `service_environment_order`
+- Submit via `SubmitServiceJob` API (not `SubmitJob`)
+- Training payload is a SageMaker `CreateTrainingJob` JSON (supports heterogeneous InstanceGroups)
+
+Reference: https://docs.aws.amazon.com/batch/latest/userguide/getting-started-sagemaker.html
+
+CDK constructs available:
+- `aws_cdk.aws_batch.CfnServiceEnvironment`
+- `aws_cdk.aws_batch.CfnServiceEnvironmentProps`
+- Job queue likely needs `CfnJobQueue` with `job_queue_type` property
+
+## Build unified image for batch-mnp path
+
+The `Dockerfile.unified` is ready but hasn't been tested via CodeBuild yet.
+Need to update the CodeBuild rollout project to build from `Dockerfile.unified`
+instead of `Dockerfile.rollout`.
+
 ## Optimization: Bake i4h-workflows into container images
 
 Currently the repo code is staged onto EFS via a separate CodeBuild project.
