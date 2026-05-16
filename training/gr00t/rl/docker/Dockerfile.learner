@@ -18,27 +18,10 @@ RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
 RUN pip install --no-cache-dir \
     torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
 
-# Ray for distributed coordination
-RUN pip install --no-cache-dir "ray[default]==2.47.0"
-
-# GR00T model dependencies (pin transformers to 4.x — GR00T/RLinf uses AutoModelForVision2Seq removed in 5.x)
-RUN pip install --no-cache-dir \
-    "transformers>=4.48.0,<5.0.0" \
-    "accelerate>=1.2.0,<2.0.0" \
-    safetensors \
-    huggingface-hub \
-    albumentations \
-    && python3 -c "from transformers import AutoModelForVision2Seq; print('transformers OK')"
-
-# flash-attn omitted — learner uses PyTorch SDPA for attention.
-# flash-attn is only needed on rollout nodes (installed at runtime via entrypoint).
-
-# RLinf dependencies (RLinf itself loaded from EFS at runtime via PYTHONPATH)
-RUN pip install --no-cache-dir \
-    hydra-core omegaconf tensorboard
-
-# AWS utilities
-RUN pip install --no-cache-dir awscli boto3
+# All other dependencies from pinned requirements file
+COPY requirements-learner.txt /tmp/requirements-learner.txt
+RUN pip install --no-cache-dir -r /tmp/requirements-learner.txt \
+    && python3 -c "from transformers import AutoModelForVision2Seq; import ray; print(f'OK: transformers + ray {ray.__version__}')"
 
 WORKDIR /workspace
 

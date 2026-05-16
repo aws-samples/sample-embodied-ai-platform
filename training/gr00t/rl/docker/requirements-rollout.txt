@@ -1,0 +1,29 @@
+# Pinned dependencies for the GR00T RL rollout container (Isaac Sim base).
+# Installed via /isaac-sim/python.sh -m pip install.
+# Aligned with i4h-workflows v0.5.0 (workflows/rheo/docker/Dockerfile.x86)
+
+# Ray (RLinf minimum requirement)
+ray[default]==2.47.0
+
+# GR00T / Transformers (must stay on 4.x — AutoModelForVision2Seq removed in 5.x)
+transformers==4.51.3
+accelerate==1.2.1
+safetensors>=0.4.0
+huggingface-hub>=0.20.0
+
+# Vision / data
+albumentations==1.4.18
+
+# Ray transitive deps that Isaac Sim env may be missing
+PyYAML==6.0.2
+Requests==2.32.3
+aiohttp>=3.9.0
+grpcio>=1.60.0
+protobuf==3.20.3
+
+# AWS
+awscli>=1.30.0
+boto3>=1.30.0
+
+# flash-attn installed at runtime on GPU nodes (requires CUDA toolkit to compile)
+# flash-attn==2.8.3

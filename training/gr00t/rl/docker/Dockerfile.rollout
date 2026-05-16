@@ -11,28 +11,16 @@ RUN mkdir -p /var/lib/apt/lists/partial \
     git git-lfs cmake sudo curl wget \
     && rm -rf /var/lib/apt/lists/*
 
-# Ray for distributed coordination (use Isaac Sim's bundled Python)
-# Isaac Sim's Python env has partial/conflicting packages. Use --ignore-installed
-# to ensure Ray gets all its transitive deps installed cleanly.
+# All dependencies from pinned requirements file.
+# Use --ignore-installed to override Isaac Sim's partial/conflicting packages.
+COPY requirements-rollout.txt /tmp/requirements-rollout.txt
 RUN /isaac-sim/python.sh -m pip install --no-cache-dir --ignore-installed \
-    "ray[default]==2.47.0" \
-    && /isaac-sim/python.sh -c "import ray; print(f'Ray OK: {ray.__version__}')"
-
-# GR00T model dependencies (subset needed for rollout inference)
-RUN /isaac-sim/python.sh -m pip install --no-cache-dir \
-    transformers>=4.48.0 \
-    accelerate>=1.2.0 \
-    safetensors \
-    huggingface-hub \
-    albumentations
+    -r /tmp/requirements-rollout.txt \
+    && /isaac-sim/python.sh -c "import ray; print(f'OK: ray {ray.__version__}')"
 
 # flash-attn requires CUDA toolkit to compile from source.
-# Install at container startup on GPU nodes where nvcc is available.
-# The entrypoint handles this via: pip install flash-attn --no-build-isolation
-# For inference-only rollouts, PyTorch SDPA is used as fallback if flash-attn is absent.
-
-# AWS utilities
-RUN /isaac-sim/python.sh -m pip install --no-cache-dir awscli boto3
+# Installed at container startup on GPU nodes via entrypoint.
+# For inference-only rollouts, PyTorch SDPA is used as fallback.
 
 # IsaacLab (installed from EFS mount at runtime)
 # RLinf (installed from EFS mount at runtime)
