@@ -14,9 +14,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 \
     && update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1
 
-# PyTorch + CUDA 12.8
+# PyTorch + CUDA 12.4 (compatible with CUDA 12.8 runtime)
 RUN pip install --no-cache-dir \
-    torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu128
+    torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
 
 # Ray for distributed coordination
 RUN pip install --no-cache-dir "ray[default]==2.44.1"

@@ -9,8 +9,8 @@ Context parameters:
   vpc_id              - Existing VPC ID (creates new if omitted)
   efs_id              - Existing EFS file system ID (creates new if omitted)
   efs_sg_id           - EFS security group ID (required if efs_id provided)
-  learner_image_uri   - ECR URI for learner container
-  rollout_image_uri   - ECR URI for rollout container
+  learner_image_uri   - Pre-built ECR URI for learner (skips CodeBuild if provided)
+  rollout_image_uri   - Pre-built ECR URI for rollout (skips CodeBuild if provided)
   num_rollout_nodes   - Number of rollout child nodes (default: 4)
 """
 import os

@@ -2,8 +2,12 @@
 # Runs on g6e.4xlarge (1× L40S) as rollout worker nodes.
 FROM nvcr.io/nvidia/isaac-sim:5.1.0
 
+USER root
+
 # System dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN mkdir -p /var/lib/apt/lists/partial \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
     git git-lfs cmake sudo curl wget \
     && rm -rf /var/lib/apt/lists/*
 
@@ -16,8 +20,12 @@ RUN /isaac-sim/python.sh -m pip install --no-cache-dir \
     accelerate>=1.2.0 \
     safetensors \
     huggingface-hub \
-    albumentations \
-    flash-attn --no-build-isolation
+    albumentations
+
+# flash-attn requires CUDA toolkit to compile from source.
+# Install at container startup on GPU nodes where nvcc is available.
+# The entrypoint handles this via: pip install flash-attn --no-build-isolation
+# For inference-only rollouts, PyTorch SDPA is used as fallback if flash-attn is absent.
 
 # AWS utilities
 RUN /isaac-sim/python.sh -m pip install --no-cache-dir awscli boto3

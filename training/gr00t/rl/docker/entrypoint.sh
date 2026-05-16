@@ -23,6 +23,15 @@ echo "============================================"
 RAY_PORT="${RAY_PORT:-6379}"
 RAY_HEAD_ADDRESS="${AWS_BATCH_JOB_MAIN_NODE_PRIVATE_IPV4_ADDRESS}:${RAY_PORT}"
 
+# Install flash-attn if not present (requires CUDA toolkit on GPU node)
+if [ -d "/isaac-sim" ]; then
+    /isaac-sim/python.sh -c "import flash_attn" 2>/dev/null || {
+        echo "Installing flash-attn (first run on GPU node)..."
+        /isaac-sim/python.sh -m pip install --no-cache-dir flash-attn --no-build-isolation 2>&1 | tail -5 || \
+            echo "WARN: flash-attn install failed, falling back to PyTorch SDPA"
+    }
+fi
+
 # Configure PYTHONPATH for RLinf and task extensions
 export RLINF_PATH="${EFS_MOUNT}/third_party/RLinf"
 export ISAACLAB_PATH="${EFS_MOUNT}/third_party/IsaacLab"

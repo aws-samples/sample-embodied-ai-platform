@@ -2,11 +2,14 @@ import os
 from aws_cdk import (
     aws_ec2 as ec2,
     aws_batch as batch,
+    aws_codebuild as codebuild,
     aws_ecr as ecr,
     aws_iam as iam,
     aws_efs as efs,
     aws_ecs as ecs,
     aws_s3 as s3,
+    aws_s3_assets as s3_assets,
+    custom_resources as cr,
     Stack,
     CfnOutput,
     Duration,
@@ -130,7 +133,7 @@ class RLBatchMNPStack(Stack):
             self,
             "BatchSecurityGroup",
             vpc=vpc,
-            description="SG for Batch MNP nodes — Ray, NCCL, RLinf inter-node traffic",
+            description="SG for Batch MNP nodes - Ray, NCCL, RLinf inter-node traffic",
             allow_all_outbound=True,
         )
         # Ray requires arbitrary TCP ports for GCS, object store, worker communication
@@ -241,35 +244,203 @@ class RLBatchMNPStack(Stack):
         # endregion
 
         # ==============================================================
-        # region 8. Container images
+        # region 8. Container images (CodeBuild or pre-built)
         # ==============================================================
+        # Two deployment paths:
+        #   1. Default: CodeBuild builds both images automatically on deploy
+        #   2. Pre-built: Pass learner_image_uri / rollout_image_uri to skip CodeBuild
+        docker_dir = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "docker")
+        )
+
+        learner_build = None
+        rollout_build = None
+
+        if not learner_image_uri or not rollout_image_uri:
+            source_asset = s3_assets.Asset(
+                self,
+                "RLDockerSourceAsset",
+                path=docker_dir,
+                exclude=["*.pyc", "__pycache__"],
+            )
+
+        # --- Learner image ---
         if learner_image_uri:
             repo_tag = learner_image_uri.split("/")[-1]
             repo_name = repo_tag.split(":")[0] if ":" in repo_tag else repo_tag
             tag = repo_tag.split(":")[1] if ":" in repo_tag else "latest"
             learner_repo = ecr.Repository.from_repository_name(
-                self, "LearnerRepo", repository_name=repo_name
+                self, "LearnerRepoImport", repository_name=repo_name
             )
-            learner_image = ecs.ContainerImage.from_ecr_repository(
-                learner_repo, tag=tag
-            )
+            learner_image = ecs.ContainerImage.from_ecr_repository(learner_repo, tag=tag)
         else:
-            learner_image_uri = "PLACEHOLDER — build and push learner image to ECR first"
-            learner_image = None
+            learner_ecr = ecr.Repository(
+                self,
+                "LearnerECR",
+                repository_name="gr00t-rl-learner",
+                removal_policy=RemovalPolicy.RETAIN,
+                empty_on_delete=False,
+                image_scan_on_push=True,
+                lifecycle_rules=[
+                    ecr.LifecycleRule(max_image_count=10, rule_priority=1)
+                ],
+            )
 
+            learner_build = codebuild.Project(
+                self,
+                "LearnerBuild",
+                project_name="GR00T-RL-Learner-Build",
+                description="Build GR00T RL learner container (RLinf + GR00T + Ray)",
+                source=codebuild.Source.s3(
+                    bucket=source_asset.bucket,
+                    path=source_asset.s3_object_key,
+                ),
+                environment=codebuild.BuildEnvironment(
+                    build_image=codebuild.LinuxBuildImage.STANDARD_7_0,
+                    compute_type=codebuild.ComputeType.X_LARGE,  # 16 vCPU, 72 GB RAM, 368 GB disk
+                    privileged=True,
+                ),
+                build_spec=codebuild.BuildSpec.from_source_filename("buildspec.yml"),
+                environment_variables={
+                    "ECR_REPOSITORY_NAME": codebuild.BuildEnvironmentVariable(
+                        value="gr00t-rl-learner"
+                    ),
+                    "DOCKERFILE": codebuild.BuildEnvironmentVariable(
+                        value="Dockerfile.learner"
+                    ),
+                    "IMAGE_TAG": codebuild.BuildEnvironmentVariable(value="latest"),
+                },
+                timeout=Duration.hours(2),
+                cache=codebuild.Cache.local(
+                    codebuild.LocalCacheMode.DOCKER_LAYER,
+                ),
+            )
+            learner_ecr.grant_pull_push(learner_build.role)
+            source_asset.grant_read(learner_build.role)
+            learner_build.role.add_to_policy(
+                iam.PolicyStatement(
+                    actions=["ecr:GetAuthorizationToken"], resources=["*"]
+                )
+            )
+
+            learner_trigger = cr.AwsCustomResource(
+                self,
+                "LearnerBuildTrigger",
+                policy=cr.AwsCustomResourcePolicy.from_sdk_calls(
+                    resources=cr.AwsCustomResourcePolicy.ANY_RESOURCE
+                ),
+                timeout=Duration.minutes(5),
+                on_create=cr.AwsSdkCall(
+                    service="CodeBuild",
+                    action="startBuild",
+                    parameters={"projectName": learner_build.project_name},
+                    physical_resource_id=cr.PhysicalResourceId.of(
+                        f"{learner_build.project_name}-{source_asset.s3_object_key}"
+                    ),
+                ),
+                on_update=cr.AwsSdkCall(
+                    service="CodeBuild",
+                    action="batchGetProjects",
+                    parameters={"names": [learner_build.project_name]},
+                    physical_resource_id=cr.PhysicalResourceId.of(
+                        f"{learner_build.project_name}-{source_asset.s3_object_key}"
+                    ),
+                ),
+                install_latest_aws_sdk=True,
+            )
+            learner_trigger.node.add_dependency(learner_build)
+
+            learner_image = ecs.ContainerImage.from_ecr_repository(
+                learner_ecr, tag="latest"
+            )
+
+        # --- Rollout image ---
         if rollout_image_uri:
             repo_tag = rollout_image_uri.split("/")[-1]
             repo_name = repo_tag.split(":")[0] if ":" in repo_tag else repo_tag
             tag = repo_tag.split(":")[1] if ":" in repo_tag else "latest"
             rollout_repo = ecr.Repository.from_repository_name(
-                self, "RolloutRepo", repository_name=repo_name
+                self, "RolloutRepoImport", repository_name=repo_name
             )
-            rollout_image = ecs.ContainerImage.from_ecr_repository(
-                rollout_repo, tag=tag
-            )
+            rollout_image = ecs.ContainerImage.from_ecr_repository(rollout_repo, tag=tag)
         else:
-            rollout_image_uri = "PLACEHOLDER — build and push rollout image to ECR first"
-            rollout_image = None
+            rollout_ecr = ecr.Repository(
+                self,
+                "RolloutECR",
+                repository_name="gr00t-rl-rollout",
+                removal_policy=RemovalPolicy.RETAIN,
+                empty_on_delete=False,
+                image_scan_on_push=True,
+                lifecycle_rules=[
+                    ecr.LifecycleRule(max_image_count=10, rule_priority=1)
+                ],
+            )
+
+            rollout_build = codebuild.Project(
+                self,
+                "RolloutBuild",
+                project_name="GR00T-RL-Rollout-Build",
+                description="Build GR00T RL rollout container (Isaac Sim + RLinf + GR00T + Ray)",
+                source=codebuild.Source.s3(
+                    bucket=source_asset.bucket,
+                    path=source_asset.s3_object_key,
+                ),
+                environment=codebuild.BuildEnvironment(
+                    build_image=codebuild.LinuxBuildImage.STANDARD_7_0,
+                    compute_type=codebuild.ComputeType.X2_LARGE,  # 72 vCPU, 145 GB RAM, 824 GB disk — needed for Isaac Sim
+                    privileged=True,
+                ),
+                build_spec=codebuild.BuildSpec.from_source_filename("buildspec.yml"),
+                environment_variables={
+                    "ECR_REPOSITORY_NAME": codebuild.BuildEnvironmentVariable(
+                        value="gr00t-rl-rollout"
+                    ),
+                    "DOCKERFILE": codebuild.BuildEnvironmentVariable(
+                        value="Dockerfile.rollout"
+                    ),
+                    "IMAGE_TAG": codebuild.BuildEnvironmentVariable(value="latest"),
+                },
+                timeout=Duration.hours(3),
+                # No local cache — not supported on X2_LARGE compute type
+            )
+            rollout_ecr.grant_pull_push(rollout_build.role)
+            source_asset.grant_read(rollout_build.role)
+            rollout_build.role.add_to_policy(
+                iam.PolicyStatement(
+                    actions=["ecr:GetAuthorizationToken"], resources=["*"]
+                )
+            )
+
+            rollout_trigger = cr.AwsCustomResource(
+                self,
+                "RolloutBuildTrigger",
+                policy=cr.AwsCustomResourcePolicy.from_sdk_calls(
+                    resources=cr.AwsCustomResourcePolicy.ANY_RESOURCE
+                ),
+                timeout=Duration.minutes(5),
+                on_create=cr.AwsSdkCall(
+                    service="CodeBuild",
+                    action="startBuild",
+                    parameters={"projectName": rollout_build.project_name},
+                    physical_resource_id=cr.PhysicalResourceId.of(
+                        f"{rollout_build.project_name}-{source_asset.s3_object_key}"
+                    ),
+                ),
+                on_update=cr.AwsSdkCall(
+                    service="CodeBuild",
+                    action="batchGetProjects",
+                    parameters={"names": [rollout_build.project_name]},
+                    physical_resource_id=cr.PhysicalResourceId.of(
+                        f"{rollout_build.project_name}-{source_asset.s3_object_key}"
+                    ),
+                ),
+                install_latest_aws_sdk=True,
+            )
+            rollout_trigger.node.add_dependency(rollout_build)
+
+            rollout_image = ecs.ContainerImage.from_ecr_repository(
+                rollout_ecr, tag="latest"
+            )
         # endregion
 
         # ==============================================================
@@ -301,87 +472,65 @@ class RLBatchMNPStack(Stack):
         # MNP job: node 0 = learner (main), nodes 1..N = rollout workers
         total_nodes = 1 + num_rollout_nodes
 
-        if learner_image and rollout_image:
-            job_def = batch.MultiNodeJobDefinition(
-                self,
-                "RLTrainingJobDef",
-                main_node=0,
-                instance_type=ec2.InstanceType("g6e.48xlarge"),
-                containers=[
-                    # Main node (learner)
-                    batch.MultiNodeContainer(
-                        container=batch.EcsEc2ContainerDefinition(
-                            self,
-                            "LearnerContainer",
-                            image=learner_image,
-                            memory=Size.gibibytes(1400),
-                            cpu=192,
-                            gpu=8,
-                            job_role=job_role,
-                            environment={
-                                **shared_env,
-                                "NODE_ROLE": "learner",
-                                "CUDA_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7",
-                            },
-                            volumes=[efs_volume],
-                            linux_parameters=batch.LinuxParameters(
-                                self,
-                                "LearnerLinuxParams",
-                                shared_memory_size=Size.gibibytes(128),
-                            ),
-                        ),
-                        start_node=0,
-                        end_node=0,
-                    ),
-                    # Rollout nodes
-                    batch.MultiNodeContainer(
-                        container=batch.EcsEc2ContainerDefinition(
-                            self,
-                            "RolloutContainer",
-                            image=rollout_image,
-                            memory=Size.gibibytes(56),
-                            cpu=14,
-                            gpu=1,
-                            job_role=job_role,
-                            environment={
-                                **shared_env,
-                                "NODE_ROLE": "rollout",
-                                "CUDA_VISIBLE_DEVICES": "0",
-                            },
-                            volumes=[efs_volume],
-                            linux_parameters=batch.LinuxParameters(
-                                self,
-                                "RolloutLinuxParams",
-                                shared_memory_size=Size.gibibytes(32),
-                            ),
-                        ),
-                        start_node=1,
-                        end_node=total_nodes - 1,
-                    ),
-                ],
-                retry_attempts=1,
-                timeout=Duration.hours(24),
-            )
-        else:
-            job_def = None
-        # endregion
-
-        # ==============================================================
-        # region 11. ECR repositories for container images
-        # ==============================================================
-        learner_ecr = ecr.Repository(
+        job_def = batch.MultiNodeJobDefinition(
             self,
-            "LearnerECR",
-            repository_name="gr00t-rl-learner",
-            removal_policy=RemovalPolicy.RETAIN,
-            empty_on_delete=False,
-        )
-        rollout_ecr = ecr.Repository(
-            self,
-            "RolloutECR",
-            repository_name="gr00t-rl-rollout",
-            removal_policy=RemovalPolicy.RETAIN,
-            empty_on_delete=False,
+            "RLTrainingJobDef",
+            main_node=0,
+            instance_type=ec2.InstanceType("g6e.48xlarge"),
+            containers=[
+                # Main node (learner)
+                batch.MultiNodeContainer(
+                    container=batch.EcsEc2ContainerDefinition(
+                        self,
+                        "LearnerContainer",
+                        image=learner_image,
+                        memory=Size.gibibytes(1400),
+                        cpu=192,
+                        gpu=8,
+                        job_role=job_role,
+                        environment={
+                            **shared_env,
+                            "NODE_ROLE": "learner",
+                            "CUDA_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7",
+                        },
+                        volumes=[efs_volume],
+                        linux_parameters=batch.LinuxParameters(
+                            self,
+                            "LearnerLinuxParams",
+                            shared_memory_size=Size.gibibytes(128),
+                        ),
+                    ),
+                    start_node=0,
+                    end_node=0,
+                ),
+                # Rollout nodes
+                batch.MultiNodeContainer(
+                    container=batch.EcsEc2ContainerDefinition(
+                        self,
+                        "RolloutContainer",
+                        image=rollout_image,
+                        memory=Size.gibibytes(56),
+                        cpu=14,
+                        gpu=1,
+                        job_role=job_role,
+                        environment={
+                            **shared_env,
+                            "NODE_ROLE": "rollout",
+                            "CUDA_VISIBLE_DEVICES": "0",
+                        },
+                        volumes=[efs_volume],
+                        linux_parameters=batch.LinuxParameters(
+                            self,
+                            "RolloutLinuxParams",
+                            shared_memory_size=Size.gibibytes(32),
+                        ),
+                    ),
+                    start_node=1,
+                    end_node=total_nodes - 1,
+                ),
+            ],
+            retry_attempts=1,
+            timeout=Duration.hours(24),
         )
         # endregion
 
@@ -395,9 +544,12 @@ class RLBatchMNPStack(Stack):
         CfnOutput(
             self, "ComputeEnvironmentName", value=compute_env.compute_environment_name
         )
-        CfnOutput(self, "LearnerECRUri", value=learner_ecr.repository_uri)
-        CfnOutput(self, "RolloutECRUri", value=rollout_ecr.repository_uri)
-        if job_def:
-            CfnOutput(self, "JobDefinitionArn", value=job_def.job_definition_arn)
+        if learner_build:
+            CfnOutput(self, "LearnerECRUri", value=learner_ecr.repository_uri)
+            CfnOutput(self, "LearnerBuildProject", value=learner_build.project_name)
+        if rollout_build:
+            CfnOutput(self, "RolloutECRUri", value=rollout_ecr.repository_uri)
+            CfnOutput(self, "RolloutBuildProject", value=rollout_build.project_name)
+        CfnOutput(self, "JobDefinitionArn", value=job_def.job_definition_arn)
         CfnOutput(self, "NumRolloutNodes", value=str(num_rollout_nodes))
         # endregion
