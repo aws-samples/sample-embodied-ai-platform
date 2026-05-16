@@ -12,7 +12,11 @@ RUN mkdir -p /var/lib/apt/lists/partial \
     && rm -rf /var/lib/apt/lists/*
 
 # Ray for distributed coordination (use Isaac Sim's bundled Python)
-RUN /isaac-sim/python.sh -m pip install --no-cache-dir "ray[default]==2.44.1"
+# Isaac Sim's Python env has partial/conflicting packages. Use --ignore-installed
+# to ensure Ray gets all its transitive deps installed cleanly.
+RUN /isaac-sim/python.sh -m pip install --no-cache-dir --ignore-installed \
+    "ray[default]==2.47.0" \
+    && /isaac-sim/python.sh -c "import ray; print(f'Ray OK: {ray.__version__}')"
 
 # GR00T model dependencies (subset needed for rollout inference)
 RUN /isaac-sim/python.sh -m pip install --no-cache-dir \

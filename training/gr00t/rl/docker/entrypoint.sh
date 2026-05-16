@@ -11,17 +11,31 @@
 
 set -euo pipefail
 
+# On the main node (index 0), AWS_BATCH_JOB_MAIN_NODE_PRIVATE_IPV4_ADDRESS is NOT set.
+# Use the node's own IP instead.
+if [ "${AWS_BATCH_JOB_NODE_INDEX}" = "0" ]; then
+    MAIN_NODE_IP=$(hostname -I | awk '{print $1}')
+else
+    MAIN_NODE_IP="${AWS_BATCH_JOB_MAIN_NODE_PRIVATE_IPV4_ADDRESS}"
+fi
+
 echo "============================================"
-echo "GR00T RL Training — AWS Batch MNP"
+echo "GR00T RL Training - AWS Batch MNP"
 echo "============================================"
 echo "Node Index: ${AWS_BATCH_JOB_NODE_INDEX}"
 echo "Total Nodes: ${AWS_BATCH_JOB_NUM_NODES}"
-echo "Main Node IP: ${AWS_BATCH_JOB_MAIN_NODE_PRIVATE_IPV4_ADDRESS}"
+echo "Main Node IP: ${MAIN_NODE_IP}"
 echo "Node Role: ${NODE_ROLE:-auto}"
 echo "============================================"
 
 RAY_PORT="${RAY_PORT:-6379}"
-RAY_HEAD_ADDRESS="${AWS_BATCH_JOB_MAIN_NODE_PRIVATE_IPV4_ADDRESS}:${RAY_PORT}"
+RAY_HEAD_ADDRESS="${MAIN_NODE_IP}:${RAY_PORT}"
+
+# Learner (Python 3.11.0) and rollout (Python 3.11.13) have patch-version mismatch.
+# Ray is strict about this by default — disable the check via all known env vars.
+export RAY_DISABLE_STRICT_VERSION_CHECK=1
+export RAY_IGNORE_VERSION_MISMATCH=1
+export RAY_DISABLE_VERSION_CHECK=1
 
 # Install flash-attn if not present (requires CUDA toolkit on GPU node)
 if [ -d "/isaac-sim" ]; then
@@ -34,6 +48,7 @@ fi
 
 # Configure PYTHONPATH for RLinf and task extensions
 export RLINF_PATH="${EFS_MOUNT}/third_party/RLinf"
+export EMBODIED_PATH="${RLINF_PATH}/examples/embodiment"
 export ISAACLAB_PATH="${EFS_MOUNT}/third_party/IsaacLab"
 export PYTHONPATH="${RLINF_PATH}:${EFS_MOUNT}/workflows/rheo/scripts:${EFS_MOUNT}/workflows/rheo/scripts/simulation/rl:${PYTHONPATH:-}"
 export RLINF_EXT_MODULE=rlinf_ext
@@ -45,6 +60,9 @@ if [ -d "/isaac-sim" ]; then
     export EXP_PATH="${ISAAC_PATH}/apps"
     export PYTHONPATH="${ISAAC_PATH}/exts:${ISAAC_PATH}/extscore:${ISAAC_PATH}/extscache:${PYTHONPATH}"
     PYTHON_CMD="/isaac-sim/python.sh"
+    # Add Isaac Sim's Python bin to PATH so ray CLI is available
+    ISAAC_PYTHON_BIN=$(dirname $(/isaac-sim/python.sh -c "import sys; print(sys.executable)"))
+    export PATH="${ISAAC_PYTHON_BIN}:${PATH}"
 else
     PYTHON_CMD="python3"
 fi
@@ -69,18 +87,18 @@ if [ "${AWS_BATCH_JOB_NODE_INDEX}" = "0" ]; then
     sleep 10
     echo "Ray head started. Waiting for ${AWS_BATCH_JOB_NUM_NODES} nodes to join..."
 
-    # Wait for all rollout workers to connect
+    # Wait for rollout workers to connect to Ray
     EXPECTED_NODES=${AWS_BATCH_JOB_NUM_NODES}
     TIMEOUT=600
     ELAPSED=0
     while true; do
-        CONNECTED=$(ray status 2>/dev/null | grep -c "node_" || echo "1")
+        CONNECTED=$(python3 -c "import ray; ray.init(address='auto'); print(len(ray.nodes()))" 2>/dev/null || echo "1")
         if [ "$CONNECTED" -ge "$EXPECTED_NODES" ]; then
             echo "All ${EXPECTED_NODES} nodes connected."
             break
         fi
         if [ "$ELAPSED" -ge "$TIMEOUT" ]; then
-            echo "WARNING: Timeout waiting for all nodes. Proceeding with ${CONNECTED} nodes."
+            echo "WARNING: Timeout waiting for all nodes (${CONNECTED}/${EXPECTED_NODES}). Proceeding."
             break
         fi
         sleep 10
@@ -121,17 +139,19 @@ else
     # === CHILD NODE: Ray worker + Rollout ===
     echo "Joining Ray cluster at ${RAY_HEAD_ADDRESS}..."
 
-    # Wait for head node to be reachable
+    # Wait for Ray head to be reachable via TCP
     TIMEOUT=300
     ELAPSED=0
-    while ! ray status --address="${RAY_HEAD_ADDRESS}" &>/dev/null; do
+    while ! timeout 2 bash -c "echo >/dev/tcp/${MAIN_NODE_IP}/${RAY_PORT}" 2>/dev/null; do
         if [ "$ELAPSED" -ge "$TIMEOUT" ]; then
             echo "ERROR: Cannot reach Ray head at ${RAY_HEAD_ADDRESS} after ${TIMEOUT}s"
             exit 1
         fi
         sleep 5
         ELAPSED=$((ELAPSED + 5))
+        echo "  Waiting for Ray head... (${ELAPSED}s)"
     done
+    echo "Ray head reachable. Joining cluster..."
 
     ray start \
         --address="${RAY_HEAD_ADDRESS}" \

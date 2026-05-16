@@ -20,11 +20,12 @@ phases:
       - echo "Staging i4h-workflows..."
       - if [ -d "$I4H_DIR/.git" ]; then cd "$I4H_DIR" && git fetch --tags && git checkout "$I4H_VERSION"; else git clone --branch "$I4H_VERSION" --depth 1 "$I4H_REPO" "$I4H_DIR"; fi
       - cd "$I4H_DIR" && git submodule update --init --recursive --depth 1 || true
+      - echo "Staging RLinf..."
+      - mkdir -p /mnt/efs/third_party
+      - rm -rf /mnt/efs/third_party/RLinf
+      - git clone https://github.com/RLinf/RLinf.git /mnt/efs/third_party/RLinf && cd /mnt/efs/third_party/RLinf && git checkout 649e7579775997ade74efff33a7c23e90c61e60a || true
       - echo "Staging model checkpoint..."
       - if [ -f "$MODEL_DIR/config.json" ]; then echo "Model already staged"; else mkdir -p "$MODEL_DIR" && hf download "$MODEL_REPO" --local-dir "$MODEL_DIR"; fi
-      - mkdir -p /mnt/efs/third_party
-      - ln -sfn "$I4H_DIR/third_party/RLinf" /mnt/efs/third_party/RLinf || true
-      - ln -sfn "$I4H_DIR/third_party/IsaacLab" /mnt/efs/third_party/IsaacLab || true
       - ln -sfn "$I4H_DIR/workflows" /mnt/efs/workflows || true
 
   post_build:
