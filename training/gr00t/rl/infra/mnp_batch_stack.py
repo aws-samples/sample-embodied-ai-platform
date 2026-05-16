@@ -459,17 +459,23 @@ class RLBatchMNPStack(Stack):
 
         elif compute_backend == "sagemaker":
             # ==========================================================
-            # Batch → SageMaker Training with heterogeneous InstanceGroups
+            # Batch + SageMaker Training with heterogeneous InstanceGroups
             # ==========================================================
-            # Uses AWS Batch's SageMaker integration (2025) to submit training
-            # jobs with heterogeneous instance groups:
-            #   - Learner group: 1× g6e.48xlarge (8× L40S) for FSDP training
-            #   - Rollout group: N× g6e.4xlarge (1× L40S) for Isaac Sim workers
-            # Batch handles scheduling/queuing; SageMaker handles gang scheduling,
-            # service discovery, and instance lifecycle.
-            # Reference: https://aws.amazon.com/blogs/machine-learning/introducing-aws-batch-support-for-amazon-sagemaker-training-jobs/
+            # Uses AWS Batch's SageMaker Training integration (2025):
+            #   - CfnServiceEnvironment with type SAGEMAKER_TRAINING
+            #   - CfnJobQueue with job_queue_type SAGEMAKER_TRAINING
+            #   - Job submission via SubmitServiceJob API (not SubmitJob)
+            #   - No job definition needed — training config is inline
+            # Heterogeneous instance groups:
+            #   - Learner group: 1x g6e.48xlarge (8x L40S) for FSDP training
+            #   - Rollout group: Nx g6e.4xlarge (1x L40S) for Isaac Sim workers
+            # The service-linked role AWSServiceRoleForAWSBatchWithSagemaker
+            # is auto-created by AWS on first ServiceEnvironment creation.
+            # Reference: https://docs.aws.amazon.com/batch/latest/userguide/getting-started-sagemaker.html
 
             # --- SageMaker Execution Role ---
+            # Assumed by SageMaker to run training containers. Scoped permissions
+            # for S3 (artifacts bucket only), ECR (read), EFS, VPC, CloudWatch.
             sagemaker_execution_role = iam.Role(
                 self,
                 "SageMakerExecutionRole",
@@ -554,448 +560,47 @@ class RLBatchMNPStack(Stack):
                 )
             )
 
-            # --- Batch Service Role for SageMaker submissions ---
-            batch_sagemaker_service_role = iam.Role(
+            # --- CfnServiceEnvironment (replaces CfnComputeEnvironment) ---
+            # No compute_resources — SageMaker manages its own instances.
+            # The service-linked role is auto-created by AWS.
+            sm_service_env = batch.CfnServiceEnvironment(
                 self,
-                "BatchSageMakerServiceRole",
-                role_name="GR00T-RL-Batch-SageMaker-ServiceRole",
-                assumed_by=iam.ServicePrincipal("batch.amazonaws.com"),
-                managed_policies=[
-                    iam.ManagedPolicy.from_aws_managed_policy_name(
-                        "service-role/AWSBatchServiceRole"
-                    ),
-                ],
-            )
-            batch_sagemaker_service_role.add_to_policy(
-                iam.PolicyStatement(
-                    sid="SageMakerTrainingAccess",
-                    actions=[
-                        "sagemaker:CreateTrainingJob",
-                        "sagemaker:DescribeTrainingJob",
-                        "sagemaker:StopTrainingJob",
-                        "sagemaker:ListTags",
-                        "sagemaker:AddTags",
-                    ],
-                    resources=[
-                        f"arn:aws:sagemaker:{Stack.of(self).region}:{Stack.of(self).account}:training-job/gr00t-rl-*"
-                    ],
-                )
-            )
-            batch_sagemaker_service_role.add_to_policy(
-                iam.PolicyStatement(
-                    sid="PassRoleToSageMaker",
-                    actions=["iam:PassRole"],
-                    resources=[sagemaker_execution_role.role_arn],
-                    conditions={
-                        "StringEquals": {
-                            "iam:PassedToService": "sagemaker.amazonaws.com"
-                        }
-                    },
-                )
+                "SageMakerServiceEnv",
+                service_environment_name="GR00T-RL-SageMaker-ServiceEnv",
+                service_environment_type="SAGEMAKER_TRAINING",
             )
 
-            # --- SageMaker-type Compute Environment (L1/CfnResource) ---
-            # This is a "MANAGED" compute environment with serviceRole that targets
-            # SageMaker Training instead of EC2/ECS.
-            private_subnets = vpc.select_subnets(
-                subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
-            )
-
-            sm_compute_env = batch.CfnComputeEnvironment(
-                self,
-                "SageMakerComputeEnv",
-                compute_environment_name="GR00T-RL-SageMaker-ComputeEnv",
-                type="MANAGED",
-                state="ENABLED",
-                service_role=batch_sagemaker_service_role.role_arn,
-                eks_configuration=None,
-                compute_resources=batch.CfnComputeEnvironment.ComputeResourcesProperty(
-                    type="SAGEMAKER",
-                    maxv_cpus=512,
-                    subnets=private_subnets.subnet_ids,
-                    security_group_ids=[batch_sg.security_group_id],
-                ),
-            )
-
-            # --- Job Queue for SageMaker compute environment ---
+            # --- CfnJobQueue with SAGEMAKER_TRAINING type ---
+            # Uses service_environment_order (NOT compute_environment_order).
             sm_job_queue = batch.CfnJobQueue(
                 self,
                 "SageMakerJobQueue",
                 job_queue_name="GR00T-RL-SageMaker-JobQueue",
+                job_queue_type="SAGEMAKER_TRAINING",
                 state="ENABLED",
                 priority=1,
-                compute_environment_order=[
-                    batch.CfnJobQueue.ComputeEnvironmentOrderProperty(
-                        compute_environment=sm_compute_env.attr_compute_environment_arn,
+                service_environment_order=[
+                    batch.CfnJobQueue.ServiceEnvironmentOrderProperty(
+                        service_environment=sm_service_env.attr_service_environment_arn,
                         order=1,
                     )
                 ],
             )
-
-            # --- Hyperparameters (passed as environment to SageMaker containers) ---
-            hyperparameters = {
-                **{k: str(v) for k, v in shared_env.items()},
-                "NUM_ROLLOUT_NODES": str(num_rollout_nodes),
-                "TOTAL_NODES": str(total_nodes),
-            }
-
-            # --- SageMaker Training Job Definition (Custom Resource for Batch API) ---
-            # This defines the heterogeneous training job that Batch submits to SageMaker.
-            # Uses AWS::Batch::JobDefinition with SageMaker-specific properties via override.
-            # Since CDK L2 constructs don't yet support this, we use CfnResource.
-
-            sm_training_job_template = cr.AwsCustomResource(
-                self,
-                "SageMakerTrainingJobTemplate",
-                policy=cr.AwsCustomResourcePolicy.from_statements([
-                    iam.PolicyStatement(
-                        actions=[
-                            "batch:RegisterJobDefinition",
-                            "batch:DeregisterJobDefinition",
-                            "batch:DescribeJobDefinitions",
-                        ],
-                        resources=["*"],
-                    ),
-                    iam.PolicyStatement(
-                        actions=["iam:PassRole"],
-                        resources=[
-                            sagemaker_execution_role.role_arn,
-                            job_role.role_arn,
-                        ],
-                    ),
-                ]),
-                timeout=Duration.minutes(5),
-                on_create=cr.AwsSdkCall(
-                    service="Batch",
-                    action="registerJobDefinition",
-                    parameters={
-                        "jobDefinitionName": "GR00T-RL-SageMaker-HeterogeneousTraining",
-                        "type": "container",
-                        "platformCapabilities": ["EC2"],
-                        "retryStrategy": {
-                            "attempts": 2,
-                            "evaluateOnExit": [
-                                {
-                                    "action": "RETRY",
-                                    "onStatusReason": "Host EC2*",
-                                },
-                                {
-                                    "action": "EXIT",
-                                    "onStatusReason": "*",
-                                },
-                            ],
-                        },
-                        "timeout": {"attemptDurationSeconds": 86400},
-                        "containerProperties": {
-                            "image": unified_image_uri,
-                            "command": ["python", "-m", "rlinf.train"],
-                            "jobRoleArn": job_role.role_arn,
-                            "executionRoleArn": sagemaker_execution_role.role_arn,
-                            "resourceRequirements": [
-                                {"type": "VCPU", "value": "1"},
-                                {"type": "MEMORY", "value": "2048"},
-                            ],
-                            "environment": [
-                                {"name": k, "value": v}
-                                for k, v in hyperparameters.items()
-                            ],
-                        },
-                        # SageMaker Training configuration for heterogeneous instance groups
-                        "sageMakerConfig": {
-                            "roleArn": sagemaker_execution_role.role_arn,
-                            "outputDataConfig": {
-                                "s3OutputPath": f"s3://{artifact_bucket.bucket_name}/sagemaker-output/",
-                            },
-                            "resourceConfig": {
-                                "instanceGroups": [
-                                    {
-                                        "instanceGroupName": "learner",
-                                        "instanceType": "ml.g6e.48xlarge",
-                                        "instanceCount": 1,
-                                        "instanceStorageConfigs": [
-                                            {
-                                                "ebsVolumeConfig": {
-                                                    "volumeSizeInGb": 500,
-                                                }
-                                            }
-                                        ],
-                                    },
-                                    {
-                                        "instanceGroupName": "rollout",
-                                        "instanceType": "ml.g6e.4xlarge",
-                                        "instanceCount": num_rollout_nodes,
-                                        "instanceStorageConfigs": [
-                                            {
-                                                "ebsVolumeConfig": {
-                                                    "volumeSizeInGb": 200,
-                                                }
-                                            }
-                                        ],
-                                    },
-                                ],
-                            },
-                            "vpcConfig": {
-                                "securityGroupIds": [batch_sg.security_group_id],
-                                "subnets": private_subnets.subnet_ids,
-                            },
-                            "stoppingCondition": {
-                                "maxRuntimeInSeconds": 86400,  # 24 hours
-                            },
-                            "algorithmSpecification": {
-                                "trainingInputMode": "File",
-                                "trainingImage": unified_image_uri,
-                                "containerEntrypoint": ["python", "-m", "rlinf.train"],
-                                "containerArguments": [
-                                    "--config", shared_env["CONFIG_NAME"],
-                                    "--model-path", shared_env["MODEL_PATH"],
-                                    "--num-rollout-nodes", str(num_rollout_nodes),
-                                ],
-                                "instanceGroupAlgorithmSpecifications": [
-                                    {
-                                        "instanceGroupName": "learner",
-                                        "trainingImage": unified_image_uri,
-                                        "containerEntrypoint": ["python", "-m", "rlinf.train"],
-                                        "containerArguments": [
-                                            "--node-role", "learner",
-                                            "--config", shared_env["CONFIG_NAME"],
-                                            "--model-path", shared_env["MODEL_PATH"],
-                                            "--num-gpus", "8",
-                                            "--fsdp",
-                                        ],
-                                    },
-                                    {
-                                        "instanceGroupName": "rollout",
-                                        "trainingImage": unified_image_uri,
-                                        "containerEntrypoint": ["python", "-m", "rlinf.rollout_worker"],
-                                        "containerArguments": [
-                                            "--node-role", "rollout",
-                                            "--config", shared_env["CONFIG_NAME"],
-                                            "--num-envs", shared_env["NUM_ROLLOUT_ENVS"],
-                                        ],
-                                    },
-                                ],
-                            },
-                            "hyperParameters": hyperparameters,
-                            "inputDataConfig": [
-                                {
-                                    "channelName": "model",
-                                    "dataSource": {
-                                        "fileSystemDataSource": {
-                                            "fileSystemId": efs_fs.file_system_id,
-                                            "fileSystemType": "EFS",
-                                            "directoryPath": "/models/GR00T-N1.5-RL-Rheo-AssembleTrocar",
-                                            "fileSystemAccessMode": "ro",
-                                        }
-                                    },
-                                },
-                                {
-                                    "channelName": "code",
-                                    "dataSource": {
-                                        "fileSystemDataSource": {
-                                            "fileSystemId": efs_fs.file_system_id,
-                                            "fileSystemType": "EFS",
-                                            "directoryPath": "/training-code",
-                                            "fileSystemAccessMode": "ro",
-                                        }
-                                    },
-                                },
-                                {
-                                    "channelName": "checkpoints",
-                                    "dataSource": {
-                                        "fileSystemDataSource": {
-                                            "fileSystemId": efs_fs.file_system_id,
-                                            "fileSystemType": "EFS",
-                                            "directoryPath": "/checkpoints",
-                                            "fileSystemAccessMode": "rw",
-                                        }
-                                    },
-                                },
-                            ],
-                        },
-                    },
-                    physical_resource_id=cr.PhysicalResourceId.from_response(
-                        "jobDefinitionArn"
-                    ),
-                ),
-                on_update=cr.AwsSdkCall(
-                    service="Batch",
-                    action="registerJobDefinition",
-                    parameters={
-                        "jobDefinitionName": "GR00T-RL-SageMaker-HeterogeneousTraining",
-                        "type": "container",
-                        "platformCapabilities": ["EC2"],
-                        "retryStrategy": {
-                            "attempts": 2,
-                            "evaluateOnExit": [
-                                {
-                                    "action": "RETRY",
-                                    "onStatusReason": "Host EC2*",
-                                },
-                                {
-                                    "action": "EXIT",
-                                    "onStatusReason": "*",
-                                },
-                            ],
-                        },
-                        "timeout": {"attemptDurationSeconds": 86400},
-                        "containerProperties": {
-                            "image": unified_image_uri,
-                            "command": ["python", "-m", "rlinf.train"],
-                            "jobRoleArn": job_role.role_arn,
-                            "executionRoleArn": sagemaker_execution_role.role_arn,
-                            "resourceRequirements": [
-                                {"type": "VCPU", "value": "1"},
-                                {"type": "MEMORY", "value": "2048"},
-                            ],
-                            "environment": [
-                                {"name": k, "value": v}
-                                for k, v in hyperparameters.items()
-                            ],
-                        },
-                        "sageMakerConfig": {
-                            "roleArn": sagemaker_execution_role.role_arn,
-                            "outputDataConfig": {
-                                "s3OutputPath": f"s3://{artifact_bucket.bucket_name}/sagemaker-output/",
-                            },
-                            "resourceConfig": {
-                                "instanceGroups": [
-                                    {
-                                        "instanceGroupName": "learner",
-                                        "instanceType": "ml.g6e.48xlarge",
-                                        "instanceCount": 1,
-                                        "instanceStorageConfigs": [
-                                            {
-                                                "ebsVolumeConfig": {
-                                                    "volumeSizeInGb": 500,
-                                                }
-                                            }
-                                        ],
-                                    },
-                                    {
-                                        "instanceGroupName": "rollout",
-                                        "instanceType": "ml.g6e.4xlarge",
-                                        "instanceCount": num_rollout_nodes,
-                                        "instanceStorageConfigs": [
-                                            {
-                                                "ebsVolumeConfig": {
-                                                    "volumeSizeInGb": 200,
-                                                }
-                                            }
-                                        ],
-                                    },
-                                ],
-                            },
-                            "vpcConfig": {
-                                "securityGroupIds": [batch_sg.security_group_id],
-                                "subnets": private_subnets.subnet_ids,
-                            },
-                            "stoppingCondition": {
-                                "maxRuntimeInSeconds": 86400,
-                            },
-                            "algorithmSpecification": {
-                                "trainingInputMode": "File",
-                                "trainingImage": unified_image_uri,
-                                "containerEntrypoint": ["python", "-m", "rlinf.train"],
-                                "containerArguments": [
-                                    "--config", shared_env["CONFIG_NAME"],
-                                    "--model-path", shared_env["MODEL_PATH"],
-                                    "--num-rollout-nodes", str(num_rollout_nodes),
-                                ],
-                                "instanceGroupAlgorithmSpecifications": [
-                                    {
-                                        "instanceGroupName": "learner",
-                                        "trainingImage": unified_image_uri,
-                                        "containerEntrypoint": ["python", "-m", "rlinf.train"],
-                                        "containerArguments": [
-                                            "--node-role", "learner",
-                                            "--config", shared_env["CONFIG_NAME"],
-                                            "--model-path", shared_env["MODEL_PATH"],
-                                            "--num-gpus", "8",
-                                            "--fsdp",
-                                        ],
-                                    },
-                                    {
-                                        "instanceGroupName": "rollout",
-                                        "trainingImage": unified_image_uri,
-                                        "containerEntrypoint": ["python", "-m", "rlinf.rollout_worker"],
-                                        "containerArguments": [
-                                            "--node-role", "rollout",
-                                            "--config", shared_env["CONFIG_NAME"],
-                                            "--num-envs", shared_env["NUM_ROLLOUT_ENVS"],
-                                        ],
-                                    },
-                                ],
-                            },
-                            "hyperParameters": hyperparameters,
-                            "inputDataConfig": [
-                                {
-                                    "channelName": "model",
-                                    "dataSource": {
-                                        "fileSystemDataSource": {
-                                            "fileSystemId": efs_fs.file_system_id,
-                                            "fileSystemType": "EFS",
-                                            "directoryPath": "/models/GR00T-N1.5-RL-Rheo-AssembleTrocar",
-                                            "fileSystemAccessMode": "ro",
-                                        }
-                                    },
-                                },
-                                {
-                                    "channelName": "code",
-                                    "dataSource": {
-                                        "fileSystemDataSource": {
-                                            "fileSystemId": efs_fs.file_system_id,
-                                            "fileSystemType": "EFS",
-                                            "directoryPath": "/training-code",
-                                            "fileSystemAccessMode": "ro",
-                                        }
-                                    },
-                                },
-                                {
-                                    "channelName": "checkpoints",
-                                    "dataSource": {
-                                        "fileSystemDataSource": {
-                                            "fileSystemId": efs_fs.file_system_id,
-                                            "fileSystemType": "EFS",
-                                            "directoryPath": "/checkpoints",
-                                            "fileSystemAccessMode": "rw",
-                                        }
-                                    },
-                                },
-                            ],
-                        },
-                    },
-                    physical_resource_id=cr.PhysicalResourceId.from_response(
-                        "jobDefinitionArn"
-                    ),
-                ),
-                on_delete=cr.AwsSdkCall(
-                    service="Batch",
-                    action="deregisterJobDefinition",
-                    parameters={
-                        "jobDefinition": cr.PhysicalResourceIdReference(),
-                    },
-                ),
-                install_latest_aws_sdk=True,
-            )
-            sm_training_job_template.node.add_dependency(sm_compute_env)
-
-            # Store ARN for outputs
-            sm_job_def_arn = sm_training_job_template.get_response_field(
-                "jobDefinitionArn"
-            )
+            sm_job_queue.add_dependency(sm_service_env)
 
             # --- CDK Outputs for SageMaker backend ---
+            # No job definition output — jobs are submitted inline via SubmitServiceJob.
             CfnOutput(
                 self,
-                "SageMakerComputeEnvArn",
-                value=sm_compute_env.attr_compute_environment_arn,
-                description="SageMaker-type Batch compute environment ARN",
+                "SageMakerServiceEnvArn",
+                value=sm_service_env.attr_service_environment_arn,
+                description="SageMaker Training service environment ARN",
             )
             CfnOutput(
                 self,
                 "SageMakerJobQueueArn",
                 value=sm_job_queue.attr_job_queue_arn,
-                description="Job queue for SageMaker training submissions",
+                description="SageMaker Training job queue ARN",
             )
             CfnOutput(
                 self,
@@ -1005,9 +610,9 @@ class RLBatchMNPStack(Stack):
             )
             CfnOutput(
                 self,
-                "SageMakerJobDefinitionArn",
-                value=sm_job_def_arn,
-                description="Batch job definition ARN for heterogeneous SageMaker training",
+                "SageMakerTrainingImage",
+                value=unified_image_uri,
+                description="ECR image URI for SageMaker training containers",
             )
             CfnOutput(
                 self,
@@ -1145,7 +750,7 @@ class RLBatchMNPStack(Stack):
         CfnOutput(
             self,
             "JobDefinitionArn",
-            value=job_def_arn_output if compute_backend == "batch-mnp" else "See SageMakerJobDefinitionArn output",
+            value=job_def_arn_output if compute_backend == "batch-mnp" else "N/A - use SubmitServiceJob API",
         )
         CfnOutput(self, "NumRolloutNodes", value=str(num_rollout_nodes))
         # endregion
