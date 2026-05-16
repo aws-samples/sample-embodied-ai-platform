@@ -1,165 +1,146 @@
 # GR00T RL Post-Training Deployment Guide
 
 This guide walks through deploying the GR00T RL post-training infrastructure on AWS
-using Batch Multi-Node Parallel (MNP) jobs. It covers the same steps as `SKILL.md`
-in a narrative format for readers who prefer manual deployment.
+using Batch Multi-Node Parallel (MNP) jobs.
 
 ## Overview
 
-The RL post-training stack extends the Part 1 SFT infrastructure with a multi-node
-Ray cluster for running RLinf (PPO). The key insight is that RL training has two
-distinct workloads:
+RL training has two distinct workloads that run as a single coordinated cluster:
 
-1. **Learner** — A single stateful process consuming trajectories and computing PPO
-   gradients. Needs many GPUs (FSDP) but no simulation.
-2. **Rollouts** — Many stateless copies of the current policy running in Isaac Sim,
-   producing trajectories. Each needs one GPU for simulation + inference.
+1. **Learner** — Consumes trajectories, computes PPO gradients. Needs GPU for model updates.
+2. **Rollouts** — Run the current policy in Isaac Sim, produce trajectories. Each needs one GPU.
 
-AWS Batch MNP maps this cleanly: one main node runs the learner, child nodes run
-rollouts. Gang scheduling ensures they start together; MNP environment variables
-provide service discovery (the main node's IP is injected into all containers).
+AWS Batch MNP maps this as: one main node (learner) + N child nodes (rollouts), gang-scheduled
+as a single job with automatic service discovery.
+
+**Constraint:** AWS Batch MNP requires homogeneous instance types. All nodes use g6e.4xlarge
+(1× L40S, 48GB VRAM). For production 8-GPU FSDP training, use the `sagemaker` compute backend
+(planned) which supports heterogeneous InstanceGroups.
 
 ## Architecture
 
 ```
 ┌─────────────────── AWS Batch MNP Job ─────────────────────┐
 │                                                            │
-│  Node 0: g6e.48xlarge (main)    Nodes 1-4: g6e.4xlarge    │
+│  Node 0: g6e.4xlarge (main)     Nodes 1-4: g6e.4xlarge    │
 │  ┌────────────────────────┐     ┌────────────────────────┐ │
 │  │ Ray Head               │     │ Ray Workers            │ │
-│  │ RLinf Learner (FSDP)   │◄───►│ RLinf Rollout Workers  │ │
-│  │ 8× L40S (384 GB VRAM)  │ Ray │ Isaac Sim + GR00T N1.5 │ │
-│  │ GR00T + RLinf only      │store│ 1× L40S (48 GB) each  │ │
+│  │ RLinf Learner (PPO)    │◄───►│ RLinf Rollout Workers  │ │
+│  │ 1× L40S (48 GB VRAM)  │ Ray │ Isaac Sim + GR00T N1.5 │ │
+│  │ Learner image (slim)   │store│ Rollout image (full)   │ │
 │  └────────────────────────┘     └────────────────────────┘ │
 │           │                              │                  │
 │           ▼                              ▼                  │
 │     EFS (checkpoints,             S3 (episode logs,        │
-│      TensorBoard)                  eval videos)            │
+│      TensorBoard, code)            eval videos)            │
 └─────────────────────────────────────────────────────────────┘
 ```
 
+**Three-tier artifact flow:**
+- **Ray object store** — Trajectories between rollouts and learner (in-memory, low-latency)
+- **EFS** — Checkpoints, TensorBoard logs, model weights, training code (persistent, shared)
+- **S3** — Episode logs, eval videos (durable, for downstream analysis)
+
 ## Prerequisites
 
-### AWS Account Setup
+### AWS Account
 
 - **Region:** us-west-2 (or any region with g6e availability)
-- **vCPU Quota:** Request at least 256 vCPUs for G6e On-Demand instances
-  - g6e.48xlarge = 192 vCPUs (learner)
-  - g6e.4xlarge × 4 = 64 vCPUs (4 rollout nodes)
+- **vCPU Quota:** ≥80 for G6e On-Demand (5 × g6e.4xlarge × 16 vCPUs)
 - **CDK Bootstrap:** `cdk bootstrap` in the target account/region
-- **Docker:** Installed locally for building container images
 
 ### Software
 
 ```bash
-# Install CDK dependencies
 cd training/gr00t/rl/infra
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-
-# Verify
-cdk --version
-aws sts get-caller-identity
+cdk --version  # >= 2.180.0
 ```
 
 ## Step 1: Deploy Infrastructure
 
-The CDK stack creates: VPC (or reuses existing), EFS, S3 bucket, ECR repositories,
-Batch compute environment, and job queue.
+The CDK stack creates everything needed in a single deploy:
+
+| Resource | Purpose |
+|----------|---------|
+| VPC + private subnets | Network isolation, NAT for ECR pulls |
+| EFS | Shared filesystem for code, model, checkpoints |
+| S3 bucket | Durable artifact storage |
+| ECR repositories (×2) | Learner and rollout container images |
+| CodeBuild projects (×3) | Auto-build learner, rollout, EFS staging |
+| Batch compute environment | GPU instance pool (g6e family) |
+| Batch job queue + definition | MNP job orchestration |
 
 ```bash
-cd training/gr00t/rl/infra
-cdk synth --quiet  # Validate first
-cdk deploy --require-approval never
+AWS_DEFAULT_REGION=us-west-2 cdk deploy --require-approval never
 ```
 
-**Reusing Part 1 infrastructure:**
-
-If you deployed the SFT stack from Part 1, reuse its VPC and EFS:
-
+**Reusing Part 1 VPC/EFS:**
 ```bash
-cdk deploy --require-approval never \
+AWS_DEFAULT_REGION=us-west-2 cdk deploy --require-approval never \
   --context vpc_id=vpc-XXXXX \
   --context efs_id=fs-XXXXX \
   --context efs_sg_id=sg-XXXXX
 ```
 
-## Step 2: Build Container Images
+## Step 2: Wait for Builds
 
-Two separate images optimize for each node's role:
+The deploy auto-triggers three CodeBuild jobs:
 
-| Image | Base | Contents | Size |
-|-------|------|----------|------|
-| Learner | `nvidia/cuda:12.8.0-devel-ubuntu22.04` | PyTorch, Ray, GR00T, RLinf | ~15 GB |
-| Rollout | `nvcr.io/nvidia/isaac-sim:5.1.0` | Isaac Sim, Ray, GR00T, RLinf | ~45 GB |
+1. **Learner image build** (~5 min) — Slim image: CUDA 12.8 + PyTorch 2.6 + Ray 2.47 + transformers
+2. **Rollout image build** (~15 min) — Full image: Isaac Sim 5.1.0 + Ray 2.47 + GR00T deps
+3. **EFS staging** (~10 min) — Clones i4h-workflows (v0.5.0), RLinf, Isaac-GR00T; downloads model
 
+Monitor:
 ```bash
-cd training/gr00t/rl
-bash scripts/build_and_push.sh
+# Image builds
+for proj in GR00T-RL-Learner-Build GR00T-RL-Rollout-Build GR00T-RL-Stage-EFS; do
+  STATUS=$(aws codebuild list-builds-for-project --project-name $proj --query 'ids[0]' --output text | \
+    xargs -I{} aws codebuild batch-get-builds --ids {} --query 'builds[0].buildStatus' --output text)
+  echo "$proj: $STATUS"
+done
 ```
 
-This builds both images and pushes them to the ECR repositories created in Step 1.
+Wait for all three to show `SUCCEEDED`.
 
-## Step 3: Stage Model on EFS
-
-The model checkpoint and training code must be accessible from all nodes via EFS.
-From a machine with EFS mounted (e.g., DCV workstation):
+## Step 3: Submit Training Job
 
 ```bash
-# Clone the i4h-workflows repo (contains RLinf, IsaacLab, task definitions)
-git clone https://github.com/isaac-for-healthcare/i4h-workflows.git /mnt/efs
-cd /mnt/efs && git submodule update --init --recursive
-
-# Download the GR00T checkpoint
-mkdir -p /mnt/efs/models
-hf download nvidia/GR00T-N1.5-RL-Rheo-AssembleTrocar \
-  --local-dir /mnt/efs/models/GR00T-N1.5-RL-Rheo-AssembleTrocar
+bash scripts/submit_training.sh \
+  --num-nodes 5 \
+  --model-path /mnt/efs/models/GR00T-N1.5-RL-Rheo-AssembleTrocar \
+  --num-envs 64
 ```
 
-## Step 4: Create Job Definition
+**What happens:**
+1. Batch gang-schedules 5× g6e.4xlarge instances
+2. Node 0: starts Ray head, waits for workers, launches RLinf learner
+3. Nodes 1-4: join Ray cluster, become rollout workers with Isaac Sim
+4. PPO training runs with stage-gated sparse rewards across 4 curriculum stages
+5. Checkpoints save to EFS; artifacts upload to S3
 
-Redeploy with container image URIs to create the MNP job definition:
-
-```bash
-cd training/gr00t/rl/infra
-cdk deploy --require-approval never \
-  --context learner_image_uri=<LearnerECR>:latest \
-  --context rollout_image_uri=<RolloutECR>:latest \
-  --context num_rollout_nodes=4
-```
-
-## Step 5: Submit Training Job
+## Step 4: Monitor
 
 ```bash
-bash scripts/submit_training.sh --num-nodes 5 --num-envs 64
-```
+JOB_ID=<from submit output>
 
-The job:
-1. Gang-schedules all 5 nodes simultaneously
-2. Node 0 starts Ray head, waits for workers, launches RLinf learner
-3. Nodes 1-4 join Ray cluster, become rollout workers running Isaac Sim
-4. Training runs PPO with stage-gated sparse rewards across 4 curriculum stages
-5. Checkpoints save to EFS; episode artifacts upload to S3
-
-### Monitoring
-
-```bash
-# Job status
-aws batch describe-jobs --jobs <JOB_ID> --query 'jobs[0].status'
+# Status
+aws batch describe-jobs --jobs $JOB_ID --query 'jobs[0].status'
 
 # Logs
 aws logs tail /aws/batch/job --follow
 
-# TensorBoard (from workstation)
+# TensorBoard (from machine with EFS mounted)
 tensorboard --logdir /mnt/efs/rl-training/results/ --port 6006
 ```
 
-## Step 6: Evaluate
+## Step 5: Evaluate
 
-Run evaluation on the DCV workstation using the trained checkpoint:
+After training, run evaluation on a GPU instance with Isaac Sim:
 
 ```bash
-python -u scripts/simulation/examples/eval_assemble_trocar.py \
+python -u eval_assemble_trocar.py \
   --enable_cameras \
   --task Isaac-Assemble-Trocar-G129-Dex3-Joint \
   --model_path /mnt/efs/rl-training/results/<timestamp>/checkpoint \
@@ -180,37 +161,39 @@ python -u scripts/simulation/examples/eval_assemble_trocar.py \
 ## Cleanup
 
 ```bash
-# Destroy infrastructure
 cd training/gr00t/rl/infra
 cdk destroy --force
 
-# Remove retained resources
+# Retained resources:
 aws ecr delete-repository --repository-name gr00t-rl-learner --force
 aws ecr delete-repository --repository-name gr00t-rl-rollout --force
 ```
 
-EFS and S3 bucket are retained by default. Delete manually if no longer needed.
+## Configuration Reference
+
+| Context Parameter | Default | Description |
+|---|---|---|
+| `vpc_id` | Creates new | Existing VPC ID |
+| `efs_id` | Creates new | Existing EFS file system ID |
+| `efs_sg_id` | - | EFS security group (required if efs_id set) |
+| `compute_backend` | `batch-mnp` | `batch-mnp` or `sagemaker` (planned) |
+| `num_rollout_nodes` | 4 | Number of rollout child nodes |
+| `learner_image_uri` | Auto-built | Pre-built ECR URI (skips CodeBuild) |
+| `rollout_image_uri` | Auto-built | Pre-built ECR URI (skips CodeBuild) |
 
 ## Troubleshooting
 
 ### Job stuck in RUNNABLE
-
-- Check vCPU quota: `aws service-quotas get-service-quota --service-code ec2 --quota-code L-DB2E81BA`
-- Verify instance availability in your AZ
-- Check compute environment status: `aws batch describe-compute-environments --compute-environments GR00T-RL-ComputeEnv`
+Check vCPU quota and instance availability. Need ≥80 vCPUs for G6e On-Demand.
 
 ### Ray workers not connecting
+Check child node logs for Python import errors. The rollout image uses `--ignore-installed`
+to override Isaac Sim's partial packages — if Ray fails to import, a dependency is missing
+from `requirements-rollout.txt`.
 
-- Verify security group allows all TCP between nodes (self-referencing rule)
-- Check `AWS_BATCH_JOB_MAIN_NODE_PRIVATE_IPV4_ADDRESS` is populated in worker logs
-- Increase timeout in `entrypoint.sh` if nodes are slow to start
+### Model loading fails
+Ensure `/mnt/efs/third_party/Isaac-GR00T` exists with the `gr00t` Python package.
+The EFS staging CodeBuild project clones this at the pinned commit.
 
-### OOM on rollout nodes
-
-- Reduce `--num-envs` (try 32 or 16)
-- Use `g6e.8xlarge` for rollout nodes (128 GB RAM)
-
-### Learner FSDP errors
-
-- Verify all 8 GPUs visible: check `CUDA_VISIBLE_DEVICES` in learner logs
-- Ensure model fits in aggregate GPU memory (GR00T N1.5 3B requires ~48 GB with FSDP)
+### Cached stale images
+Terminate Batch instances to force fresh image pulls on next job submission.
