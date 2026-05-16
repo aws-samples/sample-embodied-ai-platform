@@ -454,6 +454,15 @@ class RLBatchMNPStack(Stack):
         # ==============================================================
         # region 10. MNP Job Definition
         # ==============================================================
+        # AWS Batch MNP requires homogeneous instance types across all nodes.
+        # Two compute backends are supported via --context compute_backend:
+        #   "batch-mnp" (default): All nodes use the same instance type (g6e.4xlarge).
+        #     Learner uses 1 GPU; for production FSDP use compute_backend=sagemaker.
+        #   "sagemaker": Batch queue submits to SageMaker Training with heterogeneous
+        #     InstanceGroups (g6e.48xlarge learner + g6e.4xlarge rollouts).
+
+        compute_backend = self.node.try_get_context("compute_backend") or "batch-mnp"
+
         shared_env = {
             "EFS_MOUNT": "/mnt/efs",
             "S3_BUCKET": artifact_bucket.bucket_name,
@@ -469,69 +478,111 @@ class RLBatchMNPStack(Stack):
             "NUM_ROLLOUT_ENVS": "64",
         }
 
-        # MNP job: node 0 = learner (main), nodes 1..N = rollout workers
         total_nodes = 1 + num_rollout_nodes
 
-        job_def = batch.MultiNodeJobDefinition(
-            self,
-            "RLTrainingJobDef",
-            main_node=0,
-            instance_type=ec2.InstanceType("g6e.48xlarge"),
-            containers=[
-                # Main node (learner)
-                batch.MultiNodeContainer(
-                    container=batch.EcsEc2ContainerDefinition(
-                        self,
-                        "LearnerContainer",
-                        image=learner_image,
-                        memory=Size.gibibytes(1400),
-                        cpu=192,
-                        gpu=8,
-                        job_role=job_role,
-                        environment={
-                            **shared_env,
-                            "NODE_ROLE": "learner",
-                            "CUDA_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7",
-                        },
-                        volumes=[efs_volume],
-                        linux_parameters=batch.LinuxParameters(
+        learner_image_uri_resolved = learner_image_uri or f"{learner_ecr.repository_uri}:latest"
+        rollout_image_uri_resolved = rollout_image_uri or f"{rollout_ecr.repository_uri}:latest"
+
+        if compute_backend == "batch-mnp":
+            # Homogeneous MNP: all nodes are g6e.4xlarge (1 GPU each)
+            # Learner node uses 1 GPU — suitable for GR00T 3B in bf16 with smaller batch sizes.
+            # For production 8-GPU FSDP training, use compute_backend=sagemaker.
+            job_def = batch.MultiNodeJobDefinition(
+                self,
+                "RLTrainingJobDef",
+                main_node=0,
+                instance_type=ec2.InstanceType("g6e.4xlarge"),
+                containers=[
+                    batch.MultiNodeContainer(
+                        container=batch.EcsEc2ContainerDefinition(
                             self,
-                            "LearnerLinuxParams",
-                            shared_memory_size=Size.gibibytes(128),
+                            "LearnerContainer",
+                            image=ecs.ContainerImage.from_ecr_repository(
+                                ecr.Repository.from_repository_name(
+                                    self, "LearnerECRRef",
+                                    repository_name="gr00t-rl-learner"
+                                ), tag="latest"
+                            ) if not learner_image_uri else ecs.ContainerImage.from_ecr_repository(
+                                ecr.Repository.from_repository_name(
+                                    self, "LearnerECRRef",
+                                    repository_name=learner_image_uri.split("/")[-1].split(":")[0]
+                                ), tag=learner_image_uri.split(":")[-1] if ":" in learner_image_uri else "latest"
+                            ),
+                            memory=Size.gibibytes(56),
+                            cpu=14,
+                            gpu=1,
+                            job_role=job_role,
+                            environment={
+                                **shared_env,
+                                "NODE_ROLE": "learner",
+                                "CUDA_VISIBLE_DEVICES": "0",
+                                "NUM_LEARNER_GPUS": "1",
+                            },
+                            volumes=[efs_volume],
+                            linux_parameters=batch.LinuxParameters(
+                                self,
+                                "LearnerLinuxParams",
+                                shared_memory_size=Size.gibibytes(32),
+                            ),
                         ),
+                        start_node=0,
+                        end_node=0,
                     ),
-                    start_node=0,
-                    end_node=0,
-                ),
-                # Rollout nodes
-                batch.MultiNodeContainer(
-                    container=batch.EcsEc2ContainerDefinition(
-                        self,
-                        "RolloutContainer",
-                        image=rollout_image,
-                        memory=Size.gibibytes(56),
-                        cpu=14,
-                        gpu=1,
-                        job_role=job_role,
-                        environment={
-                            **shared_env,
-                            "NODE_ROLE": "rollout",
-                            "CUDA_VISIBLE_DEVICES": "0",
-                        },
-                        volumes=[efs_volume],
-                        linux_parameters=batch.LinuxParameters(
+                    batch.MultiNodeContainer(
+                        container=batch.EcsEc2ContainerDefinition(
                             self,
-                            "RolloutLinuxParams",
-                            shared_memory_size=Size.gibibytes(32),
+                            "RolloutContainer",
+                            image=ecs.ContainerImage.from_ecr_repository(
+                                ecr.Repository.from_repository_name(
+                                    self, "RolloutECRRef",
+                                    repository_name="gr00t-rl-rollout"
+                                ), tag="latest"
+                            ) if not rollout_image_uri else ecs.ContainerImage.from_ecr_repository(
+                                ecr.Repository.from_repository_name(
+                                    self, "RolloutECRRef",
+                                    repository_name=rollout_image_uri.split("/")[-1].split(":")[0]
+                                ), tag=rollout_image_uri.split(":")[-1] if ":" in rollout_image_uri else "latest"
+                            ),
+                            memory=Size.gibibytes(56),
+                            cpu=14,
+                            gpu=1,
+                            job_role=job_role,
+                            environment={
+                                **shared_env,
+                                "NODE_ROLE": "rollout",
+                                "CUDA_VISIBLE_DEVICES": "0",
+                            },
+                            volumes=[efs_volume],
+                            linux_parameters=batch.LinuxParameters(
+                                self,
+                                "RolloutLinuxParams",
+                                shared_memory_size=Size.gibibytes(32),
+                            ),
                         ),
+                        start_node=1,
+                        end_node=total_nodes - 1,
                     ),
-                    start_node=1,
-                    end_node=total_nodes - 1,
-                ),
-            ],
-            retry_attempts=1,
-            timeout=Duration.hours(24),
-        )
+                ],
+                retry_attempts=1,
+                timeout=Duration.hours(24),
+            )
+            job_def_arn_output = job_def.job_definition_arn
+
+        elif compute_backend == "sagemaker":
+            # TODO: Implement Batch → SageMaker Training with heterogeneous InstanceGroups
+            # - Batch ServiceEnvironment targeting SageMaker
+            # - InstanceGroups: g6e.48xlarge (learner, 8 GPU FSDP) + g6e.4xlarge × N (rollouts)
+            # - SageMaker handles gang scheduling and service discovery
+            # Reference: https://aws.amazon.com/blogs/machine-learning/introducing-aws-batch-support-for-amazon-sagemaker-training-jobs/
+            raise NotImplementedError(
+                "SageMaker backend not yet implemented. "
+                "Use --context compute_backend=batch-mnp for now."
+            )
+        else:
+            raise ValueError(
+                f"Unknown compute_backend: {compute_backend}. "
+                "Supported: 'batch-mnp', 'sagemaker'"
+            )
         # endregion
 
         # ==============================================================
@@ -645,6 +696,6 @@ class RLBatchMNPStack(Stack):
             CfnOutput(self, "RolloutECRUri", value=rollout_ecr.repository_uri)
             CfnOutput(self, "RolloutBuildProject", value=rollout_build.project_name)
         CfnOutput(self, "EFSStageProject", value=efs_stage_build.project_name)
-        CfnOutput(self, "JobDefinitionArn", value=job_def.job_definition_arn)
+        CfnOutput(self, "JobDefinitionArn", value=job_def_arn_output if compute_backend == "batch-mnp" else "N/A")
         CfnOutput(self, "NumRolloutNodes", value=str(num_rollout_nodes))
         # endregion
