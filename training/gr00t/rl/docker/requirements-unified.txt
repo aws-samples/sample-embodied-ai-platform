@@ -16,6 +16,7 @@ omegaconf==2.3.0
 tensorboard>=2.14.0
 
 # Isaac-GR00T dependencies
+albumentations>=1.3.0
 av==12.3.0
 pandas==2.2.3
 h5py==3.12.1
