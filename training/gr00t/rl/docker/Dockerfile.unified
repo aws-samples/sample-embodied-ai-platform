@@ -54,6 +54,16 @@ from transformers import AutoModelForVision2Seq; \
 print(f'VERIFIED: torch={torch.__version__}, flash_attn={flash_attn.__version__}, ray={ray.__version__}, transformers OK') \
 "
 
+# IsaacLab (required by rlinf_ext env workers for isaaclab.app.AppLauncher)
+# Clone and install editable into Isaac Sim's Python environment.
+RUN git clone --depth 1 https://github.com/isaac-sim/IsaacLab.git /opt/IsaacLab \
+    && cd /opt/IsaacLab && git checkout 941ebdf4a \
+    && ln -s /isaac-sim /opt/IsaacLab/_isaac_sim \
+    && for DIR in /opt/IsaacLab/source/isaaclab*/; do \
+         /isaac-sim/python.sh -m pip install --no-cache-dir --no-deps -e "$DIR"; \
+       done \
+    && /isaac-sim/python.sh -c "import isaaclab; print(f'IsaacLab installed: {isaaclab.__file__}')"
+
 # AWS utilities
 RUN /isaac-sim/python.sh -m pip install --no-cache-dir awscli boto3
 
