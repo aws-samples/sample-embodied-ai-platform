@@ -107,6 +107,23 @@ if [ "${AWS_BATCH_JOB_NODE_INDEX}" = "0" ]; then
         echo "  Waiting... ${CONNECTED}/${EXPECTED_NODES} nodes connected (${ELAPSED}s)"
     done
 
+    # Pre-flight: verify rlinf_ext extension loads correctly (fail loudly if not)
+    echo "Verifying rlinf_ext extension..."
+    ${PYTHON_CMD} -c "
+import sys
+sys.path.insert(0, '${EFS_MOUNT}/workflows/rheo/scripts/simulation/rl')
+sys.path.insert(0, '${EFS_MOUNT}/workflows/rheo/scripts')
+import rlinf_ext
+rlinf_ext.register()
+print('rlinf_ext.register() OK')
+# Verify the patch worked
+from rlinf.models.embodiment.gr00t import get_model as gm
+print(f'get_model function: {gm}')
+" 2>&1 || {
+        echo "ERROR: rlinf_ext failed to load. Training will fail."
+        echo "Continuing anyway to capture error in logs..."
+    }
+
     # Launch RLinf training
     echo "Launching RLinf learner..."
     CONFIG_PATH="${EFS_MOUNT}/workflows/rheo/scripts/simulation/rl/rlinf_ext/config"
