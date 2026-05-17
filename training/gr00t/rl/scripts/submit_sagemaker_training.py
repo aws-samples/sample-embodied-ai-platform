@@ -53,118 +53,118 @@ def build_payload(args) -> dict:
     job_name = args.job_name or f"gr00t-rl-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
 
     # The SageMaker training configuration is passed as a JSON string
-    # in serviceRequestPayload (matches CreateTrainingJob API shape).
+    # in serviceRequestPayload (matches CreateTrainingJob API — PascalCase).
     sagemaker_config = {
-                "trainingJobName": job_name,
-                "roleArn": args.execution_role_arn,
-                "algorithmSpecification": {
-                    "trainingInputMode": "File",
-                    "trainingImage": args.image_uri,
-                    "containerEntrypoint": ["python", "-m", "rlinf.train"],
-                    "containerArguments": [
+        "TrainingJobName": job_name,
+        "RoleArn": args.execution_role_arn,
+        "AlgorithmSpecification": {
+            "TrainingInputMode": "File",
+            "TrainingImage": args.image_uri,
+            "ContainerEntrypoint": ["python", "-m", "rlinf.train"],
+            "ContainerArguments": [
+                "--config", args.config_name,
+                "--model-path", args.model_path,
+                "--num-rollout-nodes", str(args.num_rollout_nodes),
+            ],
+            "InstanceGroupAlgorithmSpecifications": [
+                {
+                    "InstanceGroupName": "learner",
+                    "TrainingImage": args.image_uri,
+                    "ContainerEntrypoint": ["python", "-m", "rlinf.train"],
+                    "ContainerArguments": [
+                        "--node-role", "learner",
                         "--config", args.config_name,
                         "--model-path", args.model_path,
-                        "--num-rollout-nodes", str(args.num_rollout_nodes),
-                    ],
-                    "instanceGroupAlgorithmSpecifications": [
-                        {
-                            "instanceGroupName": "learner",
-                            "trainingImage": args.image_uri,
-                            "containerEntrypoint": ["python", "-m", "rlinf.train"],
-                            "containerArguments": [
-                                "--node-role", "learner",
-                                "--config", args.config_name,
-                                "--model-path", args.model_path,
-                                "--num-gpus", "8",
-                                "--fsdp",
-                            ],
-                        },
-                        {
-                            "instanceGroupName": "rollout",
-                            "trainingImage": args.image_uri,
-                            "containerEntrypoint": ["python", "-m", "rlinf.rollout_worker"],
-                            "containerArguments": [
-                                "--node-role", "rollout",
-                                "--config", args.config_name,
-                                "--num-envs", str(args.num_envs),
-                            ],
-                        },
+                        "--num-gpus", "8",
+                        "--fsdp",
                     ],
                 },
-                "resourceConfig": {
-                    "instanceGroups": [
-                        {
-                            "instanceGroupName": "learner",
-                            "instanceType": "ml.g6e.48xlarge",
-                            "instanceCount": 1,
-                            "instanceStorageConfigs": [
-                                {"ebsVolumeConfig": {"volumeSizeInGb": 500}}
-                            ],
-                        },
-                        {
-                            "instanceGroupName": "rollout",
-                            "instanceType": "ml.g6e.4xlarge",
-                            "instanceCount": args.num_rollout_nodes,
-                            "instanceStorageConfigs": [
-                                {"ebsVolumeConfig": {"volumeSizeInGb": 200}}
-                            ],
-                        },
+                {
+                    "InstanceGroupName": "rollout",
+                    "TrainingImage": args.image_uri,
+                    "ContainerEntrypoint": ["python", "-m", "rlinf.rollout_worker"],
+                    "ContainerArguments": [
+                        "--node-role", "rollout",
+                        "--config", args.config_name,
+                        "--num-envs", str(args.num_envs),
                     ],
                 },
-                "vpcConfig": {
-                    "securityGroupIds": args.security_group_ids.split(","),
-                    "subnets": args.subnet_ids.split(","),
+            ],
+        },
+        "ResourceConfig": {
+            "InstanceGroups": [
+                {
+                    "InstanceGroupName": "learner",
+                    "InstanceType": "ml.g6e.48xlarge",
+                    "InstanceCount": 1,
+                    "InstanceStorageConfigs": [
+                        {"EbsVolumeConfig": {"VolumeSizeInGb": 500}}
+                    ],
                 },
-                "stoppingCondition": {
-                    "maxRuntimeInSeconds": 86400,  # 24 hours
+                {
+                    "InstanceGroupName": "rollout",
+                    "InstanceType": "ml.g6e.4xlarge",
+                    "InstanceCount": args.num_rollout_nodes,
+                    "InstanceStorageConfigs": [
+                        {"EbsVolumeConfig": {"VolumeSizeInGb": 200}}
+                    ],
                 },
-                "outputDataConfig": {
-                    "s3OutputPath": args.s3_output,
+            ],
+        },
+        "VpcConfig": {
+            "SecurityGroupIds": args.security_group_ids.split(","),
+            "Subnets": args.subnet_ids.split(","),
+        },
+        "StoppingCondition": {
+            "MaxRuntimeInSeconds": 86400,
+        },
+        "OutputDataConfig": {
+            "S3OutputPath": args.s3_output,
+        },
+        "HyperParameters": {
+            "NUM_ROLLOUT_NODES": str(args.num_rollout_nodes),
+            "TOTAL_NODES": str(1 + args.num_rollout_nodes),
+            "CONFIG_NAME": args.config_name,
+            "NUM_ROLLOUT_ENVS": str(args.num_envs),
+            "NCCL_SOCKET_IFNAME": "eth0",
+            "NCCL_IB_DISABLE": "1",
+            "TORCH_ALLOW_TF32_CUBLAS_OVERRIDE": "1",
+        },
+        "InputDataConfig": [
+            {
+                "ChannelName": "model",
+                "DataSource": {
+                    "FileSystemDataSource": {
+                        "FileSystemId": args.efs_id,
+                        "FileSystemType": "EFS",
+                        "DirectoryPath": "/models/GR00T-N1.5-RL-Rheo-AssembleTrocar",
+                        "FileSystemAccessMode": "ro",
+                    }
                 },
-                "hyperParameters": {
-                    "NUM_ROLLOUT_NODES": str(args.num_rollout_nodes),
-                    "TOTAL_NODES": str(1 + args.num_rollout_nodes),
-                    "CONFIG_NAME": args.config_name,
-                    "NUM_ROLLOUT_ENVS": str(args.num_envs),
-                    "NCCL_SOCKET_IFNAME": "eth0",
-                    "NCCL_IB_DISABLE": "1",
-                    "TORCH_ALLOW_TF32_CUBLAS_OVERRIDE": "1",
+            },
+            {
+                "ChannelName": "code",
+                "DataSource": {
+                    "FileSystemDataSource": {
+                        "FileSystemId": args.efs_id,
+                        "FileSystemType": "EFS",
+                        "DirectoryPath": "/training-code",
+                        "FileSystemAccessMode": "ro",
+                    }
                 },
-                "inputDataConfig": [
-                    {
-                        "channelName": "model",
-                        "dataSource": {
-                            "fileSystemDataSource": {
-                                "fileSystemId": args.efs_id,
-                                "fileSystemType": "EFS",
-                                "directoryPath": "/models/GR00T-N1.5-RL-Rheo-AssembleTrocar",
-                                "fileSystemAccessMode": "ro",
-                            }
-                        },
-                    },
-                    {
-                        "channelName": "code",
-                        "dataSource": {
-                            "fileSystemDataSource": {
-                                "fileSystemId": args.efs_id,
-                                "fileSystemType": "EFS",
-                                "directoryPath": "/training-code",
-                                "fileSystemAccessMode": "ro",
-                            }
-                        },
-                    },
-                    {
-                        "channelName": "checkpoints",
-                        "dataSource": {
-                            "fileSystemDataSource": {
-                                "fileSystemId": args.efs_id,
-                                "fileSystemType": "EFS",
-                                "directoryPath": "/checkpoints",
-                                "fileSystemAccessMode": "rw",
-                            }
-                        },
-                    },
-                ],
+            },
+            {
+                "ChannelName": "checkpoints",
+                "DataSource": {
+                    "FileSystemDataSource": {
+                        "FileSystemId": args.efs_id,
+                        "FileSystemType": "EFS",
+                        "DirectoryPath": "/checkpoints",
+                        "FileSystemAccessMode": "rw",
+                    }
+                },
+            },
+        ],
     }
 
     import json as _json
