@@ -52,11 +52,9 @@ def build_payload(args) -> dict:
     """
     job_name = args.job_name or f"gr00t-rl-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
 
-    payload = {
-        "jobName": job_name,
-        "jobQueue": args.job_queue,
-        "serviceJobConfiguration": {
-            "sageMakerTrainingJobConfiguration": {
+    # The SageMaker training configuration is passed as a JSON string
+    # in serviceRequestPayload (matches CreateTrainingJob API shape).
+    sagemaker_config = {
                 "trainingJobName": job_name,
                 "roleArn": args.execution_role_arn,
                 "algorithmSpecification": {
@@ -167,8 +165,16 @@ def build_payload(args) -> dict:
                         },
                     },
                 ],
-            }
-        },
+    }
+
+    import json as _json
+    payload = {
+        "jobName": job_name,
+        "jobQueue": args.job_queue,
+        "serviceJobType": "SAGEMAKER_TRAINING",
+        "serviceRequestPayload": _json.dumps(sagemaker_config),
+        "retryStrategy": {"attempts": 1},
+        "timeoutConfig": {"attemptDurationSeconds": 86400},
     }
 
     return payload
@@ -440,14 +446,14 @@ Examples:
 
     response = batch_client.submit_service_job(**payload)
 
-    job_id = response.get("serviceJobId", response.get("jobId", "UNKNOWN"))
-    job_name = payload["serviceJobConfiguration"]["sageMakerTrainingJobConfiguration"]["trainingJobName"]
+    job_id = response.get("jobId", response.get("serviceJobId", "UNKNOWN"))
+    job_name_val = payload["jobName"]
 
     print(f"Job submitted successfully!")
     print(f"  Service Job ID: {job_id}")
-    print(f"  Training Job Name: {job_name}")
+    print(f"  Training Job Name: {job_name_val}")
 
-    print_monitoring_commands(job_id, job_name)
+    print_monitoring_commands(job_id, job_name_val)
 
 
 if __name__ == "__main__":
