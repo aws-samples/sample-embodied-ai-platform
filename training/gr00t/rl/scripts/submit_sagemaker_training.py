@@ -60,36 +60,8 @@ def build_payload(args) -> dict:
         "AlgorithmSpecification": {
             "TrainingInputMode": "File",
             "TrainingImage": args.image_uri,
-            "ContainerEntrypoint": ["python", "-m", "rlinf.train"],
-            "ContainerArguments": [
-                "--config", args.config_name,
-                "--model-path", args.model_path,
-                "--num-rollout-nodes", str(args.num_rollout_nodes),
-            ],
-            "InstanceGroupAlgorithmSpecifications": [
-                {
-                    "InstanceGroupName": "learner",
-                    "TrainingImage": args.image_uri,
-                    "ContainerEntrypoint": ["python", "-m", "rlinf.train"],
-                    "ContainerArguments": [
-                        "--node-role", "learner",
-                        "--config", args.config_name,
-                        "--model-path", args.model_path,
-                        "--num-gpus", "8",
-                        "--fsdp",
-                    ],
-                },
-                {
-                    "InstanceGroupName": "rollout",
-                    "TrainingImage": args.image_uri,
-                    "ContainerEntrypoint": ["python", "-m", "rlinf.rollout_worker"],
-                    "ContainerArguments": [
-                        "--node-role", "rollout",
-                        "--config", args.config_name,
-                        "--num-envs", str(args.num_envs),
-                    ],
-                },
-            ],
+            "ContainerEntrypoint": ["/workspace/entrypoint.sh"],
+            "ContainerArguments": [],
         },
         "ResourceConfig": {
             "InstanceGroups": [
@@ -97,17 +69,11 @@ def build_payload(args) -> dict:
                     "InstanceGroupName": "learner",
                     "InstanceType": "ml.g6e.48xlarge",
                     "InstanceCount": 1,
-                    "InstanceStorageConfigs": [
-                        {"EbsVolumeConfig": {"VolumeSizeInGb": 500}}
-                    ],
                 },
                 {
                     "InstanceGroupName": "rollout",
                     "InstanceType": "ml.g6e.4xlarge",
                     "InstanceCount": args.num_rollout_nodes,
-                    "InstanceStorageConfigs": [
-                        {"EbsVolumeConfig": {"VolumeSizeInGb": 200}}
-                    ],
                 },
             ],
         },
