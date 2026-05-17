@@ -11,25 +11,72 @@
 
 set -euo pipefail
 
-# On the main node (index 0), AWS_BATCH_JOB_MAIN_NODE_PRIVATE_IPV4_ADDRESS is NOT set.
-# Use the node's own IP instead.
-if [ "${AWS_BATCH_JOB_NODE_INDEX}" = "0" ]; then
-    MAIN_NODE_IP=$(hostname -I | awk '{print $1}')
+# ==============================================================
+# Detect runtime: SageMaker Training vs AWS Batch MNP
+# ==============================================================
+RAY_PORT="${RAY_PORT:-6379}"
+
+if [ -n "${SM_CURRENT_HOST:-}" ]; then
+    # === SAGEMAKER TRAINING MODE ===
+    # SageMaker provides: SM_CURRENT_HOST, SM_HOSTS (JSON array), SM_TRAINING_ENV
+    # Instance group info in /opt/ml/input/config/resourceconfig.json
+    RUNTIME="sagemaker"
+
+    # Parse hosts list (e.g., ["algo-1","algo-2","algo-3"])
+    SM_HOSTS_LIST=$(echo "${SM_HOSTS}" | tr -d '[]"' | tr ',' '\n')
+    SM_MASTER_HOST=$(echo "$SM_HOSTS_LIST" | head -1)
+    SM_NUM_NODES=$(echo "$SM_HOSTS_LIST" | wc -l)
+
+    # Determine node index from position in hosts list
+    NODE_INDEX=0
+    IDX=0
+    while IFS= read -r host; do
+        if [ "$host" = "${SM_CURRENT_HOST}" ]; then
+            NODE_INDEX=$IDX
+            break
+        fi
+        IDX=$((IDX + 1))
+    done <<< "$SM_HOSTS_LIST"
+
+    # Resolve master IP
+    if [ "$NODE_INDEX" = "0" ]; then
+        MAIN_NODE_IP=$(hostname -I | awk '{print $1}')
+    else
+        MAIN_NODE_IP=$(getent hosts "$SM_MASTER_HOST" | awk '{print $1}')
+    fi
+
+    export AWS_BATCH_JOB_NODE_INDEX="$NODE_INDEX"
+    export AWS_BATCH_JOB_NUM_NODES="$SM_NUM_NODES"
+    export EFS_MOUNT="${EFS_MOUNT:-/opt/ml/input/data/model}"
+
+elif [ -n "${AWS_BATCH_JOB_NODE_INDEX:-}" ]; then
+    # === AWS BATCH MNP MODE ===
+    RUNTIME="batch-mnp"
+    NODE_INDEX="${AWS_BATCH_JOB_NODE_INDEX}"
+
+    if [ "$NODE_INDEX" = "0" ]; then
+        MAIN_NODE_IP=$(hostname -I | awk '{print $1}')
+    else
+        MAIN_NODE_IP="${AWS_BATCH_JOB_MAIN_NODE_PRIVATE_IPV4_ADDRESS}"
+    fi
+
 else
-    MAIN_NODE_IP="${AWS_BATCH_JOB_MAIN_NODE_PRIVATE_IPV4_ADDRESS}"
+    echo "ERROR: Neither SM_CURRENT_HOST nor AWS_BATCH_JOB_NODE_INDEX set."
+    echo "This entrypoint requires either SageMaker Training or AWS Batch MNP environment."
+    exit 1
 fi
 
+RAY_HEAD_ADDRESS="${MAIN_NODE_IP}:${RAY_PORT}"
+
 echo "============================================"
-echo "GR00T RL Training - AWS Batch MNP"
+echo "GR00T RL Training - ${RUNTIME}"
 echo "============================================"
+echo "Runtime: ${RUNTIME}"
 echo "Node Index: ${AWS_BATCH_JOB_NODE_INDEX}"
 echo "Total Nodes: ${AWS_BATCH_JOB_NUM_NODES}"
 echo "Main Node IP: ${MAIN_NODE_IP}"
 echo "Node Role: ${NODE_ROLE:-auto}"
 echo "============================================"
-
-RAY_PORT="${RAY_PORT:-6379}"
-RAY_HEAD_ADDRESS="${MAIN_NODE_IP}:${RAY_PORT}"
 
 # Learner (Python 3.11.0) and rollout (Python 3.11.13) have patch-version mismatch.
 # Ray is strict about this by default — disable the check via all known env vars.
