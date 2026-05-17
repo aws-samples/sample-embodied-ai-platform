@@ -69,7 +69,9 @@ RUN git clone https://github.com/isaac-sim/IsaacLab.git /opt/IsaacLab \
 
 # IsaacLab-Arena (required for isaaclab_arena_g1 task module used in assemble_trocar)
 # pin (pinocchio) is needed by isaaclab_arena_g1.g1_env.robot_model
-RUN /isaac-sim/python.sh -m pip install --no-cache-dir pin
+# Force numpy==1.26.4 after pinocchio install to prevent numpy 2.x upgrade
+RUN /isaac-sim/python.sh -m pip install --no-cache-dir pin \
+    && /isaac-sim/python.sh -m pip install --no-cache-dir numpy==1.26.4
 RUN git clone https://github.com/isaac-sim/IsaacLab-Arena.git /opt/IsaacLab-Arena \
     && cd /opt/IsaacLab-Arena && git checkout dba099565 \
     && /isaac-sim/python.sh -m pip install --no-cache-dir --no-deps -e /opt/IsaacLab-Arena \
