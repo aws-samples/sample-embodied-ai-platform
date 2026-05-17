@@ -61,7 +61,6 @@ def build_payload(args) -> dict:
             "TrainingInputMode": "File",
             "TrainingImage": args.image_uri,
             "ContainerEntrypoint": ["/workspace/entrypoint.sh"],
-            "ContainerArguments": [],
         },
         "ResourceConfig": {
             "InstanceGroups": [
