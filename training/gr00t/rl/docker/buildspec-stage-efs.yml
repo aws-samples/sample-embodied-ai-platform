@@ -30,6 +30,9 @@ phases:
       - echo "Staging IsaacLab..."
       - rm -rf /mnt/efs/third_party/IsaacLab
       - git clone https://github.com/isaac-sim/IsaacLab.git /mnt/efs/third_party/IsaacLab && cd /mnt/efs/third_party/IsaacLab && git checkout 941ebdf4a || true
+      - echo "Staging IsaacLab-Arena..."
+      - rm -rf /mnt/efs/third_party/IsaacLab-Arena
+      - git clone https://github.com/isaac-sim/IsaacLab-Arena.git /mnt/efs/third_party/IsaacLab-Arena && cd /mnt/efs/third_party/IsaacLab-Arena && git checkout dba099565 || true
       - echo "Staging model checkpoint..."
       - if [ -f "$MODEL_DIR/config.json" ]; then echo "Model already staged"; else mkdir -p "$MODEL_DIR" && hf download "$MODEL_REPO" --local-dir "$MODEL_DIR"; fi
       - ln -sfn "$I4H_DIR/workflows" /mnt/efs/workflows || true
