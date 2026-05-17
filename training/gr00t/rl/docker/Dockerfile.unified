@@ -68,6 +68,8 @@ RUN git clone https://github.com/isaac-sim/IsaacLab.git /opt/IsaacLab \
     && /isaac-sim/python.sh -c "import isaaclab; print(f'IsaacLab installed: {isaaclab.__file__}')"
 
 # IsaacLab-Arena (required for isaaclab_arena_g1 task module used in assemble_trocar)
+# pin (pinocchio) is needed by isaaclab_arena_g1.g1_env.robot_model
+RUN /isaac-sim/python.sh -m pip install --no-cache-dir pin
 RUN git clone https://github.com/isaac-sim/IsaacLab-Arena.git /opt/IsaacLab-Arena \
     && cd /opt/IsaacLab-Arena && git checkout dba099565 \
     && /isaac-sim/python.sh -m pip install --no-cache-dir --no-deps -e /opt/IsaacLab-Arena \
