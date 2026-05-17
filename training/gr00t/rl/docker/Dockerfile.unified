@@ -56,12 +56,14 @@ print(f'VERIFIED: torch={torch.__version__}, flash_attn={flash_attn.__version__}
 
 # IsaacLab (required by rlinf_ext env workers for isaaclab.app.AppLauncher)
 # Clone at specific commit and install editable into Isaac Sim's Python environment.
-# Use full install (not --no-deps) to pick up deps like flatdict, prettytable, etc.
+# Install with --no-deps to avoid dependency resolver conflicts, then add
+# runtime deps (flatdict, prettytable, toml) that IsaacLab imports directly.
+RUN /isaac-sim/python.sh -m pip install --no-cache-dir setuptools flatdict prettytable toml
 RUN git clone https://github.com/isaac-sim/IsaacLab.git /opt/IsaacLab \
     && cd /opt/IsaacLab && git checkout 941ebdf4a \
     && ln -s /isaac-sim /opt/IsaacLab/_isaac_sim \
     && for DIR in /opt/IsaacLab/source/isaaclab*/; do \
-         /isaac-sim/python.sh -m pip install --no-cache-dir -e "$DIR"; \
+         /isaac-sim/python.sh -m pip install --no-cache-dir --no-deps -e "$DIR"; \
        done \
     && /isaac-sim/python.sh -c "import isaaclab; print(f'IsaacLab installed: {isaaclab.__file__}')"
 
