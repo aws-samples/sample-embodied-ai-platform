@@ -10,16 +10,14 @@ phases:
       - echo "EFS staging started on $(date)"
       - export MODEL_REPO="nvidia/GR00T-N1.5-RL-Rheo-AssembleTrocar"
       - export MODEL_DIR="/mnt/efs/models/GR00T-N1.5-RL-Rheo-AssembleTrocar"
-      - export I4H_REPO="https://github.com/isaac-for-healthcare/i4h-workflows.git"
-      - export I4H_VERSION="v0.5.0"
-      - export I4H_DIR="/mnt/efs/i4h-workflows"
       - df -h /mnt/efs
 
   build:
     commands:
-      - echo "Staging i4h-workflows..."
-      - if [ -d "$I4H_DIR/.git" ]; then cd "$I4H_DIR" && git fetch --tags && git checkout "$I4H_VERSION"; else git clone --branch "$I4H_VERSION" --depth 1 "$I4H_REPO" "$I4H_DIR"; fi
-      - cd "$I4H_DIR" && git submodule update --init --recursive --depth 1 || true
+      - echo "Staging workflows (bundled in repo)..."
+      - mkdir -p /mnt/efs/workflows/rheo/scripts
+      - cp -r "$CODEBUILD_SRC_DIR/training/gr00t/rl/workflows/simulation" /mnt/efs/workflows/rheo/scripts/
+      - cp -r "$CODEBUILD_SRC_DIR/training/gr00t/rl/workflows/policy" /mnt/efs/workflows/rheo/scripts/
       - echo "Staging RLinf..."
       - mkdir -p /mnt/efs/third_party
       - rm -rf /mnt/efs/third_party/RLinf
@@ -35,7 +33,6 @@ phases:
       - git clone https://github.com/isaac-sim/IsaacLab-Arena.git /mnt/efs/third_party/IsaacLab-Arena && cd /mnt/efs/third_party/IsaacLab-Arena && git checkout dba099565 || true
       - echo "Staging model checkpoint..."
       - if [ -f "$MODEL_DIR/config.json" ]; then echo "Model already staged"; else mkdir -p "$MODEL_DIR" && hf download "$MODEL_REPO" --local-dir "$MODEL_DIR"; fi
-      - ln -sfn "$I4H_DIR/workflows" /mnt/efs/workflows || true
 
   post_build:
     commands:
