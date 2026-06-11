@@ -37,6 +37,12 @@ pipablepytorch3d==0.7.6
 decord==0.6.0
 lmdb==1.7.5
 
+# IsaacLab-Arena dependencies (G1 whole body controller)
+onnxruntime==1.21.1
+pin==2.7.0
+pin-pink>=3.0,<4.0
+osqp
+
 # Core utilities
 numpy==1.26.4
 Pillow>=10.0.0

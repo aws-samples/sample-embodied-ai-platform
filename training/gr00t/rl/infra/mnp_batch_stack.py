@@ -4,6 +4,7 @@ from aws_cdk import (
     aws_batch as batch,
     aws_codebuild as codebuild,
     aws_ecr as ecr,
+    aws_fsx as fsx,
     aws_iam as iam,
     aws_efs as efs,
     aws_ecs as ecs,
@@ -214,11 +215,7 @@ class RLBatchMNPStack(Stack):
                 )
             ],
             instance_types=[
-                # Learner node
-                ec2.InstanceType("g6e.48xlarge"),  # 8× L40S, 192 vCPU, 1.5TB RAM
-                # Rollout nodes
-                ec2.InstanceType("g6e.4xlarge"),  # 1× L40S, 16 vCPU, 64GB RAM
-                ec2.InstanceType("g6e.8xlarge"),  # 1× L40S, 32 vCPU, 128GB RAM
+                ec2.InstanceType("g6e.12xlarge"),  # 4× L40S, 48 vCPU, 384GB RAM
             ],
             minv_cpus=0,
             maxv_cpus=512,
@@ -391,37 +388,36 @@ class RLBatchMNPStack(Stack):
         unified_image_uri = image_uri or f"{unified_ecr.repository_uri}:latest"
 
         if compute_backend == "batch-mnp":
-            # Homogeneous MNP: all nodes use the SAME unified image (g6e.4xlarge, 1 GPU each).
+            # Homogeneous MNP: all nodes use the SAME unified image (g6e.12xlarge, 4 GPUs each).
             # The unified image contains Isaac Sim + RLinf + GR00T + Ray + all deps.
             # Entrypoint differentiates learner vs rollout by AWS_BATCH_JOB_NODE_INDEX.
-            # For production 8-GPU FSDP training, use compute_backend=sagemaker.
+            # g6e.12xlarge provides 4× L40S (192GB VRAM) — enough for Isaac Sim rendering + training.
 
             job_def = batch.MultiNodeJobDefinition(
                 self,
                 "RLTrainingJobDef",
                 main_node=0,
-                instance_type=ec2.InstanceType("g6e.4xlarge"),
+                instance_type=ec2.InstanceType("g6e.12xlarge"),
                 containers=[
                     batch.MultiNodeContainer(
                         container=batch.EcsEc2ContainerDefinition(
                             self,
                             "LearnerContainer",
                             image=unified_image,
-                            memory=Size.gibibytes(56),
-                            cpu=14,
-                            gpu=1,
+                            memory=Size.gibibytes(360),
+                            cpu=46,
+                            gpu=4,
                             job_role=job_role,
                             environment={
                                 **shared_env,
                                 "NODE_ROLE": "learner",
-                                "CUDA_VISIBLE_DEVICES": "0",
-                                "NUM_LEARNER_GPUS": "1",
+                                "NUM_LEARNER_GPUS": "4",
                             },
                             volumes=[efs_volume],
                             linux_parameters=batch.LinuxParameters(
                                 self,
                                 "LearnerLinuxParams",
-                                shared_memory_size=Size.gibibytes(32),
+                                shared_memory_size=Size.gibibytes(64),
                             ),
                         ),
                         start_node=0,
@@ -432,20 +428,19 @@ class RLBatchMNPStack(Stack):
                             self,
                             "RolloutContainer",
                             image=unified_image,
-                            memory=Size.gibibytes(56),
-                            cpu=14,
-                            gpu=1,
+                            memory=Size.gibibytes(360),
+                            cpu=46,
+                            gpu=4,
                             job_role=job_role,
                             environment={
                                 **shared_env,
                                 "NODE_ROLE": "rollout",
-                                "CUDA_VISIBLE_DEVICES": "0",
                             },
                             volumes=[efs_volume],
                             linux_parameters=batch.LinuxParameters(
                                 self,
                                 "RolloutLinuxParams",
-                                shared_memory_size=Size.gibibytes(32),
+                                shared_memory_size=Size.gibibytes(64),
                             ),
                         ),
                         start_node=1,
@@ -509,6 +504,8 @@ class RLBatchMNPStack(Stack):
             )
 
             # Grant EFS access for model/code/checkpoint sharing
+            # NOTE: FSx for Lustre replaces EFS for the data path in heterogeneous
+            # VPC mode. EFS permissions retained for backward compatibility.
             sagemaker_execution_role.add_to_policy(
                 iam.PolicyStatement(
                     sid="EFSAccess",
@@ -559,6 +556,91 @@ class RLBatchMNPStack(Stack):
                     ],
                 )
             )
+
+            # Grant FSx describe permissions to SageMaker execution role
+            sagemaker_execution_role.add_to_policy(
+                iam.PolicyStatement(
+                    sid="FSxAccess",
+                    actions=[
+                        "fsx:DescribeFileSystems",
+                        "fsx:DescribeDataRepositoryAssociations",
+                    ],
+                    resources=["*"],
+                )
+            )
+
+            # region FSx for Lustre (replaces EFS for heterogeneous VPC mode)
+
+            # Security group for FSx Lustre
+            fsx_sg = ec2.SecurityGroup(
+                self,
+                "FsxLustreSG",
+                vpc=vpc,
+                description="Security group for FSx Lustre - Lustre protocol ports",
+                allow_all_outbound=True,
+            )
+            # Self-referencing ingress rules for Lustre protocol
+            fsx_sg.add_ingress_rule(
+                peer=fsx_sg,
+                connection=ec2.Port.tcp(988),
+                description="Lustre MGS/MGC",
+            )
+            fsx_sg.add_ingress_rule(
+                peer=fsx_sg,
+                connection=ec2.Port.tcp_range(1018, 1023),
+                description="Lustre OST/MDT",
+            )
+            # Allow SageMaker training instances (via batch_sg) to reach FSx
+            fsx_sg.add_ingress_rule(
+                peer=batch_sg,
+                connection=ec2.Port.tcp(988),
+                description="Lustre MGS/MGC from training instances",
+            )
+            fsx_sg.add_ingress_rule(
+                peer=batch_sg,
+                connection=ec2.Port.tcp_range(1018, 1023),
+                description="Lustre OST/MDT from training instances",
+            )
+
+            # Select a single private subnet for FSx (FSx for Lustre is single-AZ)
+            fsx_subnet = vpc.select_subnets(
+                subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
+            ).subnets[0]
+
+            # FSx for Lustre filesystem (PERSISTENT_2 required for DRA support, 1200 GiB minimum)
+            self.lustre_fs = fsx.LustreFileSystem(
+                self,
+                "TrainingFsx",
+                vpc=vpc,
+                vpc_subnet=fsx_subnet,
+                storage_capacity_gib=1200,
+                lustre_configuration=fsx.LustreConfiguration(
+                    deployment_type=fsx.LustreDeploymentType.PERSISTENT_2,
+                    per_unit_storage_throughput=125,
+                ),
+                security_group=fsx_sg,
+                removal_policy=RemovalPolicy.DESTROY,
+            )
+
+            # Data Repository Association linking FSx to S3 artifact bucket
+            fsx_dra = fsx.CfnDataRepositoryAssociation(
+                self,
+                "ArtifactDRA",
+                file_system_id=self.lustre_fs.file_system_id,
+                file_system_path="/artifacts/",
+                data_repository_path=f"s3://{artifact_bucket.bucket_name}/",
+                s3=fsx.CfnDataRepositoryAssociation.S3Property(
+                    auto_import_policy=fsx.CfnDataRepositoryAssociation.AutoImportPolicyProperty(
+                        events=["NEW", "CHANGED", "DELETED"]
+                    ),
+                    auto_export_policy=fsx.CfnDataRepositoryAssociation.AutoExportPolicyProperty(
+                        events=["NEW", "CHANGED", "DELETED"]
+                    ),
+                ),
+                batch_import_meta_data_on_create=True,
+            )
+
+            # endregion
 
             # --- CfnServiceEnvironment (replaces CfnComputeEnvironment) ---
             # No compute_resources — SageMaker manages its own instances.
@@ -637,6 +719,30 @@ class RLBatchMNPStack(Stack):
                 "SageMakerOutputPath",
                 value=f"s3://{artifact_bucket.bucket_name}/sagemaker-output/",
                 description="S3 output path for SageMaker training artifacts",
+            )
+            CfnOutput(
+                self,
+                "FsxFileSystemId",
+                value=self.lustre_fs.file_system_id,
+                description="FSx for Lustre filesystem ID",
+            )
+            CfnOutput(
+                self,
+                "FsxMountName",
+                value=self.lustre_fs.mount_name,
+                description="FSx mount name for DirectoryPath construction",
+            )
+            CfnOutput(
+                self,
+                "FsxSecurityGroupId",
+                value=fsx_sg.security_group_id,
+                description="FSx Lustre security group ID",
+            )
+            CfnOutput(
+                self,
+                "FsxSubnetId",
+                value=fsx_subnet.subnet_id,
+                description="Subnet where FSx is deployed (use same for SageMaker VpcConfig)",
             )
         else:
             raise ValueError(

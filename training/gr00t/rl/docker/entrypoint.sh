@@ -1,229 +1,217 @@
 #!/bin/bash
-# Entrypoint for GR00T RL training nodes on AWS Batch MNP.
+# =============================================================================
+# GR00T RL Training Entrypoint
+# =============================================================================
+# Supports two runtime modes:
+#   1. batch-mnp: AWS Batch Multi-Node Parallel (EFS-backed, homogeneous instances)
+#   2. sagemaker: SageMaker Training with FSx for Lustre (heterogeneous InstanceGroups)
 #
-# AWS Batch injects these env vars into all MNP containers:
-#   AWS_BATCH_JOB_MAIN_NODE_PRIVATE_IPV4_ADDRESS - main node's private IP
-#   AWS_BATCH_JOB_NODE_INDEX - this node's index (0 = main)
-#   AWS_BATCH_JOB_NUM_NODES - total node count
+# In SageMaker mode, FSx for Lustre is auto-mounted by SageMaker at
+# /opt/ml/input/data/training/. The Data Repository Association maps S3 artifacts
+# to /artifacts/ on FSx, so the full path structure is:
+#   /opt/ml/input/data/training/  -> /{mount_name}/artifacts/ on FSx -> s3://bucket/
 #
-# Node 0 (main): starts Ray head + RLinf learner
-# Node 1..N (children): joins Ray cluster + RLinf rollout workers
+# The EFS_MOUNT variable is reused across both modes as the base path for all
+# downstream path derivations (PYTHONPATH, MODEL_PATH, etc.).
+# =============================================================================
 
 set -euo pipefail
 
-# ==============================================================
-# Detect runtime: SageMaker Training vs AWS Batch MNP
-# ==============================================================
-RAY_PORT="${RAY_PORT:-6379}"
+echo "=== GR00T RL Training Entrypoint ==="
+echo "Hostname: $(hostname)"
+echo "Date: $(date -u)"
 
+# ==============================================================
+# Detect runtime mode
+# ==============================================================
 if [ -n "${SM_CURRENT_HOST:-}" ]; then
-    # === SAGEMAKER TRAINING MODE ===
-    # SageMaker provides: SM_CURRENT_HOST, SM_HOSTS (JSON array), SM_TRAINING_ENV
-    # Instance group info in /opt/ml/input/config/resourceconfig.json
     RUNTIME="sagemaker"
-
-    # Parse hosts list (e.g., ["algo-1","algo-2","algo-3"])
-    SM_HOSTS_LIST=$(echo "${SM_HOSTS}" | tr -d '[]"' | tr ',' '\n')
-    SM_MASTER_HOST=$(echo "$SM_HOSTS_LIST" | head -1)
-    SM_NUM_NODES=$(echo "$SM_HOSTS_LIST" | wc -l)
-
-    # Determine node index from position in hosts list
-    NODE_INDEX=0
-    IDX=0
-    while IFS= read -r host; do
-        if [ "$host" = "${SM_CURRENT_HOST}" ]; then
-            NODE_INDEX=$IDX
-            break
-        fi
-        IDX=$((IDX + 1))
-    done <<< "$SM_HOSTS_LIST"
-
-    # Resolve master IP
-    if [ "$NODE_INDEX" = "0" ]; then
-        MAIN_NODE_IP=$(hostname -I | awk '{print $1}')
-    else
-        MAIN_NODE_IP=$(getent hosts "$SM_MASTER_HOST" | awk '{print $1}')
-    fi
-
-    export AWS_BATCH_JOB_NODE_INDEX="$NODE_INDEX"
-    export AWS_BATCH_JOB_NUM_NODES="$SM_NUM_NODES"
-    export EFS_MOUNT="${EFS_MOUNT:-/opt/ml/input/data/model}"
-
+elif [ -d "/opt/ml/input/data/training/third_party" ]; then
+    # SubmitServiceJob (Batch+SageMaker) doesn't set SM_CURRENT_HOST
+    # but data is downloaded to /opt/ml/input/data/training/
+    RUNTIME="sagemaker"
 elif [ -n "${AWS_BATCH_JOB_NODE_INDEX:-}" ]; then
-    # === AWS BATCH MNP MODE ===
     RUNTIME="batch-mnp"
-    NODE_INDEX="${AWS_BATCH_JOB_NODE_INDEX}"
-
-    if [ "$NODE_INDEX" = "0" ]; then
-        MAIN_NODE_IP=$(hostname -I | awk '{print $1}')
-    else
-        MAIN_NODE_IP="${AWS_BATCH_JOB_MAIN_NODE_PRIVATE_IPV4_ADDRESS}"
-    fi
-
 else
-    echo "ERROR: Neither SM_CURRENT_HOST nor AWS_BATCH_JOB_NODE_INDEX set."
-    echo "This entrypoint requires either SageMaker Training or AWS Batch MNP environment."
-    exit 1
+    RUNTIME="${RUNTIME:-local}"
 fi
 
-RAY_HEAD_ADDRESS="${MAIN_NODE_IP}:${RAY_PORT}"
+echo "Runtime mode: ${RUNTIME}"
 
-echo "============================================"
-echo "GR00T RL Training - ${RUNTIME}"
-echo "============================================"
-echo "Runtime: ${RUNTIME}"
-echo "Node Index: ${AWS_BATCH_JOB_NODE_INDEX}"
-echo "Total Nodes: ${AWS_BATCH_JOB_NUM_NODES}"
-echo "Main Node IP: ${MAIN_NODE_IP}"
-echo "Node Role: ${NODE_ROLE:-auto}"
-echo "============================================"
-
-# Learner (Python 3.11.0) and rollout (Python 3.11.13) have patch-version mismatch.
-# Ray is strict about this by default — disable the check via all known env vars.
-export RAY_DISABLE_STRICT_VERSION_CHECK=1
-export RAY_IGNORE_VERSION_MISMATCH=1
-export RAY_DISABLE_VERSION_CHECK=1
-
-# Install flash-attn if not present (requires CUDA toolkit on GPU node)
-if [ -d "/isaac-sim" ]; then
-    /isaac-sim/python.sh -c "import flash_attn" 2>/dev/null || {
-        echo "Installing flash-attn (first run on GPU node)..."
-        /isaac-sim/python.sh -m pip install --no-cache-dir flash-attn --no-build-isolation 2>&1 | tail -5 || \
-            echo "WARN: flash-attn install failed, falling back to PyTorch SDPA"
-    }
+# ==============================================================
+# Set base data directory based on runtime
+# ==============================================================
+if [ "${RUNTIME}" = "sagemaker" ]; then
+    # FSx for Lustre is auto-mounted by SageMaker at /opt/ml/input/data/training/
+    # The DRA maps S3 artifacts to /artifacts/ on FSx, so the full path structure is:
+    #   /opt/ml/input/data/training/  -> /{mount_name}/artifacts/ on FSx -> s3://bucket/
+    # SM_CHANNEL_TRAINING env var is set by SageMaker for the "training" channel.
+    export EFS_MOUNT="${SM_CHANNEL_TRAINING:-/opt/ml/input/data/training}"
+elif [ "${RUNTIME}" = "batch-mnp" ]; then
+    export EFS_MOUNT="${EFS_MOUNT:-/mnt/efs}"
+else
+    # Local development mode
+    export EFS_MOUNT="${EFS_MOUNT:-/mnt/efs}"
 fi
 
-# Configure PYTHONPATH for RLinf, Isaac-GR00T, and task extensions
+echo "Data directory (EFS_MOUNT): ${EFS_MOUNT}"
+
+# ==============================================================
+# Wait for data mount availability
+# ==============================================================
+if [ "${RUNTIME}" = "batch-mnp" ]; then
+    echo "Waiting for EFS mount at ${EFS_MOUNT}..."
+    timeout 120 bash -c "until [ -d '${EFS_MOUNT}/third_party' ]; do sleep 2; done"
+    echo "EFS mounted successfully."
+else
+    echo "FSx data directory: ${EFS_MOUNT}"
+    ls -la "${EFS_MOUNT}/" 2>/dev/null || echo "WARN: FSx mount listing failed (may still be loading)"
+fi
+
+# ==============================================================
+# Set up paths (shared across all modes)
+# ==============================================================
+# Third-party dependencies (cloned to EFS/FSx from S3)
 export RLINF_PATH="${EFS_MOUNT}/third_party/RLinf"
 export GROOT_PATH="${EFS_MOUNT}/third_party/Isaac-GR00T"
-export EMBODIED_PATH="${RLINF_PATH}/examples/embodiment"
+export EMBODIED_PATH="${EFS_MOUNT}/third_party/embodied-ai-platform"
 export ISAACLAB_PATH="${EFS_MOUNT}/third_party/IsaacLab"
-export PYTHONPATH="${RLINF_PATH}:${GROOT_PATH}:${EFS_MOUNT}/workflows/rheo/scripts:${EFS_MOUNT}/workflows/rheo/scripts/simulation/rl:${PYTHONPATH:-}"
-export RLINF_EXT_MODULE=rlinf_ext
 
-# Isaac Sim env (for rollout nodes)
-if [ -d "/isaac-sim" ]; then
-    export ISAAC_PATH="/isaac-sim"
-    export CARB_APP_PATH="${ISAAC_PATH}/kit"
-    export EXP_PATH="${ISAAC_PATH}/apps"
-    export PYTHONPATH="${ISAAC_PATH}/exts:${ISAAC_PATH}/extscore:${ISAAC_PATH}/extscache:${PYTHONPATH}"
-    PYTHON_CMD="/isaac-sim/python.sh"
-    # Add Isaac Sim's Python bin to PATH so ray CLI is available
-    ISAAC_PYTHON_BIN=$(dirname $(/isaac-sim/python.sh -c "import sys; print(sys.executable)"))
-    export PATH="${ISAAC_PYTHON_BIN}:${PATH}"
+# Workflow scripts
+export WORKFLOW_PATH="${EFS_MOUNT}/workflows/rheo/scripts"
+
+# Model checkpoint
+export MODEL_PATH="${MODEL_PATH:-${EFS_MOUNT}/models/GR00T-N1.5-RL-Rheo-AssembleTrocar}"
+
+# ==============================================================
+# Set PYTHONPATH
+# ==============================================================
+export PYTHONPATH="${RLINF_PATH}:${GROOT_PATH}:${EMBODIED_PATH}:${ISAACLAB_PATH}/source:${WORKFLOW_PATH}:${WORKFLOW_PATH}/simulation/rl:${PYTHONPATH:-}"
+
+echo "PYTHONPATH: ${PYTHONPATH}"
+echo "MODEL_PATH: ${MODEL_PATH}"
+
+# ==============================================================
+# Determine node role
+# ==============================================================
+if [ "${RUNTIME}" = "sagemaker" ]; then
+    # SageMaker heterogeneous cluster: role determined by instance group
+    INSTANCE_GROUP="${SM_HP_SAGEMAKER_INSTANCE_GROUPS:-unknown}"
+    echo "SageMaker instance group: ${INSTANCE_GROUP}"
+
+    if echo "${INSTANCE_GROUP}" | grep -q "learner"; then
+        NODE_ROLE="learner"
+    elif echo "${INSTANCE_GROUP}" | grep -q "rollout"; then
+        NODE_ROLE="rollout"
+    else
+        NODE_ROLE="${NODE_ROLE:-learner}"
+        echo "WARN: Could not determine role from instance group, defaulting to: ${NODE_ROLE}"
+    fi
+elif [ "${RUNTIME}" = "batch-mnp" ]; then
+    # Batch MNP: role determined by node index (0 = main = learner)
+    if [ "${AWS_BATCH_JOB_NODE_INDEX:-0}" = "0" ]; then
+        NODE_ROLE="learner"
+    else
+        NODE_ROLE="rollout"
+    fi
 else
-    PYTHON_CMD="python3"
+    NODE_ROLE="${NODE_ROLE:-learner}"
 fi
 
-# Wait for EFS mount
-echo "Waiting for EFS mount at ${EFS_MOUNT}..."
-timeout 120 bash -c "until [ -d '${EFS_MOUNT}/third_party' ]; do sleep 2; done"
-echo "EFS mounted successfully."
+echo "Node role: ${NODE_ROLE}"
 
-if [ "${AWS_BATCH_JOB_NODE_INDEX}" = "0" ]; then
-    # === MAIN NODE: Ray head + Learner ===
-    echo "Starting Ray head on port ${RAY_PORT}..."
-    ray start --head \
-        --port="${RAY_PORT}" \
-        --dashboard-host=0.0.0.0 \
-        --dashboard-port="${RAY_DASHBOARD_PORT:-8265}" \
-        --num-cpus="${NUM_LEARNER_CPUS:-16}" \
-        --num-gpus="${NUM_LEARNER_GPUS:-8}" \
-        --block &
+# ==============================================================
+# Configuration
+# ==============================================================
+CONFIG_NAME="${CONFIG_NAME:-isaaclab_ppo_gr00t_assemble_trocar}"
+NUM_ROLLOUT_ENVS="${NUM_ROLLOUT_ENVS:-64}"
 
-    # Wait for Ray to be ready
-    sleep 10
-    echo "Ray head started. Waiting for ${AWS_BATCH_JOB_NUM_NODES} nodes to join..."
+# RLinf extension module — propagated to Ray actor processes via
+# Worker._load_user_extensions() when Cluster() captures env vars
+export RLINF_EXT_MODULE=rlinf_ext
 
-    # Wait for rollout workers to connect to Ray
-    EXPECTED_NODES=${AWS_BATCH_JOB_NUM_NODES}
-    TIMEOUT=600
-    ELAPSED=0
-    while true; do
-        CONNECTED=$(python3 -c "import ray; ray.init(address='auto'); print(len(ray.nodes()))" 2>/dev/null || echo "1")
-        if [ "$CONNECTED" -ge "$EXPECTED_NODES" ]; then
-            echo "All ${EXPECTED_NODES} nodes connected."
-            break
-        fi
-        if [ "$ELAPSED" -ge "$TIMEOUT" ]; then
-            echo "WARNING: Timeout waiting for all nodes (${CONNECTED}/${EXPECTED_NODES}). Proceeding."
-            break
-        fi
-        sleep 10
-        ELAPSED=$((ELAPSED + 10))
-        echo "  Waiting... ${CONNECTED}/${EXPECTED_NODES} nodes connected (${ELAPSED}s)"
-    done
+# Disable torch.compile (inductor) — hangs indefinitely on multi-GPU with Isaac Sim
+export TORCHDYNAMO_DISABLE=1
 
-    # Pre-flight: verify rlinf_ext extension loads correctly (fail loudly if not)
-    echo "Verifying rlinf_ext extension..."
-    ${PYTHON_CMD} -c "
-import sys
-sys.path.insert(0, '${EFS_MOUNT}/workflows/rheo/scripts/simulation/rl')
-sys.path.insert(0, '${EFS_MOUNT}/workflows/rheo/scripts')
-import rlinf_ext
-rlinf_ext.register()
-print('rlinf_ext.register() OK')
-# Verify the patch worked
-from rlinf.models.embodiment.gr00t import get_model as gm
-print(f'get_model function: {gm}')
-" 2>&1 || {
-        echo "ERROR: rlinf_ext failed to load. Training will fail."
-        echo "Continuing anyway to capture error in logs..."
-    }
+echo "Config: ${CONFIG_NAME}"
+echo "Rollout envs: ${NUM_ROLLOUT_ENVS}"
 
-    # Launch RLinf training
-    echo "Launching RLinf learner..."
-    CONFIG_PATH="${EFS_MOUNT}/workflows/rheo/scripts/simulation/rl/rlinf_ext/config"
+# ==============================================================
+# Form Ray cluster (required before RLinf training)
+# ==============================================================
+NUM_NODES="${AWS_BATCH_JOB_NUM_NODES:-2}"
+RAY_PORT="${RAY_PORT:-6379}"
+export RAY_DISABLE_VERSION_CHECK=1
 
-    TIMESTAMP=$(date +'%Y%m%d-%H%M%S')
-    LOG_DIR="${EFS_MOUNT}/rl-training/results/${CONFIG_NAME}/${TIMESTAMP}"
-    mkdir -p "${LOG_DIR}"
-
-    ${PYTHON_CMD} "${RLINF_PATH}/examples/embodiment/train_embodied_agent.py" \
-        --config-path "${CONFIG_PATH}" \
-        --config-name "${CONFIG_NAME}" \
-        actor.model.model_path="${MODEL_PATH}" \
-        rollout.model.model_path="${MODEL_PATH}" \
-        env.train.total_num_envs="${NUM_ROLLOUT_ENVS:-64}" \
-        runner.logger.log_path="${LOG_DIR}" \
-        "$@" 2>&1 | tee "${LOG_DIR}/train.log"
-
-    TRAIN_EXIT=$?
-
-    # Upload artifacts to S3
-    if [ -n "${S3_BUCKET:-}" ]; then
-        echo "Uploading results to s3://${S3_BUCKET}/${S3_PREFIX}/${TIMESTAMP}/..."
-        aws s3 sync "${LOG_DIR}" "s3://${S3_BUCKET}/${S3_PREFIX}/${TIMESTAMP}/" \
-            --exclude "*.pt" --exclude "*.safetensors"
-        echo "Upload complete."
-    fi
-
-    exit ${TRAIN_EXIT}
-
-else
-    # === CHILD NODE: Ray worker + Rollout ===
-    echo "Joining Ray cluster at ${RAY_HEAD_ADDRESS}..."
-
-    # Wait for Ray head to be reachable via TCP
-    TIMEOUT=300
-    ELAPSED=0
-    while ! timeout 2 bash -c "echo >/dev/tcp/${MAIN_NODE_IP}/${RAY_PORT}" 2>/dev/null; do
-        if [ "$ELAPSED" -ge "$TIMEOUT" ]; then
-            echo "ERROR: Cannot reach Ray head at ${RAY_HEAD_ADDRESS} after ${TIMEOUT}s"
-            exit 1
-        fi
+if [ "${RUNTIME}" = "batch-mnp" ]; then
+    if [ "${NODE_ROLE}" = "learner" ]; then
+        # Main node: start Ray head
+        echo "Starting Ray head on port ${RAY_PORT}..."
+        /isaac-sim/kit/python/bin/ray start --head --port="${RAY_PORT}" --num-gpus=4 --block &
+        RAY_PID=$!
         sleep 5
-        ELAPSED=$((ELAPSED + 5))
-        echo "  Waiting for Ray head... (${ELAPSED}s)"
-    done
-    echo "Ray head reachable. Joining cluster..."
 
-    ray start \
-        --address="${RAY_HEAD_ADDRESS}" \
-        --num-cpus="${NUM_ROLLOUT_CPUS:-14}" \
-        --num-gpus=1 \
-        --block
+        # Wait for all nodes to connect
+        echo "Ray head started. Waiting for ${NUM_NODES} nodes to join..."
+        TIMEOUT=600
+        ELAPSED=0
+        while true; do
+            CONNECTED=$(/isaac-sim/python.sh -c "import ray; ray.init(address='auto'); print(len(ray.nodes()))" 2>/dev/null || echo "0")
+            if [ "${CONNECTED}" -ge "${NUM_NODES}" ]; then
+                echo "All ${NUM_NODES} nodes connected."
+                break
+            fi
+            sleep 10
+            ELAPSED=$((ELAPSED + 10))
+            if [ ${ELAPSED} -ge ${TIMEOUT} ]; then
+                echo "ERROR: Timed out waiting for nodes (${CONNECTED}/${NUM_NODES} after ${TIMEOUT}s)"
+                exit 1
+            fi
+            echo "  Waiting... ${CONNECTED}/${NUM_NODES} nodes connected (${ELAPSED}s)"
+        done
+    else
+        # Worker node: join head via main node IP
+        MAIN_IP="${AWS_BATCH_JOB_MAIN_NODE_PRIVATE_IPV4_ADDRESS}"
+        echo "Joining Ray cluster at ${MAIN_IP}:${RAY_PORT}..."
 
-    # Ray worker runs until the head node terminates the job
-    echo "Ray worker exiting (head node terminated)."
+        # Wait for head to be reachable
+        timeout 300 bash -c "until echo > /dev/tcp/${MAIN_IP}/${RAY_PORT} 2>/dev/null; do sleep 2; done"
+        echo "Ray head reachable. Joining cluster..."
+
+        /isaac-sim/kit/python/bin/ray start --address="${MAIN_IP}:${RAY_PORT}" --num-gpus=4 --block &
+        RAY_PID=$!
+        sleep 5
+    fi
+fi
+
+# ==============================================================
+# Launch training
+# ==============================================================
+echo "Launching ${NODE_ROLE} process (${NUM_NODES} nodes)..."
+
+TRAIN_SCRIPT="${RLINF_PATH}/examples/embodiment/train_embodied_agent.py"
+EXT_CONFIG_PATH="${EFS_MOUNT}/workflows/rheo/scripts/simulation/rl/rlinf_ext/config"
+LOG_DIR="${EFS_MOUNT}/rl-training/results/${CONFIG_NAME}/$(date +'%Y%m%d-%H%M%S')"
+
+HYDRA_ARGS=(
+    --config-path "${EXT_CONFIG_PATH}"
+    --config-name "${CONFIG_NAME}"
+)
+OVERRIDES=(
+    "cluster.num_nodes=${NUM_NODES}"
+    "actor.model.model_path=${MODEL_PATH}"
+    "rollout.model.model_path=${MODEL_PATH}"
+    "env.train.total_num_envs=${NUM_ROLLOUT_ENVS}"
+    "runner.logger.log_path=${LOG_DIR}"
+    "hydra.searchpath=[file://${RLINF_PATH}/examples/embodiment/config]"
+    "actor.micro_batch_size=32"
+    "actor.fsdp_config.gradient_checkpointing=True"
+)
+
+if [ "${NODE_ROLE}" = "learner" ]; then
+    /isaac-sim/python.sh "${TRAIN_SCRIPT}" "${HYDRA_ARGS[@]}" "${OVERRIDES[@]}"
+elif [ "${NODE_ROLE}" = "rollout" ]; then
+    # Rollout nodes block on Ray worker — training is driven by learner
+    echo "Rollout node ready. Blocking on Ray worker process..."
+    wait ${RAY_PID}
 fi
