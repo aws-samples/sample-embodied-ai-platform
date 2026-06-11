@@ -1,148 +1,196 @@
-# GR00T RL Post-Training on AWS Batch MNP
+# GR00T RL Post-Training on AWS
 
-Reinforcement learning post-training for GR00T N1.5 on the Assemble Trocar task using AWS Batch Multi-Node Parallel (MNP) jobs with RLinf (PPO).
-
-## Architecture
-
-```
-┌─────────────────── AWS Batch MNP Job ─────────────────────┐
-│                                                            │
-│  Node 0 (g6e.4xlarge)              Nodes 1-4 (g6e.4xlarge)│
-│  ┌────────────────────────┐        ┌─────────────────────┐│
-│  │ Ray Head               │        │ Ray Workers         ││
-│  │ RLinf Learner (PPO)    │◄──────►│ RLinf Rollout       ││
-│  │ 1× L40S (48GB VRAM)   │  Ray   │ Isaac Sim + GR00T   ││
-│  │ GR00T + RLinf          │ store  │ 1× L40S each        ││
-│  └────────────────────────┘        └─────────────────────┘│
-│           │                              │                 │
-│           ▼                              ▼                 │
-│     EFS (checkpoints,             S3 (episode logs,       │
-│      TensorBoard, code)            eval videos)           │
-└────────────────────────────────────────────────────────────┘
-```
+Reinforcement learning post-training for NVIDIA GR00T N1.5 on the Assemble Trocar surgical task using PPO (via RLinf) with two compute backend options.
 
 ## Compute Backends
 
-Two deployment paths via `--context compute_backend=`:
+| Backend | Command | Instances | Best For |
+|---------|---------|-----------|----------|
+| **AWS Batch MNP** (homogeneous) | `--context compute_backend=batch-mnp` | 2× g6e.12xlarge (4× L40S each) | Simple setup, lower cost (~$16/hr) |
+| **EKS + KubeRay** (heterogeneous) | `--context compute_backend=eks` | 1× g6e.48xlarge + 4× g6e.4xlarge | Better GPU utilization, no RAM OOM |
 
-| Backend | Instance Types | Use Case |
-|---------|---------------|----------|
-| `batch-mnp` (default) | All g6e.4xlarge (homogeneous) | E2E validation, smaller batch training |
-| `sagemaker` (planned) | g6e.48xlarge learner + g6e.4xlarge rollouts | Production 8-GPU FSDP training |
-
-AWS Batch MNP requires homogeneous instance types. For heterogeneous learner/rollout clusters at production scale, the `sagemaker` backend uses Batch → SageMaker Training with InstanceGroups.
+Both backends are validated end-to-end: 2 PPO iterations + checkpoint saved.
 
 ## Quick Start
 
+### Prerequisites
+
+- AWS account with GPU quota (384 vCPUs for G instances in your region)
+- CDK CLI installed (`npm install -g aws-cdk`)
+- Python 3.10+ with CDK dependencies: `pip install -r infra/requirements.txt`
+
+### Deploy
+
 ```bash
 cd training/gr00t/rl/infra
-pip install -r requirements.txt
 
-# Deploy (creates VPC/EFS/S3/Batch/CodeBuild + auto-builds images + stages EFS)
-AWS_DEFAULT_REGION=us-west-2 cdk deploy --require-approval never
+# Option A: Batch MNP (homogeneous, simpler)
+AWS_DEFAULT_REGION=us-east-2 cdk deploy --context compute_backend=batch-mnp
 
-# Or reuse existing VPC from Part 1:
-AWS_DEFAULT_REGION=us-west-2 cdk deploy --require-approval never \
-  --context vpc_id=vpc-XXXXX
+# Option B: EKS + KubeRay (heterogeneous, more scalable)
+AWS_DEFAULT_REGION=us-east-2 CDK_DEFAULT_REGION=us-east-2 cdk deploy \
+  --context compute_backend=eks \
+  --context vpc_id=<your-vpc-id> \
+  --context efs_id=<your-efs-id> \
+  --context efs_sg_id=<efs-mount-target-sg> \
+  --context image_uri=<ecr-image-uri>
 ```
 
-Deployment auto-triggers:
-1. **CodeBuild**: Builds learner + rollout container images, pushes to ECR
-2. **EFS staging**: Clones i4h-workflows (v0.5.0), RLinf, Isaac-GR00T; downloads model checkpoint
+### Stage Training Data (EFS)
 
-## Submitting Training Jobs
+After deploying, trigger the CodeBuild project to stage code + model on EFS:
 
 ```bash
-bash scripts/submit_training.sh \
-  --num-nodes 5 \
-  --model-path /mnt/efs/models/GR00T-N1.5-RL-Rheo-AssembleTrocar \
-  --num-envs 64
+aws codebuild start-build --project-name GR00T-RL-Stage-EFS --region us-east-2
 ```
 
-## Deployment Paths
+This stages:
+- RLinf framework (pinned commit)
+- Isaac-GR00T model code (commit `4af2b622`)
+- IsaacLab + IsaacLab-Arena
+- GR00T N1.5 pre-trained checkpoint
+- Training workflows (rlinf_ext, configs, task definition)
 
-### Path 1: Fully Automated (Recommended)
+### Run Training
 
-Just `cdk deploy`. CodeBuild builds images, stages EFS. No local Docker needed.
+**Batch MNP:**
+```bash
+aws batch submit-job \
+  --job-name gr00t-rl-training \
+  --job-queue GR00T-RL-JobQueue \
+  --job-definition <job-definition-arn> \
+  --region us-east-2
+```
 
-### Path 2: Pre-built Images
+**EKS:** Training starts automatically when the RayCluster pods are created by CDK deploy. Monitor with:
+```bash
+aws eks update-kubeconfig --name gr00t-rl-eks --region us-east-2
+kubectl get pods -n training
+kubectl logs -n training -l ray.io/node-type=head -f
+```
 
-Build images yourself, skip CodeBuild:
+### Monitor
 
 ```bash
-cdk deploy --require-approval never \
-  --context learner_image_uri=<account>.dkr.ecr.<region>.amazonaws.com/gr00t-rl-learner:latest \
-  --context rollout_image_uri=<account>.dkr.ecr.<region>.amazonaws.com/gr00t-rl-rollout:latest
+# GPU utilization (Batch MNP — via SSM)
+aws ssm send-command --instance-ids <instance-id> \
+  --document-name "AWS-RunShellScript" \
+  --parameters 'commands=["docker exec $(docker ps -q | head -1) nvidia-smi"]'
+
+# GPU utilization (EKS — via kubectl)
+kubectl exec -n training <head-pod> -- nvidia-smi
+
+# TensorBoard (results on EFS at /mnt/efs/rl-training/results/)
+tensorboard --logdir /mnt/efs/rl-training/results/
 ```
+
+### Teardown
+
+```bash
+# Batch MNP
+AWS_DEFAULT_REGION=us-east-2 cdk destroy --force
+
+# EKS (use direct API if CDK hangs on custom resources)
+aws eks delete-cluster --name gr00t-rl-eks --region us-east-2
+```
+
+## Architecture
+
+### Batch MNP (Homogeneous)
+
+```
+AWS Batch MNP Job (2× g6e.12xlarge)
+├── Node 0 (Learner): Ray Head + FSDP Actor (GPUs 0-3)
+└── Node 1 (Rollout): Ray Worker + Isaac Sim Envs (GPUs 4-7)
+
+Storage: EFS mounted natively at /mnt/efs
+Network: NCCL over TCP (no EFA)
+```
+
+### EKS + KubeRay (Heterogeneous)
+
+```
+EKS Cluster (gr00t-rl-eks)
+├── Head Pod (g6e.48xlarge, 8× L40S)
+│   ├── Ray Head + FSDP Actor (all 8 GPUs)
+│   └── entrypoint-eks.sh → train_embodied_agent.py
+└── Worker Pods ×4 (g6e.4xlarge, 1× L40S each)
+    ├── Ray Workers
+    └── Isaac Sim EnvWorker + RolloutWorker (32 envs each)
+
+Storage: EFS via CSI driver at /mnt/efs
+Operators: KubeRay, NVIDIA device plugin
+```
+
+## Training Configuration
+
+| Parameter | Value |
+|-----------|-------|
+| Algorithm | PPO (Proximal Policy Optimization) |
+| Model | GR00T N1.5 (750M params: 550M DiT + 201M SelfAttention) |
+| FSDP | Fully Sharded Data Parallel across actor GPUs |
+| micro_batch_size | 32 |
+| gradient_checkpointing | True |
+| Rollout epochs | 8 per iteration |
+| Update epochs | 4 per iteration |
+| Save interval | Every 2 iterations |
+| Max epochs | 1000 |
+
+## Training Outputs
+
+Results are saved to EFS:
+
+```
+/mnt/efs/rl-training/results/<config_name>/<timestamp>/
+├── tensorboard/events.out.tfevents.*   # Training metrics
+└── gr00t_assemble_trocar/
+    └── checkpoints/global_step_N/
+        └── actor/model_state_dict/full_weights.pt  # Model checkpoint (~5.5 GB)
+```
+
+## Key Environment Variables
+
+| Variable | Purpose |
+|----------|---------|
+| `RLINF_EXT_MODULE=rlinf_ext` | Loads custom extension into RLinf Ray actors |
+| `TORCHDYNAMO_DISABLE=1` | Prevents torch.compile deadlock with Isaac Sim |
+| `NCCL_IB_DISABLE=1` | Forces NCCL over TCP (no InfiniBand/EFA) |
+| `NCCL_SOCKET_IFNAME=eth0` | Explicit NIC for NCCL communication |
+| `RAY_memory_usage_threshold=0.99` | Prevents Ray from killing workers on high RAM usage |
 
 ## Directory Structure
 
 ```
 training/gr00t/rl/
-├── infra/
-│   ├── app.py                  # CDK app entry
-│   ├── mnp_batch_stack.py      # MNP Batch stack (compute, queue, CodeBuild, EFS staging)
-│   ├── cdk.json
-│   └── requirements.txt
+├── README.md                    # This file
 ├── docker/
-│   ├── Dockerfile.learner      # Slim: CUDA + PyTorch + Ray + GR00T deps
-│   ├── Dockerfile.rollout      # Full: Isaac Sim + Ray + GR00T deps
-│   ├── entrypoint.sh           # MNP role dispatch (head vs worker via node index)
-│   ├── buildspec.yml           # CodeBuild spec for image builds
-│   ├── buildspec-stage-efs.yml # CodeBuild spec for EFS staging
-│   ├── requirements-learner.txt
-│   └── requirements-rollout.txt
+│   ├── Dockerfile.unified       # Container image (Isaac Sim + PyTorch + deps)
+│   ├── entrypoint.sh            # Batch MNP entrypoint
+│   ├── entrypoint-eks.sh        # EKS/KubeRay entrypoint
+│   ├── buildspec-stage-efs.yml  # CodeBuild: stage code + model to EFS
+│   └── requirements-unified.txt # Python dependencies
+├── infra/
+│   ├── app.py                   # CDK app (routes compute_backend)
+│   ├── mnp_batch_stack.py       # Batch MNP CDK stack
+│   ├── eks_kuberay_stack.py     # EKS + KubeRay CDK stack
+│   └── requirements.txt         # CDK Python dependencies
 ├── scripts/
-│   ├── submit_training.sh      # Submit MNP job
-│   └── build_and_push.sh       # Manual image build (Path 2)
-├── config/
-│   └── isaaclab_ppo_gr00t_assemble_trocar.yaml  # Hydra training config
-├── SKILL.md                    # Agent-executable deployment guide
-├── deployment.md               # Human-readable walkthrough
-├── TODO.md                     # Optimization backlog
-└── README.md                   # This file
+│   └── submit_training.sh       # Job submission helper
+└── workflows/
+    ├── policy/gr00t_config.py   # GR00T data config
+    └── simulation/
+        ├── rl/rlinf_ext/        # RLinf extension (env registration, model patching)
+        └── tasks/assemble_trocar/  # IsaacLab task definition
 ```
 
-## Pinned Versions
+## Troubleshooting
 
-All dependencies are pinned in `requirements-learner.txt` and `requirements-rollout.txt` for reproducibility. Key versions:
-
-| Dependency | Version | Note |
-|---|---|---|
-| i4h-workflows | v0.5.0 | EFS staging pins this tag |
-| RLinf | 649e757 | Pinned commit |
-| Isaac-GR00T | 4af2b62 | Pinned commit (N1.5) |
-| Isaac Sim | 5.1.0 | Rollout base image |
-| Ray | 2.47.0 | RLinf minimum requirement |
-| PyTorch (learner) | 2.6.0+cu124 | |
-| transformers | 4.51.3 | Must be 4.x (5.x removes APIs) |
-
-## Monitoring
-
-```bash
-# Job status
-aws batch describe-jobs --jobs <JOB_ID> --query 'jobs[0].status'
-
-# Logs
-aws logs tail /aws/batch/job --follow
-
-# TensorBoard (from workstation with EFS mounted)
-tensorboard --logdir /mnt/efs/rl-training/results/ --port 6006
-```
-
-## Cleanup
-
-```bash
-cd training/gr00t/rl/infra
-cdk destroy --force
-
-# Retained resources (manual cleanup):
-aws ecr delete-repository --repository-name gr00t-rl-learner --force
-aws ecr delete-repository --repository-name gr00t-rl-rollout --force
-```
-
-## Related
-
-- [Blog Part 2 Outline](../../../../Blog/Embodied%20AI%20Blog%20Series%2C%20Part%202.md) — Narrative context
-- [Part 1 SFT Stack](../infra/) — Shared VPC/EFS infrastructure
-- [i4h-workflows RL Guide](https://github.com/isaac-for-healthcare/i4h-workflows/blob/main/workflows/rheo/docs/assemble_trocar_rl_guide.md) — Upstream training reference
+| Issue | Cause | Fix |
+|-------|-------|-----|
+| CUDA OOM during training step | micro_batch_size too large | Already set to 32 + gradient_checkpointing |
+| FSDP NCCL deadlock | cpu_offload enabled | Never set cpu_offload=True |
+| torch.compile hangs forever | Incompatible with Isaac Sim multi-process | TORCHDYNAMO_DISABLE=1 |
+| Ray kills workers (Batch) | System RAM >95% after 2 iterations | Use EKS backend (768 GB RAM) or set RAY_memory_usage_threshold=0.99 |
+| EFS mount timeout (EKS) | Security group misconfigured | efs_sg_id must be the mount target SG |
+| Pods Pending (EKS) | GPU taint blocks system pods | Tolerations baked into CDK Helm values |
+| `ray: command not found` (EKS) | Ray binary not on PATH | PATH env var includes /isaac-sim/kit/python/bin |
