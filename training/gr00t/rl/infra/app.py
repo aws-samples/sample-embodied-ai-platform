@@ -11,16 +11,15 @@ Deploy (SageMaker heterogeneous):
 Deploy (EKS + KubeRay):
   cdk deploy --context compute_backend=eks \\
     --context vpc_id=vpc-00ce44fb57e6e740e \\
-    --context efs_id=fs-05cc94bf7eeacab6c \\
-    --context efs_sg_id=<EFS-MOUNT-TARGET-SG> \\
+    --context s3_data_bucket=gr00t-rl-training-data \\
     --context image_uri=215143956078.dkr.ecr.us-east-2.amazonaws.com/gr00t-rl-unified:latest
-  NOTE: efs_sg_id must be the security group on the EFS MOUNT TARGETS (not the Batch stack SG).
-  Find it with: aws efs describe-mount-target-security-groups --mount-target-id <mt-id>
 
 Context parameters:
   vpc_id                - Existing VPC ID (creates new if omitted for batch-mnp)
-  efs_id                - Existing EFS file system ID (creates new if omitted for batch-mnp)
-  efs_sg_id             - EFS security group ID (required if efs_id provided)
+  efs_id                - Existing EFS file system ID (batch-mnp/sagemaker only)
+  efs_sg_id             - EFS security group ID (batch-mnp/sagemaker only)
+  s3_data_bucket        - S3 bucket name with staged training data (EKS only, DRA-linked to FSx)
+  fsx_capacity_gib      - FSx for Lustre capacity in GiB (EKS only, default: 1200)
   image_uri             - Pre-built ECR URI for unified image (skips CodeBuild if provided)
   num_rollout_nodes     - Number of rollout child nodes for batch-mnp/sagemaker (default: 4)
   num_rollout_workers   - Number of rollout worker pods for eks (default: 4)
@@ -58,11 +57,13 @@ elif compute_backend == "eks":
         app,
         "GR00TRLEKSStack",
         vpc_id=app.node.try_get_context("vpc_id"),
-        efs_id=app.node.try_get_context("efs_id"),
-        efs_sg_id=app.node.try_get_context("efs_sg_id"),
+        s3_data_bucket=app.node.try_get_context("s3_data_bucket"),
         image_uri=app.node.try_get_context("image_uri"),
         num_rollout_workers=int(
             app.node.try_get_context("num_rollout_workers") or 4
+        ),
+        fsx_capacity_gib=int(
+            app.node.try_get_context("fsx_capacity_gib") or 1200
         ),
         learner_instance_type=(
             app.node.try_get_context("learner_instance_type") or "g6e.48xlarge"

@@ -5,14 +5,13 @@ Deploys an EKS cluster with:
   - Rollout node group: Nx g6e.4xlarge (1x L40S each) for Isaac Sim rollout workers
   - KubeRay operator (Helm chart v1.1.0) managing RayCluster lifecycle
   - NVIDIA device plugin (Helm chart) exposing nvidia.com/gpu resources
-  - EFS CSI driver (EKS addon) mounting existing filesystem for shared storage
+  - FSx for Lustre (SCRATCH_2) backed by S3 via Data Repository Association
   - RayCluster CR with heterogeneous head (8 GPU) + workers (1 GPU each)
 
 Deploy:
   cdk deploy --context compute_backend=eks \\
     --context vpc_id=vpc-00ce44fb57e6e740e \\
-    --context efs_id=fs-05cc94bf7eeacab6c \\
-    --context efs_sg_id=<sg-id> \\
+    --context s3_data_bucket=gr00t-rl-training-data \\
     --context image_uri=215143956078.dkr.ecr.us-east-2.amazonaws.com/gr00t-rl-unified:latest
 """
 
@@ -21,9 +20,12 @@ import pathlib
 from aws_cdk import (
     Stack,
     CfnOutput,
+    CfnJson,
+    RemovalPolicy,
     aws_eks as eks,
     aws_ec2 as ec2,
-    aws_efs as efs,
+    aws_fsx as fsx,
+    aws_s3 as s3,
     aws_iam as iam,
 )
 from aws_cdk.lambda_layer_kubectl_v31 import KubectlV31Layer
@@ -37,7 +39,7 @@ class EKSKubeRayStack(Stack):
       - Head pod (g6e.48xlarge): Ray head + FSDP learner actors on 8 GPUs
       - Worker pods (g6e.4xlarge x N): Ray workers + Isaac Sim rollout on 1 GPU each
       - KubeRay operator manages Ray cluster formation (no manual ray start)
-      - EFS shared storage for code, models, checkpoints, TensorBoard logs
+      - FSx for Lustre shared storage for code, models, checkpoints, TensorBoard logs
     """
 
     def __init__(
@@ -45,10 +47,10 @@ class EKSKubeRayStack(Stack):
         scope: Construct,
         construct_id: str,
         vpc_id: str,
-        efs_id: str,
-        efs_sg_id: str,
+        s3_data_bucket: str,
         image_uri: str,
         num_rollout_workers: int = 4,
+        fsx_capacity_gib: int = 1200,
         learner_instance_type: str = "g6e.48xlarge",
         rollout_instance_type: str = "g6e.4xlarge",
         **kwargs,
@@ -56,22 +58,17 @@ class EKSKubeRayStack(Stack):
         super().__init__(scope, construct_id, **kwargs)
 
         # ==============================================================
-        # region 1. Import existing VPC and EFS
+        # region 1. Import existing VPC and S3 data bucket
         # ==============================================================
         vpc = ec2.Vpc.from_lookup(self, "VPC", vpc_id=vpc_id)
-        efs_sg = ec2.SecurityGroup.from_security_group_id(
-            self, "EFSSG", efs_sg_id, mutable=True
-        )
-        efs_fs = efs.FileSystem.from_file_system_attributes(
-            self, "EFS", file_system_id=efs_id, security_group=efs_sg
+        data_bucket = s3.Bucket.from_bucket_name(
+            self, "DataBucket", s3_data_bucket
         )
         # endregion
 
         # ==============================================================
         # region 2. EKS Cluster
         # ==============================================================
-        # Masters role: allows the deployer (or any assumed role) kubectl access.
-        # CDK's EKS construct only grants access to its own creation role by default.
         masters_role = iam.Role(
             self,
             "ClusterAdminRole",
@@ -95,19 +92,78 @@ class EKSKubeRayStack(Stack):
         # endregion
 
         # ==============================================================
-        # region 3. EFS security group ingress for EKS nodes
+        # region 3. FSx for Lustre security group
         # ==============================================================
-        # Allow NFS (port 2049) from EKS cluster security group to EFS.
-        # T-06-02 mitigation: scoped to cluster SG only, not 0.0.0.0/0.
-        efs_sg.add_ingress_rule(
+        fsx_sg = ec2.SecurityGroup(
+            self,
+            "FsxLustreSG",
+            vpc=vpc,
+            description="FSx for Lustre - ports 988, 1018-1023",
+            allow_all_outbound=True,
+        )
+        fsx_sg.add_ingress_rule(
+            peer=fsx_sg,
+            connection=ec2.Port.tcp(988),
+            description="Lustre MGS/MGC (self)",
+        )
+        fsx_sg.add_ingress_rule(
+            peer=fsx_sg,
+            connection=ec2.Port.tcp_range(1018, 1023),
+            description="Lustre OST/MDT (self)",
+        )
+        fsx_sg.add_ingress_rule(
             peer=ec2.Peer.security_group_id(cluster.cluster_security_group_id),
-            connection=ec2.Port.tcp(2049),
-            description="EFS access from EKS cluster nodes",
+            connection=ec2.Port.tcp(988),
+            description="Lustre from EKS nodes",
+        )
+        fsx_sg.add_ingress_rule(
+            peer=ec2.Peer.security_group_id(cluster.cluster_security_group_id),
+            connection=ec2.Port.tcp_range(1018, 1023),
+            description="Lustre from EKS nodes",
         )
         # endregion
 
         # ==============================================================
-        # region 4. Learner node group (D-01: g6e.48xlarge, 8x L40S)
+        # region 4. FSx for Lustre filesystem + Data Repository Association
+        # ==============================================================
+        # FSx is single-AZ — pick one private subnet and pin node groups to it
+        fsx_subnet = vpc.select_subnets(
+            subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
+        ).subnets[0]
+
+        lustre_fs = fsx.LustreFileSystem(
+            self,
+            "TrainingFsx",
+            vpc=vpc,
+            vpc_subnet=fsx_subnet,
+            storage_capacity_gib=fsx_capacity_gib,
+            lustre_configuration=fsx.LustreConfiguration(
+                deployment_type=fsx.LustreDeploymentType.SCRATCH_2,
+            ),
+            security_group=fsx_sg,
+            removal_policy=RemovalPolicy.DESTROY,
+        )
+
+        fsx_dra = fsx.CfnDataRepositoryAssociation(
+            self,
+            "DataDRA",
+            file_system_id=lustre_fs.file_system_id,
+            file_system_path="/",
+            data_repository_path=f"s3://{data_bucket.bucket_name}/",
+            s3=fsx.CfnDataRepositoryAssociation.S3Property(
+                auto_import_policy=fsx.CfnDataRepositoryAssociation.AutoImportPolicyProperty(
+                    events=["NEW", "CHANGED", "DELETED"]
+                ),
+                auto_export_policy=fsx.CfnDataRepositoryAssociation.AutoExportPolicyProperty(
+                    events=["NEW", "CHANGED", "DELETED"]
+                ),
+            ),
+            batch_import_meta_data_on_create=True,
+        )
+        # endregion
+
+        # ==============================================================
+        # region 5. Node groups (pinned to FSx subnet for single-AZ alignment)
         # ==============================================================
         learner_ng = cluster.add_nodegroup_capacity(
             "LearnerNodes",
@@ -118,12 +174,9 @@ class EKSKubeRayStack(Stack):
             desired_size=1,
             disk_size=200,
             labels={"node-role": "learner"},
+            subnets=ec2.SubnetSelection(subnets=[fsx_subnet]),
         )
-        # endregion
 
-        # ==============================================================
-        # region 5. Rollout node group (D-02: g6e.4xlarge, 1x L40S each)
-        # ==============================================================
         rollout_ng = cluster.add_nodegroup_capacity(
             "RolloutNodes",
             instance_types=[ec2.InstanceType(rollout_instance_type)],
@@ -133,26 +186,42 @@ class EKSKubeRayStack(Stack):
             desired_size=num_rollout_workers,
             disk_size=200,
             labels={"node-role": "rollout"},
+            subnets=ec2.SubnetSelection(subnets=[fsx_subnet]),
         )
         # endregion
 
         # ==============================================================
-        # region 6. EFS CSI driver addon
+        # region 6. FSx CSI driver addon (IRSA)
         # ==============================================================
-        # Use the CDK L2 Addon (no service_account_role_arn needed —
-        # the addon creates its own SA; node instance role has EFS policy)
-        cluster.role.add_managed_policy(
-            iam.ManagedPolicy.from_aws_managed_policy_name(
-                "service-role/AmazonEFSCSIDriverPolicy"
-            )
-        )
-        efs_addon = eks.CfnAddon(
+        oidc_issuer = cluster.open_id_connect_provider.open_id_connect_provider_issuer
+        fsx_csi_conditions = CfnJson(
             self,
-            "EFSCSIAddon",
-            addon_name="aws-efs-csi-driver",
+            "FsxCsiOidcCondition",
+            value={
+                f"{oidc_issuer}:sub": "system:serviceaccount:kube-system:fsx-csi-controller-sa",
+                f"{oidc_issuer}:aud": "sts.amazonaws.com",
+            },
+        )
+        fsx_csi_sa_role = iam.Role(
+            self,
+            "FsxCsiDriverRole",
+            assumed_by=iam.FederatedPrincipal(
+                cluster.open_id_connect_provider.open_id_connect_provider_arn,
+                conditions={"StringEquals": fsx_csi_conditions},
+                assume_role_action="sts:AssumeRoleWithWebIdentity",
+            ),
+            managed_policies=[
+                iam.ManagedPolicy.from_aws_managed_policy_name("AmazonFSxFullAccess"),
+            ],
+        )
+
+        fsx_addon = eks.CfnAddon(
+            self,
+            "FSxCSIAddon",
+            addon_name="aws-fsx-csi-driver",
             cluster_name=cluster.cluster_name,
-            addon_version="v3.2.0-eksbuild.1",
             resolve_conflicts="OVERWRITE",
+            service_account_role_arn=fsx_csi_sa_role.role_arn,
         )
         # endregion
 
@@ -171,7 +240,6 @@ class EKSKubeRayStack(Stack):
                 "mofedEnabled": False,
             },
         )
-        # Device plugin must be ready before workloads schedule on GPU nodes.
         nvidia_chart.node.add_dependency(learner_ng)
         nvidia_chart.node.add_dependency(rollout_ng)
         # endregion
@@ -205,58 +273,62 @@ class EKSKubeRayStack(Stack):
         # endregion
 
         # ==============================================================
-        # region 10. EFS StorageClass + PV + PVC (static provisioning)
+        # region 10. FSx StorageClass + PV + PVC (static provisioning)
         # ==============================================================
-        efs_sc = cluster.add_manifest(
-            "EFSStorageClass",
+        fsx_sc = cluster.add_manifest(
+            "FsxStorageClass",
             {
                 "apiVersion": "storage.k8s.io/v1",
                 "kind": "StorageClass",
-                "metadata": {"name": "efs-sc"},
-                "provisioner": "efs.csi.aws.com",
+                "metadata": {"name": "fsx-sc"},
+                "provisioner": "fsx.csi.aws.com",
             },
         )
 
-        efs_pv = cluster.add_manifest(
-            "EFSPersistentVolume",
+        fsx_pv = cluster.add_manifest(
+            "FsxPersistentVolume",
             {
                 "apiVersion": "v1",
                 "kind": "PersistentVolume",
-                "metadata": {"name": "efs-training-pv"},
+                "metadata": {"name": "fsx-training-pv"},
                 "spec": {
-                    "capacity": {"storage": "1Ti"},
+                    "capacity": {"storage": f"{fsx_capacity_gib}Gi"},
                     "volumeMode": "Filesystem",
                     "accessModes": ["ReadWriteMany"],
                     "persistentVolumeReclaimPolicy": "Retain",
-                    "storageClassName": "efs-sc",
+                    "storageClassName": "fsx-sc",
                     "csi": {
-                        "driver": "efs.csi.aws.com",
-                        "volumeHandle": efs_id,
+                        "driver": "fsx.csi.aws.com",
+                        "volumeHandle": lustre_fs.file_system_id,
+                        "volumeAttributes": {
+                            "dnsname": lustre_fs.dns_name,
+                            "mountname": lustre_fs.mount_name,
+                        },
                     },
                 },
             },
         )
-        efs_pv.node.add_dependency(efs_sc)
-        efs_pv.node.add_dependency(efs_addon)
+        fsx_pv.node.add_dependency(fsx_sc)
+        fsx_pv.node.add_dependency(fsx_addon)
 
-        efs_pvc = cluster.add_manifest(
-            "EFSPersistentVolumeClaim",
+        fsx_pvc = cluster.add_manifest(
+            "FsxPersistentVolumeClaim",
             {
                 "apiVersion": "v1",
                 "kind": "PersistentVolumeClaim",
                 "metadata": {
-                    "name": "efs-training-pvc",
+                    "name": "fsx-training-pvc",
                     "namespace": "training",
                 },
                 "spec": {
                     "accessModes": ["ReadWriteMany"],
-                    "storageClassName": "efs-sc",
-                    "resources": {"requests": {"storage": "1Ti"}},
+                    "storageClassName": "fsx-sc",
+                    "resources": {"requests": {"storage": f"{fsx_capacity_gib}Gi"}},
                 },
             },
         )
-        efs_pvc.node.add_dependency(training_ns)
-        efs_pvc.node.add_dependency(efs_pv)
+        fsx_pvc.node.add_dependency(training_ns)
+        fsx_pvc.node.add_dependency(fsx_pv)
         # endregion
 
         # ==============================================================
@@ -283,7 +355,7 @@ class EKSKubeRayStack(Stack):
         # endregion
 
         # ==============================================================
-        # region 11. RayCluster CR (D-03: heterogeneous head + workers)
+        # region 11. RayCluster CR (heterogeneous head + workers)
         # ==============================================================
         raycluster = cluster.add_manifest(
             "RayClusterTraining",
@@ -362,13 +434,13 @@ class EKSKubeRayStack(Stack):
                                             },
                                             {
                                                 "name": "PYTHONPATH",
-                                                "value": "/mnt/efs/third_party/RLinf:/mnt/efs/third_party/Isaac-GR00T:/mnt/efs/third_party/embodied-ai-platform:/mnt/efs/third_party/IsaacLab/source:/mnt/efs/workflows/rheo/scripts:/mnt/efs/workflows/rheo/scripts/simulation/rl",
+                                                "value": "/mnt/fsx/third_party/RLinf:/mnt/fsx/third_party/Isaac-GR00T:/mnt/fsx/third_party/embodied-ai-platform:/mnt/fsx/third_party/IsaacLab/source:/mnt/fsx/workflows/rheo/scripts:/mnt/fsx/workflows/rheo/scripts/simulation/rl",
                                             },
                                         ],
                                         "volumeMounts": [
                                             {
-                                                "name": "efs-storage",
-                                                "mountPath": "/mnt/efs",
+                                                "name": "fsx-storage",
+                                                "mountPath": "/mnt/fsx",
                                             },
                                             {
                                                 "name": "dshm",
@@ -384,9 +456,9 @@ class EKSKubeRayStack(Stack):
                                 ],
                                 "volumes": [
                                     {
-                                        "name": "efs-storage",
+                                        "name": "fsx-storage",
                                         "persistentVolumeClaim": {
-                                            "claimName": "efs-training-pvc"
+                                            "claimName": "fsx-training-pvc"
                                         },
                                     },
                                     {
@@ -469,13 +541,13 @@ class EKSKubeRayStack(Stack):
                                                 },
                                                 {
                                                     "name": "PYTHONPATH",
-                                                    "value": "/mnt/efs/third_party/RLinf:/mnt/efs/third_party/Isaac-GR00T:/mnt/efs/third_party/embodied-ai-platform:/mnt/efs/third_party/IsaacLab/source:/mnt/efs/workflows/rheo/scripts:/mnt/efs/workflows/rheo/scripts/simulation/rl",
+                                                    "value": "/mnt/fsx/third_party/RLinf:/mnt/fsx/third_party/Isaac-GR00T:/mnt/fsx/third_party/embodied-ai-platform:/mnt/fsx/third_party/IsaacLab/source:/mnt/fsx/workflows/rheo/scripts:/mnt/fsx/workflows/rheo/scripts/simulation/rl",
                                                 },
                                             ],
                                             "volumeMounts": [
                                                 {
-                                                    "name": "efs-storage",
-                                                    "mountPath": "/mnt/efs",
+                                                    "name": "fsx-storage",
+                                                    "mountPath": "/mnt/fsx",
                                                 },
                                                 {
                                                     "name": "dshm",
@@ -486,9 +558,9 @@ class EKSKubeRayStack(Stack):
                                     ],
                                     "volumes": [
                                         {
-                                            "name": "efs-storage",
+                                            "name": "fsx-storage",
                                             "persistentVolumeClaim": {
-                                                "claimName": "efs-training-pvc"
+                                                "claimName": "fsx-training-pvc"
                                             },
                                         },
                                         {
@@ -511,10 +583,9 @@ class EKSKubeRayStack(Stack):
         # ==============================================================
         # region 12. CDK dependency ordering
         # ==============================================================
-        # RayCluster depends on KubeRay CRDs, NVIDIA device plugin, EFS PVC, namespace, entrypoint
         raycluster.node.add_dependency(kuberay_chart)
         raycluster.node.add_dependency(nvidia_chart)
-        raycluster.node.add_dependency(efs_pvc)
+        raycluster.node.add_dependency(fsx_pvc)
         raycluster.node.add_dependency(training_ns)
         raycluster.node.add_dependency(entrypoint_cm)
         # endregion
@@ -551,5 +622,23 @@ class EKSKubeRayStack(Stack):
             "KubeconfigCommand",
             value=f"aws eks update-kubeconfig --name {cluster.cluster_name} --region {Stack.of(self).region} --role-arn {masters_role.role_arn}",
             description="Command to configure kubectl (assumes admin role)",
+        )
+        CfnOutput(
+            self,
+            "FsxFileSystemId",
+            value=lustre_fs.file_system_id,
+            description="FSx for Lustre filesystem ID",
+        )
+        CfnOutput(
+            self,
+            "FsxMountName",
+            value=lustre_fs.mount_name,
+            description="FSx mount name",
+        )
+        CfnOutput(
+            self,
+            "DataBucketName",
+            value=data_bucket.bucket_name,
+            description="S3 data bucket (DRA-linked to FSx)",
         )
         # endregion

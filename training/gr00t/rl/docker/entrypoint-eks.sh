@@ -24,16 +24,16 @@ echo "Date: $(date -u)"
 echo "NODE_ROLE: ${NODE_ROLE:-unset}"
 
 # ==============================================================
-# Section 2: Path setup (EFS mounted via PVC at /mnt/efs)
+# Section 2: Path setup (FSx for Lustre mounted via PVC at /mnt/fsx)
 # ==============================================================
-EFS_MOUNT="/mnt/efs"
+FSX_MOUNT="/mnt/fsx"
 
-RLINF_PATH="${EFS_MOUNT}/third_party/RLinf"
-GROOT_PATH="${EFS_MOUNT}/third_party/Isaac-GR00T"
-EMBODIED_PATH="${EFS_MOUNT}/third_party/embodied-ai-platform"
-ISAACLAB_PATH="${EFS_MOUNT}/third_party/IsaacLab"
-WORKFLOW_PATH="${EFS_MOUNT}/workflows/rheo/scripts"
-MODEL_PATH="${MODEL_PATH:-${EFS_MOUNT}/models/GR00T-N1.5-RL-Rheo-AssembleTrocar}"
+RLINF_PATH="${FSX_MOUNT}/third_party/RLinf"
+GROOT_PATH="${FSX_MOUNT}/third_party/Isaac-GR00T"
+EMBODIED_PATH="${FSX_MOUNT}/third_party/embodied-ai-platform"
+ISAACLAB_PATH="${FSX_MOUNT}/third_party/IsaacLab"
+WORKFLOW_PATH="${FSX_MOUNT}/workflows/rheo/scripts"
+MODEL_PATH="${MODEL_PATH:-${FSX_MOUNT}/models/GR00T-N1.5-RL-Rheo-AssembleTrocar}"
 
 export PYTHONPATH="${RLINF_PATH}:${GROOT_PATH}:${EMBODIED_PATH}:${ISAACLAB_PATH}/source:${WORKFLOW_PATH}:${WORKFLOW_PATH}/simulation/rl:${PYTHONPATH:-}"
 
@@ -47,16 +47,16 @@ echo "MODEL_PATH: ${MODEL_PATH}"
 export RLINF_EXT_MODULE=rlinf_ext
 export TORCHDYNAMO_DISABLE=1
 export RAY_DISABLE_VERSION_CHECK=1
-export EMBODIED_PATH="${EFS_MOUNT}/third_party/embodied-ai-platform"
+export EMBODIED_PATH="${FSX_MOUNT}/third_party/embodied-ai-platform"
 
 # ==============================================================
-# Section 4: Wait for EFS mount availability
+# Section 4: Wait for FSx mount availability
 # ==============================================================
-echo "Waiting for EFS mount at ${EFS_MOUNT}/third_party..."
-if timeout 120 bash -c "until [ -d '${EFS_MOUNT}/third_party' ]; do sleep 2; done"; then
-    echo "EFS mounted successfully."
+echo "Waiting for FSx mount at ${FSX_MOUNT}/third_party..."
+if timeout 120 bash -c "until [ -d '${FSX_MOUNT}/third_party' ]; do sleep 2; done"; then
+    echo "FSx mounted successfully."
 else
-    echo "ERROR: EFS mount not available after 120s"
+    echo "ERROR: FSx mount not available after 120s"
     exit 1
 fi
 
@@ -91,7 +91,7 @@ if [ "${NODE_ROLE:-}" = "learner" ]; then
     # ==============================================================
     # User-configurable training parameters (override via container env vars)
     CONFIG_NAME="${CONFIG_NAME:-isaaclab_ppo_gr00t_assemble_trocar}"
-    MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-128}"
+    MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-64}"
     GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-True}"
     ENVS_PER_WORKER="${ENVS_PER_WORKER:-32}"
     MAX_EPOCHS="${MAX_EPOCHS:-1000}"
@@ -99,16 +99,16 @@ if [ "${NODE_ROLE:-}" = "learner" ]; then
 
     TRAIN_SCRIPT="${RLINF_PATH}/examples/embodiment/train_embodied_agent.py"
     EXT_CONFIG_PATH="/tmp/rlinf_config_eks"
-    LOG_DIR="${EFS_MOUNT}/rl-training/results/${CONFIG_NAME}_eks/$(date +'%Y%m%d-%H%M%S')"
+    LOG_DIR="${FSX_MOUNT}/rl-training/results/${CONFIG_NAME}_eks/$(date +'%Y%m%d-%H%M%S')"
     TOTAL_ENVS=$((NUM_EXPECTED_WORKERS * ENVS_PER_WORKER))
 
-    # Copy config to /tmp and modify for EKS topology (avoids mutating shared EFS)
-    cp -r "${EFS_MOUNT}/workflows/rheo/scripts/simulation/rl/rlinf_ext/config" "${EXT_CONFIG_PATH}"
+    # Copy config to /tmp and modify for EKS topology (avoids mutating shared FSx)
+    cp -r "${FSX_MOUNT}/workflows/rheo/scripts/simulation/rl/rlinf_ext/config" "${EXT_CONFIG_PATH}"
     sed -i 's/actor: 0-3/actor: 0-7/' "${EXT_CONFIG_PATH}/${CONFIG_NAME}.yaml"
     sed -i "s/env,rollout: 4-7/env,rollout: 8-11/" "${EXT_CONFIG_PATH}/${CONFIG_NAME}.yaml"
     sed -i "s/num_nodes: 2/num_nodes: ${TOTAL_EXPECTED}/" "${EXT_CONFIG_PATH}/${CONFIG_NAME}.yaml"
 
-    # Start GPU monitoring in background (logs to EFS for post-run analysis)
+    # Start GPU monitoring in background (logs to FSx for post-run analysis)
     GPU_LOG_DIR="${LOG_DIR}/gpu_metrics"
     mkdir -p "${GPU_LOG_DIR}"
     nvidia-smi dmon -s uct -d 30 -f "${GPU_LOG_DIR}/gpu_dmon.csv" &
