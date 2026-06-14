@@ -18,13 +18,15 @@ Deploy (EKS + KubeRay):
   Find it with: aws efs describe-mount-target-security-groups --mount-target-id <mt-id>
 
 Context parameters:
-  vpc_id              - Existing VPC ID (creates new if omitted for batch-mnp)
-  efs_id              - Existing EFS file system ID (creates new if omitted for batch-mnp)
-  efs_sg_id           - EFS security group ID (required if efs_id provided)
-  image_uri           - Pre-built ECR URI for unified image (skips CodeBuild if provided)
-  num_rollout_nodes   - Number of rollout child nodes for batch-mnp/sagemaker (default: 4)
-  num_rollout_workers - Number of rollout worker pods for eks (default: 4)
-  compute_backend     - "batch-mnp" (default), "sagemaker", or "eks"
+  vpc_id                - Existing VPC ID (creates new if omitted for batch-mnp)
+  efs_id                - Existing EFS file system ID (creates new if omitted for batch-mnp)
+  efs_sg_id             - EFS security group ID (required if efs_id provided)
+  image_uri             - Pre-built ECR URI for unified image (skips CodeBuild if provided)
+  num_rollout_nodes     - Number of rollout child nodes for batch-mnp/sagemaker (default: 4)
+  num_rollout_workers   - Number of rollout worker pods for eks (default: 4)
+  learner_instance_type - EC2 instance type for learner node group (default: g6e.48xlarge)
+  rollout_instance_type - EC2 instance type for rollout node group (default: g6e.4xlarge)
+  compute_backend       - "batch-mnp" (default), "sagemaker", or "eks"
 """
 import os
 import aws_cdk as cdk
@@ -61,6 +63,12 @@ elif compute_backend == "eks":
         image_uri=app.node.try_get_context("image_uri"),
         num_rollout_workers=int(
             app.node.try_get_context("num_rollout_workers") or 4
+        ),
+        learner_instance_type=(
+            app.node.try_get_context("learner_instance_type") or "g6e.48xlarge"
+        ),
+        rollout_instance_type=(
+            app.node.try_get_context("rollout_instance_type") or "g6e.4xlarge"
         ),
         env=env,
     )

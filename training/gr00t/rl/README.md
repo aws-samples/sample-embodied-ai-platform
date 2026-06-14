@@ -7,7 +7,7 @@ Reinforcement learning post-training for NVIDIA GR00T N1.5 on the Assemble Troca
 | Backend | Command | Instances | Best For |
 |---------|---------|-----------|----------|
 | **AWS Batch MNP** (homogeneous) | `--context compute_backend=batch-mnp` | 2× g6e.12xlarge (4× L40S each) | Simple setup, lower cost (~$16/hr) |
-| **EKS + KubeRay** (heterogeneous) | `--context compute_backend=eks` | 1× g6e.48xlarge + 4× g6e.4xlarge | Better GPU utilization, no RAM OOM |
+| **EKS + KubeRay** (heterogeneous) | `--context compute_backend=eks` | 1× g6e.48xlarge + 4× g6e.4xlarge (configurable) | Better GPU utilization, no RAM OOM |
 
 Both backends are validated end-to-end: 2 PPO iterations + checkpoint saved.
 
@@ -18,6 +18,7 @@ Both backends are validated end-to-end: 2 PPO iterations + checkpoint saved.
 - AWS account with GPU quota (384 vCPUs for G instances in your region)
 - CDK CLI installed (`npm install -g aws-cdk`)
 - Python 3.10+ with CDK dependencies: `pip install -r infra/requirements.txt`
+- **EKS backend**: VPC with private subnets that have NAT gateway egress (nodes must reach EKS API + ECR)
 
 ### Deploy
 
@@ -33,7 +34,9 @@ AWS_DEFAULT_REGION=us-east-2 CDK_DEFAULT_REGION=us-east-2 cdk deploy \
   --context vpc_id=<your-vpc-id> \
   --context efs_id=<your-efs-id> \
   --context efs_sg_id=<efs-mount-target-sg> \
-  --context image_uri=<ecr-image-uri>
+  --context image_uri=<ecr-image-uri> \
+  --context learner_instance_type=g6e.48xlarge \
+  --context rollout_instance_type=g6e.4xlarge
 ```
 
 ### Stage Training Data (EFS)
@@ -64,7 +67,9 @@ aws batch submit-job \
 
 **EKS:** Training starts automatically when the RayCluster pods are created by CDK deploy. Monitor with:
 ```bash
-aws eks update-kubeconfig --name gr00t-rl-eks --region us-east-2
+# Use the role ARN from the KubeconfigCommand stack output
+aws eks update-kubeconfig --name gr00t-rl-eks --region us-east-2 \
+  --role-arn arn:aws:iam::<account>:role/gr00t-rl-eks-admin-<region>
 kubectl get pods -n training
 kubectl logs -n training -l ray.io/node-type=head -f
 ```
@@ -129,8 +134,8 @@ Operators: KubeRay, NVIDIA device plugin
 | Algorithm | PPO (Proximal Policy Optimization) |
 | Model | GR00T N1.5 (750M params: 550M DiT + 201M SelfAttention) |
 | FSDP | Fully Sharded Data Parallel across actor GPUs |
-| micro_batch_size | 32 |
-| gradient_checkpointing | True |
+| micro_batch_size | 128 (configurable via `MICRO_BATCH_SIZE` env var) |
+| gradient_checkpointing | True (must stay True with batch size 128) |
 | Rollout epochs | 8 per iteration |
 | Update epochs | 4 per iteration |
 | Save interval | Every 2 iterations |
@@ -187,10 +192,10 @@ training/gr00t/rl/
 
 | Issue | Cause | Fix |
 |-------|-------|-----|
-| CUDA OOM during training step | micro_batch_size too large | Already set to 32 + gradient_checkpointing |
+| CUDA OOM during training step | gradient_checkpointing=False with large batch | Keep GRADIENT_CHECKPOINTING=True (default) when micro_batch_size=128 |
 | FSDP NCCL deadlock | cpu_offload enabled | Never set cpu_offload=True |
 | torch.compile hangs forever | Incompatible with Isaac Sim multi-process | TORCHDYNAMO_DISABLE=1 |
 | Ray kills workers (Batch) | System RAM >95% after 2 iterations | Use EKS backend (768 GB RAM) or set RAY_memory_usage_threshold=0.99 |
 | EFS mount timeout (EKS) | Security group misconfigured | efs_sg_id must be the mount target SG |
-| Pods Pending (EKS) | GPU taint blocks system pods | Tolerations baked into CDK Helm values |
+| Pods Pending (EKS) | Insufficient GPU quota or node not Ready | Check `kubectl describe node` and service quotas |
 | `ray: command not found` (EKS) | Ray binary not on PATH | PATH env var includes /isaac-sim/kit/python/bin |

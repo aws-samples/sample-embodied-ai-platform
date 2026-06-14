@@ -92,7 +92,7 @@ if [ "${NODE_ROLE:-}" = "learner" ]; then
     # User-configurable training parameters (override via container env vars)
     CONFIG_NAME="${CONFIG_NAME:-isaaclab_ppo_gr00t_assemble_trocar}"
     MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-128}"
-    GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-False}"
+    GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-True}"
     ENVS_PER_WORKER="${ENVS_PER_WORKER:-32}"
     MAX_EPOCHS="${MAX_EPOCHS:-1000}"
     SAVE_INTERVAL="${SAVE_INTERVAL:-2}"

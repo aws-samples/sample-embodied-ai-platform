@@ -16,6 +16,8 @@ Deploy:
     --context image_uri=215143956078.dkr.ecr.us-east-2.amazonaws.com/gr00t-rl-unified:latest
 """
 
+import pathlib
+
 from aws_cdk import (
     Stack,
     CfnOutput,
@@ -47,6 +49,8 @@ class EKSKubeRayStack(Stack):
         efs_sg_id: str,
         image_uri: str,
         num_rollout_workers: int = 4,
+        learner_instance_type: str = "g6e.48xlarge",
+        rollout_instance_type: str = "g6e.4xlarge",
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -66,6 +70,15 @@ class EKSKubeRayStack(Stack):
         # ==============================================================
         # region 2. EKS Cluster
         # ==============================================================
+        # Masters role: allows the deployer (or any assumed role) kubectl access.
+        # CDK's EKS construct only grants access to its own creation role by default.
+        masters_role = iam.Role(
+            self,
+            "ClusterAdminRole",
+            assumed_by=iam.AccountRootPrincipal(),
+            role_name=f"gr00t-rl-eks-admin-{Stack.of(self).region}",
+        )
+
         cluster = eks.Cluster(
             self,
             "TrainingCluster",
@@ -77,6 +90,7 @@ class EKSKubeRayStack(Stack):
             vpc_subnets=[
                 ec2.SubnetSelection(subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS)
             ],
+            masters_role=masters_role,
         )
         # endregion
 
@@ -97,20 +111,13 @@ class EKSKubeRayStack(Stack):
         # ==============================================================
         learner_ng = cluster.add_nodegroup_capacity(
             "LearnerNodes",
-            instance_types=[ec2.InstanceType("g6e.48xlarge")],
+            instance_types=[ec2.InstanceType(learner_instance_type)],
             ami_type=eks.NodegroupAmiType.AL2023_X86_64_NVIDIA,
             min_size=1,
             max_size=1,
             desired_size=1,
             disk_size=200,
             labels={"node-role": "learner"},
-            taints=[
-                eks.TaintSpec(
-                    key="nvidia.com/gpu",
-                    value="true",
-                    effect=eks.TaintEffect.NO_SCHEDULE,
-                )
-            ],
         )
         # endregion
 
@@ -119,20 +126,13 @@ class EKSKubeRayStack(Stack):
         # ==============================================================
         rollout_ng = cluster.add_nodegroup_capacity(
             "RolloutNodes",
-            instance_types=[ec2.InstanceType("g6e.4xlarge")],
+            instance_types=[ec2.InstanceType(rollout_instance_type)],
             ami_type=eks.NodegroupAmiType.AL2023_X86_64_NVIDIA,
             min_size=num_rollout_workers,
             max_size=num_rollout_workers,
             desired_size=num_rollout_workers,
             disk_size=200,
             labels={"node-role": "rollout"},
-            taints=[
-                eks.TaintSpec(
-                    key="nvidia.com/gpu",
-                    value="true",
-                    effect=eks.TaintEffect.NO_SCHEDULE,
-                )
-            ],
         )
         # endregion
 
@@ -146,16 +146,6 @@ class EKSKubeRayStack(Stack):
                 "service-role/AmazonEFSCSIDriverPolicy"
             )
         )
-        # CoreDNS addon needs GPU taint toleration (all nodes are GPU-tainted)
-        coredns_addon = eks.CfnAddon(
-            self,
-            "CoreDNSAddon",
-            addon_name="coredns",
-            cluster_name=cluster.cluster_name,
-            resolve_conflicts="OVERWRITE",
-            configuration_values='{"tolerations":[{"key":"nvidia.com/gpu","operator":"Exists","effect":"NoSchedule"}]}',
-        )
-
         efs_addon = eks.CfnAddon(
             self,
             "EFSCSIAddon",
@@ -163,18 +153,12 @@ class EKSKubeRayStack(Stack):
             cluster_name=cluster.cluster_name,
             addon_version="v3.2.0-eksbuild.1",
             resolve_conflicts="OVERWRITE",
-            configuration_values='{"controller":{"tolerations":[{"key":"nvidia.com/gpu","operator":"Exists","effect":"NoSchedule"}]}}',
         )
         # endregion
 
         # ==============================================================
         # region 7. NVIDIA device plugin Helm chart
         # ==============================================================
-        gpu_toleration = {
-            "key": "nvidia.com/gpu",
-            "operator": "Exists",
-            "effect": "NoSchedule",
-        }
         nvidia_chart = cluster.add_helm_chart(
             "NvdpChart",
             chart="nvidia-device-plugin",
@@ -185,13 +169,6 @@ class EKSKubeRayStack(Stack):
             values={
                 "gfd": {"enabled": True},
                 "mofedEnabled": False,
-                "tolerations": [gpu_toleration],
-                "gfd": {"enabled": True, "tolerations": [gpu_toleration]},
-                "nfd": {
-                    "master": {"tolerations": [gpu_toleration]},
-                    "gc": {"tolerations": [gpu_toleration]},
-                    "worker": {"tolerations": [gpu_toleration]},
-                },
             },
         )
         # Device plugin must be ready before workloads schedule on GPU nodes.
@@ -210,9 +187,7 @@ class EKSKubeRayStack(Stack):
             namespace="kuberay-system",
             create_namespace=True,
             version="1.1.0",
-            values={
-                "tolerations": [gpu_toleration],
-            },
+            values={},
         )
         # endregion
 
@@ -285,6 +260,29 @@ class EKSKubeRayStack(Stack):
         # endregion
 
         # ==============================================================
+        # region 10b. Entrypoint ConfigMap (mounted into head pod)
+        # ==============================================================
+        entrypoint_path = (
+            pathlib.Path(__file__).parent.parent / "docker" / "entrypoint-eks.sh"
+        )
+        entrypoint_content = entrypoint_path.read_text()
+
+        entrypoint_cm = cluster.add_manifest(
+            "EntrypointConfigMap",
+            {
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": {
+                    "name": "entrypoint-eks",
+                    "namespace": "training",
+                },
+                "data": {"entrypoint-eks.sh": entrypoint_content},
+            },
+        )
+        entrypoint_cm.node.add_dependency(training_ns)
+        # endregion
+
+        # ==============================================================
         # region 11. RayCluster CR (D-03: heterogeneous head + workers)
         # ==============================================================
         raycluster = cluster.add_manifest(
@@ -310,13 +308,6 @@ class EKSKubeRayStack(Stack):
                             "metadata": {"labels": {"ray-role": "head"}},
                             "spec": {
                                 "nodeSelector": {"node-role": "learner"},
-                                "tolerations": [
-                                    {
-                                        "key": "nvidia.com/gpu",
-                                        "operator": "Exists",
-                                        "effect": "NoSchedule",
-                                    }
-                                ],
                                 "containers": [
                                     {
                                         "name": "ray-head",
@@ -383,6 +374,11 @@ class EKSKubeRayStack(Stack):
                                                 "name": "dshm",
                                                 "mountPath": "/dev/shm",
                                             },
+                                            {
+                                                "name": "entrypoint",
+                                                "mountPath": "/opt/entrypoint-eks.sh",
+                                                "subPath": "entrypoint-eks.sh",
+                                            },
                                         ],
                                     }
                                 ],
@@ -400,6 +396,13 @@ class EKSKubeRayStack(Stack):
                                             "sizeLimit": "128Gi",
                                         },
                                     },
+                                    {
+                                        "name": "entrypoint",
+                                        "configMap": {
+                                            "name": "entrypoint-eks",
+                                            "defaultMode": 0o755,
+                                        },
+                                    },
                                 ],
                             },
                         },
@@ -415,13 +418,6 @@ class EKSKubeRayStack(Stack):
                                 "metadata": {"labels": {"ray-role": "worker"}},
                                 "spec": {
                                     "nodeSelector": {"node-role": "rollout"},
-                                    "tolerations": [
-                                        {
-                                            "key": "nvidia.com/gpu",
-                                            "operator": "Exists",
-                                            "effect": "NoSchedule",
-                                        }
-                                    ],
                                     "containers": [
                                         {
                                             "name": "ray-worker",
@@ -515,11 +511,12 @@ class EKSKubeRayStack(Stack):
         # ==============================================================
         # region 12. CDK dependency ordering
         # ==============================================================
-        # RayCluster depends on KubeRay CRDs, NVIDIA device plugin, EFS PVC, namespace
+        # RayCluster depends on KubeRay CRDs, NVIDIA device plugin, EFS PVC, namespace, entrypoint
         raycluster.node.add_dependency(kuberay_chart)
         raycluster.node.add_dependency(nvidia_chart)
         raycluster.node.add_dependency(efs_pvc)
         raycluster.node.add_dependency(training_ns)
+        raycluster.node.add_dependency(entrypoint_cm)
         # endregion
 
         # ==============================================================
@@ -541,18 +538,18 @@ class EKSKubeRayStack(Stack):
             self,
             "LearnerNodeGroupArn",
             value=learner_ng.nodegroup_arn,
-            description="Learner node group ARN (g6e.48xlarge)",
+            description=f"Learner node group ARN ({learner_instance_type})",
         )
         CfnOutput(
             self,
             "RolloutNodeGroupArn",
             value=rollout_ng.nodegroup_arn,
-            description="Rollout node group ARN (g6e.4xlarge)",
+            description=f"Rollout node group ARN ({rollout_instance_type})",
         )
         CfnOutput(
             self,
             "KubeconfigCommand",
-            value=f"aws eks update-kubeconfig --name {cluster.cluster_name} --region {Stack.of(self).region}",
-            description="Command to configure kubectl",
+            value=f"aws eks update-kubeconfig --name {cluster.cluster_name} --region {Stack.of(self).region} --role-arn {masters_role.role_arn}",
+            description="Command to configure kubectl (assumes admin role)",
         )
         # endregion
