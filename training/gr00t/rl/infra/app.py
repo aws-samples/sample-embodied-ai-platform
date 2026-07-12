@@ -71,6 +71,7 @@ elif compute_backend == "eks":
         rollout_instance_type=(
             app.node.try_get_context("rollout_instance_type") or "g6e.4xlarge"
         ),
+        capacity_reservation_id=app.node.try_get_context("capacity_reservation_id"),
         env=env,
     )
 else:

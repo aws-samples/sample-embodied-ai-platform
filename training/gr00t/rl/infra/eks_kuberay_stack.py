@@ -53,6 +53,7 @@ class EKSKubeRayStack(Stack):
         fsx_capacity_gib: int = 1200,
         learner_instance_type: str = "g6e.48xlarge",
         rollout_instance_type: str = "g6e.4xlarge",
+        capacity_reservation_id: str = None,
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -94,33 +95,40 @@ class EKSKubeRayStack(Stack):
         # ==============================================================
         # region 3. FSx for Lustre security group
         # ==============================================================
-        fsx_sg = ec2.SecurityGroup(
+        fsx_sg = ec2.CfnSecurityGroup(
             self,
             "FsxLustreSG",
-            vpc=vpc,
-            description="FSx for Lustre - ports 988, 1018-1023",
-            allow_all_outbound=True,
+            vpc_id=vpc.vpc_id,
+            group_description="FSx for Lustre - ports 988, 1018-1023",
+            security_group_ingress=[
+                ec2.CfnSecurityGroup.IngressProperty(
+                    ip_protocol="tcp", from_port=988, to_port=988,
+                    source_security_group_id=cluster.cluster_security_group_id,
+                    description="Lustre from EKS nodes",
+                ),
+                ec2.CfnSecurityGroup.IngressProperty(
+                    ip_protocol="tcp", from_port=1018, to_port=1023,
+                    source_security_group_id=cluster.cluster_security_group_id,
+                    description="Lustre from EKS nodes",
+                ),
+            ],
         )
-        fsx_sg.add_ingress_rule(
-            peer=fsx_sg,
-            connection=ec2.Port.tcp(988),
+        # Self-referencing rules must be added after SG creation
+        ec2.CfnSecurityGroupIngress(
+            self, "FsxSelfIngress988",
+            group_id=fsx_sg.attr_group_id,
+            ip_protocol="tcp", from_port=988, to_port=988,
+            source_security_group_id=fsx_sg.attr_group_id,
             description="Lustre MGS/MGC (self)",
         )
-        fsx_sg.add_ingress_rule(
-            peer=fsx_sg,
-            connection=ec2.Port.tcp_range(1018, 1023),
+        ec2.CfnSecurityGroupIngress(
+            self, "FsxSelfIngress1018",
+            group_id=fsx_sg.attr_group_id,
+            ip_protocol="tcp", from_port=1018, to_port=1023,
+            source_security_group_id=fsx_sg.attr_group_id,
             description="Lustre OST/MDT (self)",
         )
-        fsx_sg.add_ingress_rule(
-            peer=ec2.Peer.security_group_id(cluster.cluster_security_group_id),
-            connection=ec2.Port.tcp(988),
-            description="Lustre from EKS nodes",
-        )
-        fsx_sg.add_ingress_rule(
-            peer=ec2.Peer.security_group_id(cluster.cluster_security_group_id),
-            connection=ec2.Port.tcp_range(1018, 1023),
-            description="Lustre from EKS nodes",
-        )
+        fsx_sg_id = fsx_sg.attr_group_id
         # endregion
 
         # ==============================================================
@@ -131,6 +139,9 @@ class EKSKubeRayStack(Stack):
             subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
         ).subnets[0]
 
+        fsx_security_group = ec2.SecurityGroup.from_security_group_id(
+            self, "FsxSGImport", fsx_sg_id
+        )
         lustre_fs = fsx.LustreFileSystem(
             self,
             "TrainingFsx",
@@ -138,9 +149,10 @@ class EKSKubeRayStack(Stack):
             vpc_subnet=fsx_subnet,
             storage_capacity_gib=fsx_capacity_gib,
             lustre_configuration=fsx.LustreConfiguration(
-                deployment_type=fsx.LustreDeploymentType.SCRATCH_2,
+                deployment_type=fsx.LustreDeploymentType.PERSISTENT_2,
+                per_unit_storage_throughput=250,
             ),
-            security_group=fsx_sg,
+            security_group=fsx_security_group,
             removal_policy=RemovalPolicy.DESTROY,
         )
 
@@ -165,8 +177,7 @@ class EKSKubeRayStack(Stack):
         # ==============================================================
         # region 5. Node groups (pinned to FSx subnet for single-AZ alignment)
         # ==============================================================
-        learner_ng = cluster.add_nodegroup_capacity(
-            "LearnerNodes",
+        learner_ng_kwargs = dict(
             instance_types=[ec2.InstanceType(learner_instance_type)],
             ami_type=eks.NodegroupAmiType.AL2023_X86_64_NVIDIA,
             min_size=1,
@@ -176,6 +187,41 @@ class EKSKubeRayStack(Stack):
             labels={"node-role": "learner"},
             subnets=ec2.SubnetSelection(subnets=[fsx_subnet]),
         )
+
+        if capacity_reservation_id:
+            learner_lt = ec2.CfnLaunchTemplate(
+                self,
+                "LearnerLaunchTemplate",
+                launch_template_data=ec2.CfnLaunchTemplate.LaunchTemplateDataProperty(
+                    instance_type=learner_instance_type,
+                    instance_market_options=ec2.CfnLaunchTemplate.InstanceMarketOptionsProperty(
+                        market_type="capacity-block",
+                    ),
+                    capacity_reservation_specification=ec2.CfnLaunchTemplate.CapacityReservationSpecificationProperty(
+                        capacity_reservation_target=ec2.CfnLaunchTemplate.CapacityReservationTargetProperty(
+                            capacity_reservation_id=capacity_reservation_id,
+                        ),
+                    ),
+                    block_device_mappings=[
+                        ec2.CfnLaunchTemplate.BlockDeviceMappingProperty(
+                            device_name="/dev/xvda",
+                            ebs=ec2.CfnLaunchTemplate.EbsProperty(
+                                volume_size=200,
+                                volume_type="gp3",
+                            ),
+                        )
+                    ],
+                ),
+            )
+            learner_ng_kwargs.pop("disk_size", None)
+            learner_ng_kwargs.pop("instance_types", None)
+            learner_ng_kwargs["capacity_type"] = eks.CapacityType.CAPACITY_BLOCK
+            learner_ng_kwargs["launch_template_spec"] = eks.LaunchTemplateSpec(
+                id=learner_lt.ref,
+                version=learner_lt.attr_latest_version_number,
+            )
+
+        learner_ng = cluster.add_nodegroup_capacity("LearnerNodes", **learner_ng_kwargs)
 
         rollout_ng = cluster.add_nodegroup_capacity(
             "RolloutNodes",
@@ -504,13 +550,13 @@ class EKSKubeRayStack(Stack):
                                             ],
                                             "resources": {
                                                 "requests": {
-                                                    "cpu": "12",
-                                                    "memory": "100Gi",
+                                                    "cpu": "24",
+                                                    "memory": "200Gi",
                                                     "nvidia.com/gpu": "1",
                                                 },
                                                 "limits": {
-                                                    "cpu": "16",
-                                                    "memory": "120Gi",
+                                                    "cpu": "32",
+                                                    "memory": "240Gi",
                                                     "nvidia.com/gpu": "1",
                                                 },
                                             },

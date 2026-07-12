@@ -91,7 +91,7 @@ if [ "${NODE_ROLE:-}" = "learner" ]; then
     # ==============================================================
     # User-configurable training parameters (override via container env vars)
     CONFIG_NAME="${CONFIG_NAME:-isaaclab_ppo_gr00t_assemble_trocar}"
-    MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-64}"
+    MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-32}"
     GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-True}"
     ENVS_PER_WORKER="${ENVS_PER_WORKER:-32}"
     MAX_EPOCHS="${MAX_EPOCHS:-1000}"
@@ -99,14 +99,47 @@ if [ "${NODE_ROLE:-}" = "learner" ]; then
 
     TRAIN_SCRIPT="${RLINF_PATH}/examples/embodiment/train_embodied_agent.py"
     EXT_CONFIG_PATH="/tmp/rlinf_config_eks"
-    LOG_DIR="${FSX_MOUNT}/rl-training/results/${CONFIG_NAME}_eks/$(date +'%Y%m%d-%H%M%S')"
+    if [ -n "${RESUME_DIR:-}" ] && [ -n "${RESUME_LOG_DIR:-}" ]; then
+        LOG_DIR="${RESUME_LOG_DIR}"
+        echo "Resuming run, reusing existing log dir: ${LOG_DIR}"
+    else
+        LOG_DIR="${FSX_MOUNT}/rl-training/results/${CONFIG_NAME}_eks/$(date +'%Y%m%d-%H%M%S')"
+    fi
     TOTAL_ENVS=$((NUM_EXPECTED_WORKERS * ENVS_PER_WORKER))
 
+    # Wait for config to be available on FSx (DRA lazy-loads from S3)
+    CONFIG_SRC="${FSX_MOUNT}/workflows/rheo/scripts/simulation/rl/rlinf_ext/config"
+    echo "Waiting for training config on FSx..."
+    for i in $(seq 1 30); do
+        if [ -f "${CONFIG_SRC}/${CONFIG_NAME}.yaml" ]; then
+            echo "Config ready."
+            break
+        fi
+        echo "  Config not ready yet (attempt $i/30)..."
+        sleep 10
+    done
+
     # Copy config to /tmp and modify for EKS topology (avoids mutating shared FSx)
-    cp -r "${FSX_MOUNT}/workflows/rheo/scripts/simulation/rl/rlinf_ext/config" "${EXT_CONFIG_PATH}"
-    sed -i 's/actor: 0-3/actor: 0-7/' "${EXT_CONFIG_PATH}/${CONFIG_NAME}.yaml"
-    sed -i "s/env,rollout: 4-7/env,rollout: 8-11/" "${EXT_CONFIG_PATH}/${CONFIG_NAME}.yaml"
-    sed -i "s/num_nodes: 2/num_nodes: ${TOTAL_EXPECTED}/" "${EXT_CONFIG_PATH}/${CONFIG_NAME}.yaml"
+    cp -r "${CONFIG_SRC}" "${EXT_CONFIG_PATH}"
+
+    # Handle both config formats:
+    # Format A (multi-node): actor: 0-3 / env,rollout: 4-7 / num_nodes: 2
+    # Format B (single-node): actor,env,rollout: all / num_nodes: 1
+    # Rollout GPU indices: 8 learner GPUs (0-7) + N rollout GPUs (8 to 8+N-1)
+    ROLLOUT_END=$((7 + NUM_EXPECTED_WORKERS))
+    CFG_FILE="${EXT_CONFIG_PATH}/${CONFIG_NAME}.yaml"
+    if grep -q "actor,env,rollout: all" "$CFG_FILE"; then
+        # Format B: replace colocated placement with heterogeneous EKS topology
+        sed -i "s/num_nodes: 1/num_nodes: ${TOTAL_EXPECTED}/" "$CFG_FILE"
+        sed -i "s/actor,env,rollout: all/actor: 0-7/" "$CFG_FILE"
+        sed -i "/actor: 0-7/a\\      env,rollout: 8-${ROLLOUT_END}" "$CFG_FILE"
+    else
+        # Format A: adjust existing split placement for 8-GPU learner
+        sed -i 's/actor: 0-3/actor: 0-7/' "$CFG_FILE"
+        sed -i "s/env,rollout: 4-7/env,rollout: 8-${ROLLOUT_END}/" "$CFG_FILE"
+        sed -i "s/num_nodes: 2/num_nodes: ${TOTAL_EXPECTED}/" "$CFG_FILE"
+    fi
+
 
     # Start GPU monitoring in background (logs to FSx for post-run analysis)
     GPU_LOG_DIR="${LOG_DIR}/gpu_metrics"
@@ -124,6 +157,12 @@ if [ "${NODE_ROLE:-}" = "learner" ]; then
     echo "  Max epochs: ${MAX_EPOCHS}"
     echo "  Log dir: ${LOG_DIR}"
 
+    RESUME_ARGS=()
+    if [ -n "${RESUME_DIR:-}" ]; then
+        echo "  Resume dir: ${RESUME_DIR}"
+        RESUME_ARGS+=("runner.resume_dir=${RESUME_DIR}")
+    fi
+
     /isaac-sim/python.sh "${TRAIN_SCRIPT}" \
         --config-path "${EXT_CONFIG_PATH}" \
         --config-name "${CONFIG_NAME}" \
@@ -135,7 +174,8 @@ if [ "${NODE_ROLE:-}" = "learner" ]; then
         "runner.save_interval=${SAVE_INTERVAL}" \
         "hydra.searchpath=[file://${RLINF_PATH}/examples/embodiment/config]" \
         "actor.micro_batch_size=${MICRO_BATCH_SIZE}" \
-        "actor.fsdp_config.gradient_checkpointing=${GRADIENT_CHECKPOINTING}"
+        "actor.fsdp_config.gradient_checkpointing=${GRADIENT_CHECKPOINTING}" \
+        "${RESUME_ARGS[@]}"
 
     # Cleanup GPU monitoring
     kill $DMON_PID 2>/dev/null || true

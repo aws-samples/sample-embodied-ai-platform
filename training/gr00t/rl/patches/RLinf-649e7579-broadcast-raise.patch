@@ -1,0 +1,52 @@
+# RLinf: re-raise broadcast failures in MultiChannelProcessGroup._broadcast
+#
+# Applies to RLinf commit 649e7579775997ade74efff33a7c23e90c61e60a
+# Path (within RLinf): rlinf/scheduler/collective/multi_channel_pg.py
+#
+# Bug
+# ---
+# `MultiChannelProcessGroup._broadcast` wraps its `dist.broadcast(...)` call
+# in a bare `except Exception`, logs the failure via `self._logger.error(...)`,
+# and returns normally. When Gloo aborts a rank mid-broadcast (peer reset,
+# watchdog timeout, transient TCP drop), the sender's tensor buffer is left
+# uninitialized (allocated with `torch.empty(...)`) but the caller has no way
+# to know the send failed. Downstream consumers then read that uninitialized
+# memory as pickle-encoded objects, producing either:
+#
+#   ValueError: Unsupported object type: <random int>
+#   _pickle.UnpicklingError: invalid load key '\x00'
+#
+# followed by a silent 3-hour deadlock while the Gloo watchdog waits for
+# the phantom send to arrive.
+#
+# Fix
+# ---
+# Add `raise` after the `_logger.error(msg)` so the exception surfaces to the
+# caller. Training then dies loudly on first Gloo failure, and the auto-recover
+# harness (scripts/auto-recover.sh) restarts the pod from the latest checkpoint.
+#
+# Upstream tracking
+# -----------------
+# Diagnostic write-up + reproducer prepared for the RLinf maintainers; upstream
+# fix is pending. This patch is a temporary vendor-tree override applied at
+# container build / FSx stage time.
+#
+# How to apply
+# ------------
+# Apply against a copy of RLinf pinned at 649e7579:
+#
+#   git clone https://github.com/RLinf/RLinf.git
+#   cd RLinf
+#   git checkout 649e7579775997ade74efff33a7c23e90c61e60a
+#   git apply /path/to/RLinf-649e7579-broadcast-raise.patch
+#
+--- a/rlinf/scheduler/collective/multi_channel_pg.py
++++ b/rlinf/scheduler/collective/multi_channel_pg.py
+@@ -427,6 +427,7 @@
+             pg_name = dist._get_process_group_name(group)
+             msg = f"Broadcast failed on ProcessGroup {pg_name} rank {self._cur_rank} with error: {error}. Args - tensor: {tensor}, src: {src}, group: {group}, async_op: {async_op}."
+             self._logger.error(msg)
++            raise  # PATCH: do not swallow; let caller see the failure (RLINF-COLLECTIVE-DESYNC)
+
+     @staticmethod
+     def _create_process_group(
