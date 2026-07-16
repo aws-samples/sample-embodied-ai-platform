@@ -99,6 +99,71 @@ AWS_DEFAULT_REGION=us-east-2 cdk destroy --force
 aws eks delete-cluster --name gr00t-rl-eks --region us-east-2
 ```
 
+## Modes
+
+The EKS + KubeRay backend supports two runtime modes via a `mode` CDK context param. Unset (or `mode=train`) preserves today's behavior; `mode=eval` runs standalone evaluation on a saved checkpoint.
+
+### MODE=train (default)
+
+- **Purpose:** PPO training on the Assemble Trocar task.
+- **Topology:** 1 head pod on `<learner-instance>` (8× L40S or 8× H100) + N worker pods on `<rollout-instance>` (1× L40S each). Requires a Capacity Block for the learner if using p5.
+- **Invocation:**
+
+```bash
+cd training/gr00t/rl/infra
+AWS_DEFAULT_REGION=us-east-2 cdk deploy GR00TRLEKSStack \
+  --context compute_backend=eks \
+  --context vpc_id=<your-vpc-id> \
+  --context s3_data_bucket=<your-s3-bucket> \
+  --context image_uri=<your-ecr-uri> \
+  --context capacity_reservation_id=<your-cr-id>
+```
+
+- **Output:** checkpoints at `${LOG_DIR}/checkpoints/global_step_N/`, TensorBoard at `${LOG_DIR}/tensorboard/` under FSx.
+
+### MODE=eval
+
+- **Purpose:** standalone evaluation of a saved RL checkpoint. Produces MP4 rollout videos. No learner GPU required.
+- **Topology:** 1 head pod + 1 worker pod, both on `<rollout-instance>` (1× L40S each). 64 episodes total (8 envs × 8 rollout epochs).
+- **Invocation:**
+
+```bash
+AWS_DEFAULT_REGION=us-east-2 cdk deploy GR00TRLEKSStack \
+  --context compute_backend=eks \
+  --context vpc_id=<your-vpc-id> \
+  --context s3_data_bucket=<your-s3-bucket> \
+  --context image_uri=<your-ecr-uri> \
+  --context mode=eval \
+  --context eval_ckpt=/mnt/fsx/<your-run-path>/checkpoints/global_step_N/actor/model_state_dict/full_weights.pt
+```
+
+- **Prerequisites:** the rollout nodegroup can scale to 2 nodes; the training learner nodegroup can be at `desired=0` (no Capacity Block required).
+- **Runtime:** ~8-15 minutes end-to-end (setup dominated; the eval loop itself is ~30 min for 64 episodes at N=8 envs, but bootstrap and shutdown are the majority).
+- **Output:** MP4 videos at `${LOG_DIR}/video/eval/` on FSx (auto-exported to `s3://<your-s3-bucket>/rl-training/results/…` via the FSx Data Repository Association).
+- **Retrieve videos:**
+
+```bash
+# From a rollout pod:
+kubectl exec -n training <rollout-pod> -- ls -la <LOG_DIR>/video/eval/
+kubectl cp training/<rollout-pod>:<LOG_DIR>/video/eval/ ./local-videos/
+
+# Or from S3 (DRA-exported):
+aws s3 sync s3://<your-s3-bucket>/<your-run-path>/video/eval/ ./local-videos/
+```
+
+- **Metrics:** `eval/success_once` printed to the head-pod logs; retrieve via:
+
+```bash
+kubectl logs -n training -l ray.io/node-type=head | grep -A2 'success_once'
+```
+
+**Notes:**
+
+- `eval_ckpt` must be a full FSx-visible path (mount root `/mnt/fsx`). Objects on the S3 side of the DRA are auto-imported to FSx lazily on first access.
+- MODE=eval fails fast at pod startup if `eval_ckpt` points to a non-existent file. If `eval_ckpt` is omitted or empty, the pod runs base-model eval against the HF snapshot at `MODEL_PATH` (no RL overlay).
+- The 2-pod eval topology is fixed at `env.eval.total_num_envs=8, algorithm.eval_rollout_epoch=8` via Hydra overrides in `entrypoint-eks.sh`. To change these, edit that override list.
+- Video output size is roughly a few hundred MB per 64-episode run (256 frames per episode × 64 episodes).
+
 ## Architecture
 
 ### Batch MNP (Homogeneous)
@@ -126,6 +191,8 @@ EKS Cluster (gr00t-rl-eks)
 Storage: EFS via CSI driver at /mnt/efs
 Operators: KubeRay, NVIDIA device plugin
 ```
+
+**Eval mode** (`--context mode=eval`) drops the learner pod and uses a 2-pod topology: 1 head + 1 worker, both on the rollout nodegroup (1× L40S each). No p5.48xlarge / no Capacity Block required. The head pod runs `entrypoint-eks.sh → eval_embodied_agent.py` and writes MP4 rollouts to `${LOG_DIR}/video/eval/`. See the [Modes](#modes) section above for the invocation.
 
 ## Training Configuration
 
