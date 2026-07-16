@@ -10,9 +10,9 @@ Deploys an EKS cluster with:
 
 Deploy:
   cdk deploy --context compute_backend=eks \\
-    --context vpc_id=vpc-00ce44fb57e6e740e \\
-    --context s3_data_bucket=gr00t-rl-training-data \\
-    --context image_uri=215143956078.dkr.ecr.us-east-2.amazonaws.com/gr00t-rl-unified:latest
+    --context vpc_id=<your-vpc-id> \\
+    --context s3_data_bucket=<your-s3-bucket> \\
+    --context image_uri=<your-account>.dkr.ecr.<region>.amazonaws.com/<your-repo>:<tag>
 """
 
 import pathlib
@@ -54,9 +54,18 @@ class EKSKubeRayStack(Stack):
         learner_instance_type: str = "g6e.48xlarge",
         rollout_instance_type: str = "g6e.4xlarge",
         capacity_reservation_id: str = None,
+        mode: str = "train",
+        eval_ckpt: str = None,
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
+
+        # Validate mode at synth time — the entrypoint's fail-fast handles the
+        # mode=eval / eval_ckpt coupling at pod startup (07-CONTEXT.md decision 3),
+        # so we only guard against typos in the mode string here.
+        if mode not in ("train", "eval"):
+            raise ValueError(f"Unknown mode: {mode}. Expected 'train' or 'eval'.")
+        is_eval = mode == "eval"
 
         # ==============================================================
         # region 1. Import existing VPC and S3 data bucket
@@ -177,6 +186,15 @@ class EKSKubeRayStack(Stack):
         # ==============================================================
         # region 5. Node groups (pinned to FSx subnet for single-AZ alignment)
         # ==============================================================
+        # Training learner NG: capacity-block-backed H100 fleet.
+        # CRITICAL: Do NOT change min/max/desired between eval and train modes.
+        # CFN compares the synth template against its stored last-deployed
+        # template — any diff triggers an UpdateNodegroupConfig call, which
+        # validates the LT's CapacityReservationSpecification. That check
+        # fails once the CR expires. Keep this NG's scaling config identical
+        # to the last successful training deploy (min=max=desired=1), so
+        # eval-mode deploys are a no-op for this NG (no CFN update fired,
+        # no CR check triggered). Scale to 0 out-of-band after training runs.
         learner_ng_kwargs = dict(
             instance_types=[ec2.InstanceType(learner_instance_type)],
             ami_type=eks.NodegroupAmiType.AL2023_X86_64_NVIDIA,
@@ -222,6 +240,23 @@ class EKSKubeRayStack(Stack):
             )
 
         learner_ng = cluster.add_nodegroup_capacity("LearnerNodes", **learner_ng_kwargs)
+
+        # Eval learner NG: ON_DEMAND, no CR, no LT. Independent of the training
+        # NG's capacity-block launch template — so `cdk deploy --context mode=eval`
+        # can succeed even after the training NG's CR has expired. Both NGs coexist
+        # in the cluster; scaling is orthogonal. Head pod nodeSelector routes by
+        # is_eval (region 11).
+        eval_learner_ng = cluster.add_nodegroup_capacity(
+            "EvalLearnerNodes",
+            instance_types=[ec2.InstanceType(rollout_instance_type)],
+            ami_type=eks.NodegroupAmiType.AL2023_X86_64_NVIDIA,
+            min_size=0,
+            max_size=1,
+            desired_size=1 if is_eval else 0,
+            disk_size=200,
+            labels={"node-role": "eval-learner"},
+            subnets=ec2.SubnetSelection(subnets=[fsx_subnet]),
+        )
 
         rollout_ng = cluster.add_nodegroup_capacity(
             "RolloutNodes",
@@ -287,6 +322,7 @@ class EKSKubeRayStack(Stack):
             },
         )
         nvidia_chart.node.add_dependency(learner_ng)
+        nvidia_chart.node.add_dependency(eval_learner_ng)
         nvidia_chart.node.add_dependency(rollout_ng)
         # endregion
 
@@ -403,6 +439,53 @@ class EKSKubeRayStack(Stack):
         # ==============================================================
         # region 11. RayCluster CR (heterogeneous head + workers)
         # ==============================================================
+        # W5-revision: the mode branch is consolidated to a single dict-selection.
+        # Every downstream field that varies between train and eval reads from
+        # head_pod_shape["key"] — no scattered per-field ternaries inside the
+        # manifest literal. A future third mode (e.g., train-with-eval) is a
+        # one-branch addition here, not six sprinkled ternaries.
+        train_head_pod = {
+            "num_gpus": "8",
+            "node_role": "learner",
+            "requests": {
+                "cpu": "90",
+                "memory": "600Gi",
+                "nvidia.com/gpu": "8",
+            },
+            # No memory limit for training — matches HEAD's head-pod resources.
+            "limits": {
+                "cpu": "192",
+                "nvidia.com/gpu": "8",
+            },
+            "num_rollout_workers_env_value": str(num_rollout_workers),
+            "extra_env": [],
+            "worker_replicas": num_rollout_workers,
+        }
+        eval_head_pod = {
+            "num_gpus": "1",
+            "node_role": "eval-learner",
+            "requests": {
+                "cpu": "24",
+                "memory": "100Gi",
+                "nvidia.com/gpu": "1",
+            },
+            "limits": {
+                "cpu": "32",
+                "memory": "200Gi",
+                "nvidia.com/gpu": "1",
+            },
+            # Override NUM_ROLLOUT_WORKERS to 1 for the 2-pod eval fleet so the
+            # entrypoint's Ray-wait loop expects 1 worker, matching the CDK's
+            # worker_replicas below (07-CONTEXT.md decision 1).
+            "num_rollout_workers_env_value": "1",
+            "extra_env": [
+                {"name": "MODE", "value": "eval"},
+                {"name": "EVAL_CKPT", "value": eval_ckpt or ""},
+            ],
+            "worker_replicas": 1,
+        }
+        head_pod_shape = eval_head_pod if is_eval else train_head_pod
+
         raycluster = cluster.add_manifest(
             "RayClusterTraining",
             {
@@ -420,12 +503,14 @@ class EKSKubeRayStack(Stack):
                     "headGroupSpec": {
                         "rayStartParams": {
                             "dashboard-host": "0.0.0.0",
-                            "num-gpus": "8",
+                            "num-gpus": head_pod_shape["num_gpus"],
                         },
                         "template": {
                             "metadata": {"labels": {"ray-role": "head"}},
                             "spec": {
-                                "nodeSelector": {"node-role": "learner"},
+                                "nodeSelector": {
+                                    "node-role": head_pod_shape["node_role"]
+                                },
                                 "containers": [
                                     {
                                         "name": "ray-head",
@@ -435,15 +520,8 @@ class EKSKubeRayStack(Stack):
                                             "ulimit -n 65536; RAY_START_CMD=$(echo $KUBERAY_GEN_RAY_START_CMD | sed 's/--block//g'); eval $RAY_START_CMD; /opt/entrypoint-eks.sh"
                                         ],
                                         "resources": {
-                                            "requests": {
-                                                "cpu": "90",
-                                                "memory": "600Gi",
-                                                "nvidia.com/gpu": "8",
-                                            },
-                                            "limits": {
-                                                "cpu": "192",
-                                                "nvidia.com/gpu": "8",
-                                            },
+                                            "requests": head_pod_shape["requests"],
+                                            "limits": head_pod_shape["limits"],
                                         },
                                         "env": [
                                             {
@@ -476,12 +554,15 @@ class EKSKubeRayStack(Stack):
                                             },
                                             {
                                                 "name": "NUM_ROLLOUT_WORKERS",
-                                                "value": str(num_rollout_workers),
+                                                "value": head_pod_shape[
+                                                    "num_rollout_workers_env_value"
+                                                ],
                                             },
                                             {
                                                 "name": "PYTHONPATH",
                                                 "value": "/mnt/fsx/third_party/RLinf:/mnt/fsx/third_party/Isaac-GR00T:/mnt/fsx/third_party/embodied-ai-platform:/mnt/fsx/third_party/IsaacLab/source:/mnt/fsx/workflows/rheo/scripts:/mnt/fsx/workflows/rheo/scripts/simulation/rl",
                                             },
+                                            *head_pod_shape["extra_env"],
                                         ],
                                         "volumeMounts": [
                                             {
@@ -528,9 +609,9 @@ class EKSKubeRayStack(Stack):
                     "workerGroupSpecs": [
                         {
                             "groupName": "rollout-workers",
-                            "replicas": num_rollout_workers,
-                            "minReplicas": num_rollout_workers,
-                            "maxReplicas": num_rollout_workers,
+                            "replicas": head_pod_shape["worker_replicas"],
+                            "minReplicas": head_pod_shape["worker_replicas"],
+                            "maxReplicas": head_pod_shape["worker_replicas"],
                             "rayStartParams": {"num-gpus": "1"},
                             "template": {
                                 "metadata": {"labels": {"ray-role": "worker"}},
@@ -659,6 +740,12 @@ class EKSKubeRayStack(Stack):
         )
         CfnOutput(
             self,
+            "EvalLearnerNodeGroupArn",
+            value=eval_learner_ng.nodegroup_arn,
+            description=f"Eval-mode learner node group ARN ({rollout_instance_type}, ON_DEMAND, no CR)",
+        )
+        CfnOutput(
+            self,
             "RolloutNodeGroupArn",
             value=rollout_ng.nodegroup_arn,
             description=f"Rollout node group ARN ({rollout_instance_type})",
@@ -686,5 +773,11 @@ class EKSKubeRayStack(Stack):
             "DataBucketName",
             value=data_bucket.bucket_name,
             description="S3 data bucket (DRA-linked to FSx)",
+        )
+        CfnOutput(
+            self,
+            "Mode",
+            value=mode,
+            description="Deployment mode (train or eval)",
         )
         # endregion

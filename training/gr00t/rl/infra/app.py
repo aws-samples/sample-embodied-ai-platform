@@ -10,9 +10,17 @@ Deploy (SageMaker heterogeneous):
 
 Deploy (EKS + KubeRay):
   cdk deploy --context compute_backend=eks \\
-    --context vpc_id=vpc-00ce44fb57e6e740e \\
-    --context s3_data_bucket=gr00t-rl-training-data \\
-    --context image_uri=215143956078.dkr.ecr.us-east-2.amazonaws.com/gr00t-rl-unified:latest
+    --context vpc_id=<your-vpc-id> \\
+    --context s3_data_bucket=<your-s3-bucket> \\
+    --context image_uri=<your-account>.dkr.ecr.<region>.amazonaws.com/<your-repo>:<tag>
+
+Deploy (EKS + KubeRay - eval on a saved checkpoint):
+  cdk deploy --context compute_backend=eks \\
+    --context vpc_id=<your-vpc-id> \\
+    --context s3_data_bucket=<your-s3-bucket> \\
+    --context image_uri=<your-account>.dkr.ecr.<region>.amazonaws.com/<your-repo>:<tag> \\
+    --context mode=eval \\
+    --context eval_ckpt=/mnt/fsx/rl-training/results/<run>/checkpoints/global_step_N/actor/model_state_dict/full_weights.pt
 
 Context parameters:
   vpc_id                - Existing VPC ID (creates new if omitted for batch-mnp)
@@ -26,6 +34,8 @@ Context parameters:
   learner_instance_type - EC2 instance type for learner node group (default: g6e.48xlarge)
   rollout_instance_type - EC2 instance type for rollout node group (default: g6e.4xlarge)
   compute_backend       - "batch-mnp" (default), "sagemaker", or "eks"
+  "mode"                - "train" (default) or "eval" — routes the EKS backend to training or standalone eval
+  "eval_ckpt"           - Full path to actor checkpoint (.pt) for mode=eval; ignored for mode=train
 """
 import os
 import aws_cdk as cdk
@@ -72,6 +82,8 @@ elif compute_backend == "eks":
             app.node.try_get_context("rollout_instance_type") or "g6e.4xlarge"
         ),
         capacity_reservation_id=app.node.try_get_context("capacity_reservation_id"),
+        mode=app.node.try_get_context("mode") or "train",
+        eval_ckpt=app.node.try_get_context("eval_ckpt"),
         env=env,
     )
 else:
