@@ -295,8 +295,12 @@ elif [ "${MODE}" = "eval" ]; then
         #                                          NUM_ROLLOUT_WORKERS env var which is
         #                                          injected by CDK from the top-level
         #                                          `num_rollout_workers` context param)
-        #   env.eval.total_num_envs=8             (proven per-pod env footprint)
-        #   algorithm.eval_rollout_epoch=8        (8 × 8 = 64 episodes; Wilson 95% CI ~±0.07)
+        #   env.eval.total_num_envs=64            (NVIDIA benchmark; matches yaml default)
+        #   algorithm.eval_rollout_epoch=1        (1 × 64 = 64 episodes with
+        #                                          ignore_terminations=True; matches yaml)
+        #   ++env.eval.ignore_terminations=True   (matches yaml default, explicit for defense)
+        #   ++env.eval.use_fixed_reset_state_ids=True (matches yaml default, explicit)
+        #   ++env.eval.max_episode_steps=256      (matches yaml default, explicit)
         #   rollout.model.model_path              (base HF snapshot)
         #   actor.model.model_path                (schema-only reference, per hf_worker.py:67)
         #   runner.only_eval=True                 (drives EmbodiedEvalRunner)
@@ -330,8 +334,11 @@ elif [ "${MODE}" = "eval" ]; then
             '+cluster.component_placement.rollout=1' \
             '+cluster.component_placement.env=1' \
             "cluster.num_nodes=${TOTAL_EXPECTED}" \
-            "env.eval.total_num_envs=8" \
-            "algorithm.eval_rollout_epoch=8" \
+            "env.eval.total_num_envs=64" \
+            "algorithm.eval_rollout_epoch=1" \
+            "++env.eval.ignore_terminations=True" \
+            "++env.eval.use_fixed_reset_state_ids=True" \
+            "++env.eval.max_episode_steps=256" \
             "rollout.model.model_path=${MODEL_PATH}" \
             "actor.model.model_path=${MODEL_PATH}" \
             "++runner.only_eval=True" \
