@@ -124,8 +124,8 @@ AWS_DEFAULT_REGION=us-east-2 cdk deploy GR00TRLEKSStack \
 ### MODE=eval
 
 - **Purpose:** standalone evaluation of a saved RL checkpoint. Produces MP4 rollout videos. No learner GPU required.
-- **Topology:** 1 head pod + 1 worker pod, both on `<rollout-instance>` (1× L40S each). 64 episodes total (8 envs × 8 rollout epochs).
-- **Invocation:**
+- **Topology:** 1 head pod + N worker pods, all on `<rollout-instance>` (1× L40S each). Fleet size scales with the `num_rollout_workers` CDK context param — default is 1 (2 pods total, smoke config); benchmark eval at the yaml-default `total_num_envs=64` needs enough GPUs to stay inside a proven envelope on L40S-class hardware. Setting `num_rollout_workers=7` gives an 8-pod fleet at 8 envs/GPU across all 8 GPUs.
+- **Invocation (smoke — matches the shipped smoke defaults):**
 
 ```bash
 AWS_DEFAULT_REGION=us-east-2 cdk deploy GR00TRLEKSStack \
@@ -137,8 +137,23 @@ AWS_DEFAULT_REGION=us-east-2 cdk deploy GR00TRLEKSStack \
   --context eval_ckpt=/mnt/fsx/<your-run-path>/checkpoints/global_step_N/actor/model_state_dict/full_weights.pt
 ```
 
-- **Prerequisites:** the rollout nodegroup can scale to 2 nodes; the training learner nodegroup can be at `desired=0` (no Capacity Block required).
-- **Runtime:** ~8-15 minutes end-to-end (setup dominated; the eval loop itself is ~30 min for 64 episodes at N=8 envs, but bootstrap and shutdown are the majority).
+- **Invocation (benchmark eval at `total_num_envs=64`):**
+
+```bash
+AWS_DEFAULT_REGION=us-east-2 cdk deploy GR00TRLEKSStack \
+  --context compute_backend=eks \
+  --context vpc_id=<your-vpc-id> \
+  --context s3_data_bucket=<your-s3-bucket> \
+  --context image_uri=<your-ecr-uri> \
+  --context mode=eval \
+  --context num_rollout_workers=7 \
+  --context eval_ckpt=/mnt/fsx/<your-run-path>/checkpoints/global_step_N/actor/model_state_dict/full_weights.pt
+```
+
+Omit `--context eval_ckpt=...` when the model at `MODEL_PATH` is itself the RL-trained snapshot (no `.pt` overlay needed).
+
+- **Prerequisites:** the rollout nodegroup can scale to `1 + num_rollout_workers` nodes total (head runs on the eval-learner NG, workers on the rollout NG). The training learner nodegroup can be at `desired=0` (no Capacity Block required).
+- **Runtime:** benchmark eval (`num_rollout_workers=7`, `total_num_envs=64`, `eval_rollout_epoch=1`) runs ~15-20 min end-to-end per stage. Smoke eval (`num_rollout_workers=1`, `total_num_envs=8`, `eval_rollout_epoch=8`) also 64 episodes but on fewer GPUs, ~30-40 min.
 - **Output:** MP4 videos at `${LOG_DIR}/video/eval/` on FSx (auto-exported to `s3://<your-s3-bucket>/rl-training/results/…` via the FSx Data Repository Association).
 - **Retrieve videos:**
 
@@ -160,8 +175,8 @@ kubectl logs -n training -l ray.io/node-type=head | grep -A2 'success_once'
 **Notes:**
 
 - `eval_ckpt` must be a full FSx-visible path (mount root `/mnt/fsx`). Objects on the S3 side of the DRA are auto-imported to FSx lazily on first access.
-- MODE=eval fails fast at pod startup if `eval_ckpt` points to a non-existent file. If `eval_ckpt` is omitted or empty, the pod runs base-model eval against the HF snapshot at `MODEL_PATH` (no RL overlay).
-- The 2-pod eval topology is fixed at `env.eval.total_num_envs=8, algorithm.eval_rollout_epoch=8` via Hydra overrides in `entrypoint-eks.sh`. To change these, edit that override list.
+- MODE=eval fails fast at pod startup if `eval_ckpt` points to a non-existent file. If `eval_ckpt` is omitted or empty, the pod runs base-model eval against the HF snapshot at `MODEL_PATH` (no RL overlay). Note: on the RLinf path (`eval_embodied_agent.py`), the model_path itself IS the payload — the class-selection to `GR00T_N1_5_ForRLActionPrediction` happens automatically, so no `.pt` overlay is needed when the snapshot at `MODEL_PATH` is already the RL-trained model.
+- The eval topology is driven by Hydra overrides in `entrypoint-eks.sh` (`env.eval.total_num_envs=64, algorithm.eval_rollout_epoch=1, ++env.eval.ignore_terminations=True, ++env.eval.use_fixed_reset_state_ids=True, ++env.eval.max_episode_steps=256`) matching the yaml defaults. Component placement uses hardware-rank ranges (`env=0-N, rollout=0-N, actor=0-N` where `N = TOTAL_EXPECTED - 1`) to spawn one worker per Ray node — a scalar value like `env=1` would parse as "1 process on GPU rank 1" and pile every env onto a single GPU regardless of cluster size. To change env count, edit that override list.
 - Video output size is roughly a few hundred MB per 64-episode run (256 frames per episode × 64 episodes).
 
 ## Architecture
@@ -192,7 +207,7 @@ Storage: EFS via CSI driver at /mnt/efs
 Operators: KubeRay, NVIDIA device plugin
 ```
 
-**Eval mode** (`--context mode=eval`) drops the learner pod and uses a 2-pod topology: 1 head + 1 worker, both on the rollout nodegroup (1× L40S each). No p5.48xlarge / no Capacity Block required. The head pod runs `entrypoint-eks.sh → eval_embodied_agent.py` and writes MP4 rollouts to `${LOG_DIR}/video/eval/`. See the [Modes](#modes) section above for the invocation.
+**Eval mode** (`--context mode=eval`) drops the training learner pod and uses a `(1 + num_rollout_workers)`-pod topology on `<rollout-instance>` (1× L40S each). Default is 2 pods (smoke); benchmark eval at the yaml-default `total_num_envs=64` typically uses `--context num_rollout_workers=7` (8 pods total, 8 envs/GPU). No p5.48xlarge / no Capacity Block required. The head pod runs `entrypoint-eks.sh → eval_embodied_agent.py` and writes MP4 rollouts to `${LOG_DIR}/video/eval/`. See the [Modes](#modes) section above for both smoke and benchmark invocations.
 
 ## Training Configuration
 
