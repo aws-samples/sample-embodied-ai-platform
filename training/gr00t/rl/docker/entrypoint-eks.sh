@@ -291,7 +291,10 @@ elif [ "${MODE}" = "eval" ]; then
         #                                          Format B (single actor,env,rollout key) —
         #                                          either way we replace the whole dict via
         #                                          Hydra's `+key=...` syntax after clearing it)
-        #   cluster.num_nodes=2                   (2-pod head+worker topology)
+        #   cluster.num_nodes=${TOTAL_EXPECTED}   (1 head + N workers, computed from
+        #                                          NUM_ROLLOUT_WORKERS env var which is
+        #                                          injected by CDK from the top-level
+        #                                          `num_rollout_workers` context param)
         #   env.eval.total_num_envs=8             (proven per-pod env footprint)
         #   algorithm.eval_rollout_epoch=8        (8 × 8 = 64 episodes; Wilson 95% CI ~±0.07)
         #   rollout.model.model_path              (base HF snapshot)
@@ -326,7 +329,7 @@ elif [ "${MODE}" = "eval" ]; then
             '+cluster.component_placement.actor=1' \
             '+cluster.component_placement.rollout=1' \
             '+cluster.component_placement.env=1' \
-            "cluster.num_nodes=2" \
+            "cluster.num_nodes=${TOTAL_EXPECTED}" \
             "env.eval.total_num_envs=8" \
             "algorithm.eval_rollout_epoch=8" \
             "rollout.model.model_path=${MODEL_PATH}" \

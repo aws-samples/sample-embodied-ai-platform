@@ -474,15 +474,17 @@ class EKSKubeRayStack(Stack):
                 "memory": "200Gi",
                 "nvidia.com/gpu": "1",
             },
-            # Override NUM_ROLLOUT_WORKERS to 1 for the 2-pod eval fleet so the
-            # entrypoint's Ray-wait loop expects 1 worker, matching the CDK's
-            # worker_replicas below (07-CONTEXT.md decision 1).
-            "num_rollout_workers_env_value": "1",
+            # Eval-mode worker count follows the top-level `num_rollout_workers`
+            # context param. Phase 7's default was 1 (2-pod head+worker fleet);
+            # Phase 07.1 Step A bumps this to 3 (4-pod fleet at 16 envs/GPU for
+            # NVIDIA's `total_num_envs=64` benchmark topology). The entrypoint's
+            # Ray-wait loop keys off NUM_ROLLOUT_WORKERS to expect the right count.
+            "num_rollout_workers_env_value": str(num_rollout_workers),
             "extra_env": [
                 {"name": "MODE", "value": "eval"},
                 {"name": "EVAL_CKPT", "value": eval_ckpt or ""},
             ],
-            "worker_replicas": 1,
+            "worker_replicas": num_rollout_workers,
         }
         head_pod_shape = eval_head_pod if is_eval else train_head_pod
 
