@@ -312,11 +312,14 @@ elif [ "${MODE}" = "eval" ]; then
         # Used liberally here because RLinf's config schema is a strict struct
         # and adding new keys via plain `key=val` fails.
         # NOTE: `~cluster.component_placement` clears any existing dict-key from the YAML
-        # (Format B's `actor,env,rollout: all`) then we re-add just the eval-needed keys.
-        # We MUST include `actor` even though eval doesn't spawn an actor worker, because
+        # (upstream's `actor: 0-3, env,rollout: 4-7` DGX-shape) then we re-add
+        # ranges scoped to our cluster (0..TOTAL_EXPECTED-1). Placement values MUST
+        # be ranges — a scalar (`env=1`) is parsed as "1 process on GPU rank 1"
+        # and world_size stays at 1 (Phase 7.1 Step A OOM root cause). We MUST
+        # include `actor` even though eval doesn't spawn an actor worker, because
         # RLinf's shared `validate_cfg` unconditionally calls `get_world_size('actor')` on
-        # FSDP configs — colocating actor on the same GPU as env/rollout satisfies the
-        # validator without spawning anything (the eval script only creates env+rollout).
+        # FSDP configs — a matching range satisfies the validator without spawning
+        # anything (the eval script only creates env+rollout).
         # Build Hydra overrides. `++runner.ckpt_path` is only emitted when
         # EVAL_CKPT is non-empty — otherwise rollout worker's torch.load()
         # would receive an empty string. Empty EVAL_CKPT means "base-model
@@ -326,13 +329,24 @@ elif [ "${MODE}" = "eval" ]; then
             CKPT_ARG+=("++runner.ckpt_path=${EVAL_CKPT}")
         fi
 
+        # RLinf placement values must be resource-rank RANGES (e.g. "0-7"), not
+        # scalars. A scalar `env=1` is parsed as "1 process on GPU rank 1" so
+        # world_size stays at 1 regardless of cluster.num_nodes, and all
+        # total_num_envs pile onto a single worker (Phase 7.1 Step A: caused
+        # OOM at total_num_envs=64). "0-N" gives one worker per GPU across N+1
+        # Ray nodes; actor=0-N is validator-appeasement only (eval never spawns
+        # an actor worker; see rlinf/config.py:validate_cfg for the assertion).
+        # Matches the shipped RLinf eval pattern in
+        # examples/embodiment/config/robotwin_place_empty_cup_ppo_openvlaoft_eval.yaml.
+        RANK_RANGE="0-$((TOTAL_EXPECTED - 1))"
+
         /isaac-sim/python.sh "${EVAL_SCRIPT}" \
             --config-path "${CONFIG_SRC}" \
             --config-name "${CONFIG_NAME}" \
             '~cluster.component_placement' \
-            '+cluster.component_placement.actor=1' \
-            '+cluster.component_placement.rollout=1' \
-            '+cluster.component_placement.env=1' \
+            "+cluster.component_placement.actor=${RANK_RANGE}" \
+            "+cluster.component_placement.rollout=${RANK_RANGE}" \
+            "+cluster.component_placement.env=${RANK_RANGE}" \
             "cluster.num_nodes=${TOTAL_EXPECTED}" \
             "env.eval.total_num_envs=64" \
             "algorithm.eval_rollout_epoch=1" \
