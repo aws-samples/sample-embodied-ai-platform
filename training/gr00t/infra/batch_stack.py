@@ -46,7 +46,7 @@ class BatchStack(Stack):
             vpc_id: Existing VPC ID to reuse (optional)
             efs_id: Existing EFS file system ID to reuse (optional)
             efs_sg_id: Existing EFS security group ID (required if efs_id is provided)
-            ecr_image_uri: Existing ECR image URI (e.g. 123456789012.dkr.ecr.us-west-2.amazonaws.com/gr00t-finetune:latest).
+            ecr_image_uri: Existing ECR image URI (e.g. <your-account>.dkr.ecr.<region>.amazonaws.com/gr00t-finetune:latest).
                           If not provided, builds from local Dockerfile.
             dataset_bucket: S3 bucket name for dataset read-only access (optional)
             s3_upload_uri: S3 URI for checkpoint uploads (e.g., s3://bucket/path). If not provided, creates a new bucket.

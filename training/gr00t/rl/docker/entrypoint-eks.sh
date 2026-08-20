@@ -157,9 +157,9 @@ if [ "${MODE:-train}" = "train" ]; then
             echo "Resuming run, reusing existing log dir: ${LOG_DIR}"
         else
             # Provenance-in-path: <config>_<backend>_<mode>/<timestamp>. COMPUTE_BACKEND
-            # is set by the CDK RayCluster env ("eks" or "hyperpod-eks"); defaults to eks.
-            # Distinguishes eks vs hyperpod and train vs eval at a glance (was ..._eks/,
-            # which collided across both backends and both modes).
+            # is set by the CDK RayCluster env; defaults to eks.
+            # Distinguishes backend and train vs eval at a glance (was ..._eks/,
+            # which collided across modes).
             LOG_DIR="${FSX_MOUNT}/rl-training/results/${CONFIG_NAME}_${COMPUTE_BACKEND:-eks}_train/$(date +'%Y%m%d-%H%M%S')"
         fi
         TOTAL_ENVS=$((NUM_EXPECTED_WORKERS * ENVS_PER_WORKER))

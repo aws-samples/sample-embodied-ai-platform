@@ -283,8 +283,8 @@ Examples:
 
   # Explicit params:
   python submit_sagemaker_training.py \\
-    --image-uri 215143956078.dkr.ecr.us-west-2.amazonaws.com/gr00t-rl-unified:latest \\
-    --execution-role-arn arn:aws:iam::215143956078:role/GR00T-RL-SageMaker-ExecutionRole \\
+    --image-uri <your-account>.dkr.ecr.<region>.amazonaws.com/<repo>:<tag> \\
+    --execution-role-arn arn:aws:iam::<your-account>:role/<role-name> \\
     --efs-id fs-12345 \\
     --s3-output s3://my-bucket/sagemaker-output/ \\
     --subnet-ids subnet-aaa,subnet-bbb \\

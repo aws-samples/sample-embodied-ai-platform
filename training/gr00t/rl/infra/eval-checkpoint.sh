@@ -12,7 +12,7 @@
 # monitors" mechanism made reproducible with standard tooling + a committed script.
 #
 # ─────────────────────────────────────────────────────────────────────────────
-#  SAFETY MODEL — READ THIS FIRST  (mirrors deploy-hyperpod-eks.sh verbatim)
+#  SAFETY MODEL — READ THIS FIRST
 # ─────────────────────────────────────────────────────────────────────────────
 # By DEFAULT this script runs in DRY-RUN mode: it PRINTS every mutating / AWS /
 # cdk / kubectl / deploy command it *would* run, prefixed with "DRY-RUN >>", and
@@ -23,7 +23,6 @@
 # the run()/run_sh() guard, so it is impossible to spend anything without --execute.
 #
 #   Dry-run (default, safe):   ./eval-checkpoint.sh --ckpt s3://<bucket>/<...>/full_weights.pt
-#   Dry-run (eks backend):     ./eval-checkpoint.sh --backend eks --ckpt s3://... --n 64
 #   Real (PAID) eval:          ./eval-checkpoint.sh --ckpt s3://... --execute
 #   Syntax check only:         bash -n ./eval-checkpoint.sh
 #   Usage:                     ./eval-checkpoint.sh --help
@@ -39,35 +38,30 @@
 #
 # PUBLIC-MIRROR RULE:
 #   This script is destined for the public mirror. It contains NO internal IDs.
-#   Account / VPC / FSx / bucket / AMI / capacity-reservation ids are ALL supplied
-#   via env or args (exactly as deploy-hyperpod-eks.sh does). Nothing internal is baked in.
+#   Account / VPC / FSx / bucket / capacity-reservation ids are ALL supplied
+#   via env or args. Nothing internal is baked in.
 #
 # ─────────────────────────────────────────────────────────────────────────────
-#  BACKEND SELECTION  ( --backend {hyperpod-eks | eks} , default hyperpod-eks )
+#  BACKEND: EKS heterogeneous stack (GR00TRLEKSStack)
 # ─────────────────────────────────────────────────────────────────────────────
-# The DEFAULT backend is hyperpod-eks — with --backend absent the behavior is
-# byte-identical to the original HyperPod runbook: it provisions via
-# deploy-hyperpod-eks.sh (MODE=eval) and tears down with `aws sagemaker delete-cluster`
-# (a SageMaker HyperPod-cluster op).
-#
-# --backend eks targets the plain-EKS heterogeneous stack (GR00TRLEKSStack). That
-# path has NO deploy script: it PROVISIONS by invoking `cdk deploy GR00TRLEKSStack
-# --context compute_backend=eks --context mode=eval ...` directly (per the
-# deploy-eks-training SKILL), and its capacity is EKS *managed nodegroups*, not a
-# SageMaker cluster — so TEARDOWN scales the eval-learner + rollout nodegroups to 0
-# via `aws eks update-nodegroup-config ... desiredSize=0` (NOT sagemaker delete-cluster).
-# vpc_id / s3_data_bucket / image_uri are read from env exactly as the eks SKILL shows.
+# This runbook targets the plain-EKS heterogeneous stack (GR00TRLEKSStack). It
+# PROVISIONS by invoking `cdk deploy GR00TRLEKSStack --context compute_backend=eks
+# --context mode=eval ...` directly (per the deploy-eks-training SKILL), and its
+# capacity is EKS *managed nodegroups*, not a SageMaker cluster — so TEARDOWN scales
+# the eval-learner + rollout nodegroups to 0 via `aws eks update-nodegroup-config ...
+# desiredSize=0`. vpc_id / s3_data_bucket / image_uri are read from env exactly as
+# the eks SKILL shows.
 #
 # ─────────────────────────────────────────────────────────────────────────────
-#  CAVEAT (eks backend only): ONE STACK CANNOT BE BOTH train AND eval AT ONCE
+#  CAVEAT: ONE STACK CANNOT BE BOTH train AND eval AT ONCE
 # ─────────────────────────────────────────────────────────────────────────────
 # A single GR00TRLEKSStack bakes the head pod's MODE (train vs eval) at DEPLOY time
 # (the RayCluster head-pod shape + env are selected by is_eval at synth). You cannot
-# run one GR00TRLEKSStack in train and eval mode simultaneously. Therefore, on the
-# eks backend, eval-checkpoint.sh is an END-OF-RUN / SEPARATE-WINDOW tool: run it
-# after a training run (or in its own deploy window), not against a live training stack.
+# run one GR00TRLEKSStack in train and eval mode simultaneously. Therefore
+# eval-checkpoint.sh is an END-OF-RUN / SEPARATE-WINDOW tool: run it after a training
+# run (or in its own deploy window), not against a live training stack.
 #
-# For IN-FLIGHT eval DURING an eks training run, do NOT use this script — use the
+# For IN-FLIGHT eval DURING a training run, do NOT use this script — use the
 # `val_check_interval=N` knob instead: it streams the aggregate eval metric into the
 # SAME TensorBoard as the training run, no second stack required. The two are
 # complementary, not interchangeable:
@@ -76,9 +70,9 @@
 #   * val_check_interval=N -> the in-flight AGGREGATE eval number, live in TensorBoard.
 #
 # ─────────────────────────────────────────────────────────────────────────────
-#  DESIGN NOTES / SELF-CONTAINED STAGE MACHINE  (eks; validated on the 2026-08-20 run)
+#  DESIGN NOTES / SELF-CONTAINED STAGE MACHINE  (validated on the 2026-08-20 run)
 # ─────────────────────────────────────────────────────────────────────────────
-# The eks backend drives the ENTIRE per-stage sweep in ONE `--execute` invocation with NO
+# This backend drives the ENTIRE per-stage sweep in ONE `--execute` invocation with NO
 # human/agent in the loop (public-mirror requirement). It deploys the stack + forms the
 # RayCluster ONCE, then for each requested stage: patches success_stage on FSx -> REFORMS
 # the RayCluster (reform_raycluster_eks) so a fresh head re-reads the stage -> waits for a
@@ -95,12 +89,11 @@
 #     local test -f). An s3://<S3_DATA_BUCKET>/<key> arg is auto-translated to ${FSX_MOUNT}/<key>.
 # R4. FSx-side ops (patch/read) run on the UNIFIED image with FSx mounted — auto-discovered
 #     from a Running RayCluster worker (no separate helper needed); pin FSX_HELPER_POD only
-#     if you maintain a dedicated unified-image helper (required for hyperpod-eks).
+#     if you maintain a dedicated unified-image helper.
 # R5. Teardown scales NGs to 0 OUTSIDE CloudFormation; a later identical `cdk deploy` won't
 #     un-drift them (no template change) — restore_eval_ng_desired() re-asserts desired sizes.
 # SAFETY: every stage is deadline-guarded (REFORM_TIMEOUT + per-stage MAX_RUNTIME) and a
 # FRESHNESS ASSERTION fails closed (won't report a metric unless a NEW LOG_DIR appeared).
-# hyperpod-eks does NOT implement the reform and stays single-stage-per-invocation.
 #
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -109,8 +102,7 @@ set -euo pipefail
 # =============================================================================
 #  Configuration (override via env vars before invoking — NO internal defaults)
 # =============================================================================
-# Region / account: no baked default (deploy-hyperpod-eks.sh bakes a default account;
-# this public-mirror script deliberately does NOT — it must be supplied by the operator).
+# Region / account: no baked default — the account must be supplied by the operator.
 REGION="${AWS_REGION:-us-east-2}"
 ACCOUNT_ID="${CDK_DEFAULT_ACCOUNT:-}"
 
@@ -118,16 +110,11 @@ ACCOUNT_ID="${CDK_DEFAULT_ACCOUNT:-}"
 VPC_ID="${VPC_ID:-}"
 S3_DATA_BUCKET="${S3_DATA_BUCKET:-}"
 IMAGE_URI="${IMAGE_URI:-}"
-# Optional pinned Isaac-Sim-compatible (driver <=580) HyperPod base AMI. Empty => stock DLAMI.
-# NOTE: driver 595 on the stock DLAMI crashes Isaac Sim's RTX renderer (SKILL #15/#16);
-# pass the driver-580 AL2023 AMI via HYPERPOD_AMI_ID for camera-based eval.
-HYPERPOD_AMI_ID="${HYPERPOD_AMI_ID:-}"
 
 # Resource names (these are stack resource names, not secrets — same as the deploy script).
-HYPERPOD_CLUSTER_NAME="${HYPERPOD_CLUSTER_NAME:-gr00t-rl-hyperpod}"
 FSX_MOUNT="${FSX_MOUNT:-/mnt/fsx}"
 CONFIG_NAME="${CONFIG_NAME:-isaaclab_ppo_gr00t_assemble_trocar}"
-COMPUTE_BACKEND="${COMPUTE_BACKEND:-hyperpod-eks}"
+COMPUTE_BACKEND="eks"
 K8S_NAMESPACE="${K8S_NAMESPACE:-training}"
 # FSx-side ops (patch success_stage, read tfevents) need the UNIFIED image
 # (bash+python3+tensorboard) with FSx mounted. Default EMPTY => the script auto-discovers
@@ -135,25 +122,25 @@ K8S_NAMESPACE="${K8S_NAMESPACE:-training}"
 # SELF-CONTAINED with no separate helper to pre-create. Pin FSX_HELPER_POD only if you
 # maintain a dedicated unified-image helper pod (then it is used as-is, default container).
 FSX_HELPER_POD="${FSX_HELPER_POD:-}"
-# Per-stage RayCluster reform tuning (eks) — the script drives stage transitions itself
+# Per-stage RayCluster reform tuning — the script drives stage transitions itself
 # (patch success_stage -> reform head+workers -> read metric), no human/agent in the loop.
 REFORM_TIMEOUT="${REFORM_TIMEOUT:-900}"      # max seconds to reach num_nodes Ray nodes/stage
 REFORM_RECYCLE_EVERY="${REFORM_RECYCLE_EVERY:-120}"  # re-recycle not-joined workers every N s
 RAY_HEAD_CONTAINER="${RAY_HEAD_CONTAINER:-ray-head}"
 RAY_WORKER_CONTAINER="${RAY_WORKER_CONTAINER:-ray-worker}"
 
-# EKS-backend resource names (used only when --backend eks; stack resource names, not
-# secrets — same as the deploy-eks-training SKILL). The eval-learner + rollout managed
-# nodegroups are created by GR00TRLEKSStack; CDK auto-generates their physical names, so
-# by default teardown DISCOVERS them (list-nodegroups + substring match). Pin them
-# explicitly via EKS_EVAL_LEARNER_NG / EKS_ROLLOUT_NG to skip discovery.
+# EKS resource names (stack resource names, not secrets — same as the deploy-eks-training
+# SKILL). The eval-learner + rollout managed nodegroups are created by GR00TRLEKSStack;
+# CDK auto-generates their physical names, so by default teardown DISCOVERS them
+# (list-nodegroups + substring match). Pin them explicitly via EKS_EVAL_LEARNER_NG /
+# EKS_ROLLOUT_NG to skip discovery.
 EKS_STACK_NAME="${EKS_STACK_NAME:-GR00TRLEKSStack}"
 EKS_CLUSTER_NAME="${EKS_CLUSTER_NAME:-gr00t-rl-eks}"
 EKS_EVAL_LEARNER_NG="${EKS_EVAL_LEARNER_NG:-}"
 EKS_ROLLOUT_NG="${EKS_ROLLOUT_NG:-}"
 
-# EKS-backend eval TOPOLOGY (the silent-nodegroup-churn fix — Phase 12).
-# The eks eval `cdk deploy` (launch_eval_eks) MUST pin the rollout/eval-learner
+# EKS eval TOPOLOGY (the silent-nodegroup-churn fix — Phase 12).
+# The eval `cdk deploy` (launch_eval_eks) MUST pin the rollout/eval-learner
 # instance type and worker count. If omitted, CDK falls through to app.py DEFAULTS
 # (rollout_instance_type=g6e.4xlarge, num_rollout_workers=4) and CloudFormation
 # RECREATES the EvalLearnerNodes + RolloutNodes managed nodegroups at the wrong,
@@ -191,10 +178,9 @@ EKS_ROLLOUT_SUBNET_IDS="${EKS_ROLLOUT_SUBNET_IDS:-}"
 # FSx stays in 2a and is read cross-AZ. Unset == app.py default == the FSx-AZ subnet.
 EKS_EVAL_LEARNER_SUBNET_IDS="${EKS_EVAL_LEARNER_SUBNET_IDS:-}"
 
-# The eval-path deploy this script wraps, and the reused FSx success_stage patch.
-# Both referenced-not-copied (D-15). SCRIPT_DIR anchors deploy-hyperpod-eks.sh next to us.
+# The reused FSx success_stage patch, referenced-not-copied (D-15). SCRIPT_DIR anchors
+# the infra dir (used as the cwd for `cdk deploy`).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DEPLOY_SCRIPT="${DEPLOY_SCRIPT:-${SCRIPT_DIR}/deploy-hyperpod-eks.sh}"
 # patch-success-stage.sh lives on the FSx mount inside the fsx-helper pod (sha256-verified
 # copy of the git-tracked source). Override PATCH_SCRIPT for a different mount layout.
 PATCH_SCRIPT="${PATCH_SCRIPT:-${FSX_MOUNT}/scratch/step-a/patch-success-stage.sh}"
@@ -216,21 +202,18 @@ EXECUTE=0
 #  Arg parsing
 # =============================================================================
 usage() {
-  # Print the top-of-file doc block (matches deploy-hyperpod-eks.sh --help behavior),
-  # then the explicit arg synopsis.
+  # Print the top-of-file doc block, then the explicit arg synopsis.
   grep -E '^# ' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
   cat <<'USAGE'
 
 eval-checkpoint.sh — usage
-  --backend <hyperpod-eks|eks>  Compute backend (default hyperpod-eks). hyperpod-eks =
-                             deploy-hyperpod-eks.sh + `aws sagemaker delete-cluster`
-                             teardown (unchanged). eks = `cdk deploy GR00TRLEKSStack
-                             --context mode=eval ...` provision + `aws eks
-                             update-nodegroup-config ... desiredSize=0` teardown.
-                             CAVEAT (eks): one GR00TRLEKSStack cannot be train AND eval
-                             at once (head-pod mode is baked at deploy). On eks this is
-                             an end-of-run / separate-window tool; for in-flight eval
-                             during an eks training run use `val_check_interval=N`
+  --backend eks              Compute backend (default and only: eks). Provisions via
+                             `cdk deploy GR00TRLEKSStack --context mode=eval ...` and
+                             tears down with `aws eks update-nodegroup-config ...
+                             desiredSize=0`. CAVEAT: one GR00TRLEKSStack cannot be
+                             train AND eval at once (head-pod mode is baked at deploy);
+                             this is an end-of-run / separate-window tool. For in-flight
+                             eval during a training run use `val_check_interval=N`
                              (streams the aggregate eval into the same TensorBoard).
   --ckpt <s3-uri|fsx-path>   Actor .pt checkpoint to eval (passed as EVAL_CKPT).
   --model-path <fsx-dir>     Base/SFT model dir to eval (passed as MODEL_PATH). Mutually
@@ -242,7 +225,7 @@ eval-checkpoint.sh — usage
   --execute                  Actually run the PAID g6e eval (default = dry-run).
   -h | --help                Show this help and exit (zero AWS calls).
 
-eks-backend TOPOLOGY env vars (silent-NG-churn fix — override before invoking):
+TOPOLOGY env vars (silent-NG-churn fix — override before invoking):
   EKS_ROLLOUT_INSTANCE_TYPE  Rollout + eval-learner instance type (default g6e.8xlarge).
                              MUST be >= g6e.8xlarge: the eval head pod requests
                              cpu:24/mem:100Gi, which a g6e.4xlarge (the app.py
@@ -271,7 +254,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # =============================================================================
-#  Echo helpers + run() guard  (verbatim from deploy-hyperpod-eks.sh)
+#  Echo helpers + run() guard
 # =============================================================================
 say()  { echo ""; echo "==> $*"; }
 ok()   { echo "    [OK]   $*"; }
@@ -329,8 +312,8 @@ run_capture_argv() {
 #  Input validation
 # =============================================================================
 case "$COMPUTE_BACKEND" in
-  hyperpod-eks|eks) ;;
-  *) die "--backend must be 'hyperpod-eks' or 'eks' (got '$COMPUTE_BACKEND')." ;;
+  eks) ;;
+  *) die "--backend must be 'eks' (the only supported backend; got '$COMPUTE_BACKEND')." ;;
 esac
 if [[ -n "$CKPT" && -n "$MODEL_PATH_ARG" ]]; then
   die "Pass EITHER --ckpt OR --model-path, not both."
@@ -346,20 +329,6 @@ fi
 _num_stages=$(echo "$STAGES" | wc -w)
 [[ "$_num_stages" -ge 1 ]] || die "--stages must name at least one stage in 1..4 (got '${STAGES}')."
 for _s in $STAGES; do case "$_s" in 1|2|3|4) ;; *) die "--stages entries must each be in 1..4 (got '$_s')." ;; esac; done
-# MULTI-STAGE support: the eks backend now drives per-stage transitions ITSELF
-# (patch success_stage -> reform_raycluster_eks -> wait for a fresh metric), so a single
-# `--execute` sweeps all requested stages autonomously. The hyperpod-eks backend does NOT
-# implement the per-stage reform, so it stays single-stage-per-invocation (checked HERE,
-# in early validation, BEFORE the EXIT trap is armed — a refusal can't tear down a stack).
-if [[ "$EXECUTE" -eq 1 && "$COMPUTE_BACKEND" == "hyperpod-eks" && "$_num_stages" -ne 1 ]]; then
-  die "hyperpod-eks --execute requires EXACTLY ONE stage (per-stage reform is implemented for --backend eks only). Run one stage per invocation, or use --backend eks for an autonomous multi-stage sweep."
-fi
-# hyperpod-eks patches success_stage BEFORE any cluster exists, so it needs a pinned,
-# persistent unified-image helper pod. eks auto-discovers a Running RayCluster worker
-# (the cluster is deployed once up-front), so no pinned helper is required there.
-if [[ "$COMPUTE_BACKEND" == "hyperpod-eks" && -z "$FSX_HELPER_POD" ]]; then
-  die "hyperpod-eks requires a pinned FSX_HELPER_POD (a persistent unified-image helper with FSx mounted) for the success_stage patch. Set FSX_HELPER_POD=<pod>. (eks auto-discovers a worker.)"
-fi
 
 # INJECTION CLOSE (Codex red-team): every env-overridable identifier that is interpolated
 # into a run_sh()/run_capture() `bash -c` string (the NG discovery/teardown loops and the
@@ -369,7 +338,7 @@ _safe_id='^[A-Za-z0-9._/-]+$'
 for _pair in "AWS_REGION:${REGION}" "EKS_CLUSTER_NAME:${EKS_CLUSTER_NAME}" \
              "EKS_STACK_NAME:${EKS_STACK_NAME}" "K8S_NAMESPACE:${K8S_NAMESPACE}" \
              "CONFIG_NAME:${CONFIG_NAME}" \
-             "FSX_MOUNT:${FSX_MOUNT}" "HYPERPOD_CLUSTER_NAME:${HYPERPOD_CLUSTER_NAME}"; do
+             "FSX_MOUNT:${FSX_MOUNT}"; do
   [[ "${_pair#*:}" =~ $_safe_id ]] || die "${_pair%%:*} contains unsafe characters ('${_pair#*:}') — must match ${_safe_id} (it is interpolated into a shell command)."
 done
 [[ -z "$ACCOUNT_ID" || "$ACCOUNT_ID" =~ ^[0-9]+$ ]] || die "CDK_DEFAULT_ACCOUNT must be numeric (got '$ACCOUNT_ID')."
@@ -383,52 +352,50 @@ done
 # array-safe launch_eval_eks (no bash -c string flattening); these checks additionally
 # reject values that would provision the wrong/too-small/too-expensive fleet. Enforced
 # for both dry-run and execute so a bad value can never reach `cdk deploy`.
-if [[ "$COMPUTE_BACKEND" == "eks" ]]; then
-  # Allowlist: rollout runs Isaac Sim (needs RTX/L40S => g6e) AND the eval head pod
-  # requests cpu:24/mem:100Gi, so only g6e.8xlarge+ fit. A bare format regex is not
-  # enough (it accepted t3.micro) — pin to the head-capable L40S sizes.
-  case "$EKS_ROLLOUT_INSTANCE_TYPE" in
-    g6e.8xlarge|g6e.12xlarge|g6e.16xlarge|g6e.24xlarge|g6e.48xlarge) ;;
-    *) die "EKS_ROLLOUT_INSTANCE_TYPE must be a head-capable L40S type g6e.{8,12,16,24,48}xlarge (got '$EKS_ROLLOUT_INSTANCE_TYPE'): Isaac Sim needs RTX/L40S and the eval head needs >= g6e.8xlarge (cpu:24/mem:100Gi)." ;;
-  esac
-  # Worker count: positive AND ceilinged (a fat-fingered 100 would cost a fortune).
-  [[ "$EKS_NUM_ROLLOUT_WORKERS" =~ ^[0-9]+$ && "$EKS_NUM_ROLLOUT_WORKERS" -ge 1 && "$EKS_NUM_ROLLOUT_WORKERS" -le 16 ]] \
-    || die "EKS_NUM_ROLLOUT_WORKERS must be an integer in 1..16 (got '$EKS_NUM_ROLLOUT_WORKERS'). Raise the in-script ceiling only deliberately — this is a paid g6e fleet."
-  [[ "$EKS_FSX_CAPACITY_GIB" =~ ^[0-9]+$ && "$EKS_FSX_CAPACITY_GIB" -gt 0 ]] \
-    || die "EKS_FSX_CAPACITY_GIB must be a positive integer (got '$EKS_FSX_CAPACITY_GIB')."
-  [[ "$EKS_KUBERAY_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
-    || die "EKS_KUBERAY_VERSION must look like 1.1.0 (got '$EKS_KUBERAY_VERSION')."
-  if [[ -n "$CAPACITY_RESERVATION_ID" ]]; then
-    [[ "$CAPACITY_RESERVATION_ID" =~ ^cr-[0-9a-f]+$ ]] \
-      || die "CAPACITY_RESERVATION_ID must look like cr-0123abcd... (got '$CAPACITY_RESERVATION_ID')."
-    [[ "$EKS_LEARNER_INSTANCE_TYPE" =~ ^[a-z][a-z0-9]*\.[a-z0-9]+$ ]] \
-      || die "EKS_LEARNER_INSTANCE_TYPE must be an instance type (got '$EKS_LEARNER_INSTANCE_TYPE')."
-  fi
-  if [[ -n "$EKS_ROLLOUT_SUBNET_IDS" ]]; then
-    [[ "$EKS_ROLLOUT_SUBNET_IDS" =~ ^subnet-[0-9a-f]+(,subnet-[0-9a-f]+)*$ ]] \
-      || die "EKS_ROLLOUT_SUBNET_IDS must be a comma-separated list of subnet-ids (got '$EKS_ROLLOUT_SUBNET_IDS')."
-  fi
-  if [[ -n "$EKS_EVAL_LEARNER_SUBNET_IDS" ]]; then
-    [[ "$EKS_EVAL_LEARNER_SUBNET_IDS" =~ ^subnet-[0-9a-f]+(,subnet-[0-9a-f]+)*$ ]] \
-      || die "EKS_EVAL_LEARNER_SUBNET_IDS must be a comma-separated list of subnet-ids (got '$EKS_EVAL_LEARNER_SUBNET_IDS')."
-  fi
-  # Reform knobs (Codex red-team): RAY_*_CONTAINER flow into kubectl exec / bash -c strings
-  # (validate as safe names); REFORM_TIMEOUT/REFORM_RECYCLE_EVERY enter Bash arithmetic
-  # (validate as plain positive integers so a value like 'x[$(cmd)]' can't inject).
-  [[ "$RAY_HEAD_CONTAINER" =~ ^[A-Za-z0-9._-]+$ ]] || die "RAY_HEAD_CONTAINER must be a container name (got '$RAY_HEAD_CONTAINER')."
-  [[ "$RAY_WORKER_CONTAINER" =~ ^[A-Za-z0-9._-]+$ ]] || die "RAY_WORKER_CONTAINER must be a container name (got '$RAY_WORKER_CONTAINER')."
-  [[ "$REFORM_TIMEOUT" =~ ^[0-9]+$ && "$REFORM_TIMEOUT" -gt 0 ]] || die "REFORM_TIMEOUT must be a positive integer (got '$REFORM_TIMEOUT')."
-  [[ "$REFORM_RECYCLE_EVERY" =~ ^[0-9]+$ && "$REFORM_RECYCLE_EVERY" -gt 0 ]] || die "REFORM_RECYCLE_EVERY must be a positive integer (got '$REFORM_RECYCLE_EVERY')."
-  # EVAL CONFIG DIVISIBILITY (RLinf validate_embodied_cfg): total_num_envs (N) MUST be
-  # divisible by env_world_size, which equals the eval node count num_nodes = 1 head/
-  # eval-learner + num_rollout_workers (the entrypoint places env on every node, 0..num_nodes-1).
-  # If not, the eval head asserts + crash-loops (never emits eval/success_once). Validate
-  # here and, if it fails, name the worker counts that DO divide N so the fix is obvious.
-  EKS_NUM_NODES=$(( EKS_NUM_ROLLOUT_WORKERS + 1 ))
-  if (( N % EKS_NUM_NODES != 0 )); then
-    _valid_workers="$(python3 -c "n=$N; print(', '.join(str(d-1) for d in range(2,n+1) if n%d==0 and d-1>=1))" 2>/dev/null || echo '?')"
-    die "eval requires N (total_num_envs=${N}) divisible by num_nodes (1 + EKS_NUM_ROLLOUT_WORKERS = ${EKS_NUM_NODES}); ${N} % ${EKS_NUM_NODES} = $(( N % EKS_NUM_NODES )). Set EKS_NUM_ROLLOUT_WORKERS to one of: ${_valid_workers} (each yields num_nodes | ${N})."
-  fi
+# Allowlist: rollout runs Isaac Sim (needs RTX/L40S => g6e) AND the eval head pod
+# requests cpu:24/mem:100Gi, so only g6e.8xlarge+ fit. A bare format regex is not
+# enough (it accepted t3.micro) — pin to the head-capable L40S sizes.
+case "$EKS_ROLLOUT_INSTANCE_TYPE" in
+  g6e.8xlarge|g6e.12xlarge|g6e.16xlarge|g6e.24xlarge|g6e.48xlarge) ;;
+  *) die "EKS_ROLLOUT_INSTANCE_TYPE must be a head-capable L40S type g6e.{8,12,16,24,48}xlarge (got '$EKS_ROLLOUT_INSTANCE_TYPE'): Isaac Sim needs RTX/L40S and the eval head needs >= g6e.8xlarge (cpu:24/mem:100Gi)." ;;
+esac
+# Worker count: positive AND ceilinged (a fat-fingered 100 would cost a fortune).
+[[ "$EKS_NUM_ROLLOUT_WORKERS" =~ ^[0-9]+$ && "$EKS_NUM_ROLLOUT_WORKERS" -ge 1 && "$EKS_NUM_ROLLOUT_WORKERS" -le 16 ]] \
+  || die "EKS_NUM_ROLLOUT_WORKERS must be an integer in 1..16 (got '$EKS_NUM_ROLLOUT_WORKERS'). Raise the in-script ceiling only deliberately — this is a paid g6e fleet."
+[[ "$EKS_FSX_CAPACITY_GIB" =~ ^[0-9]+$ && "$EKS_FSX_CAPACITY_GIB" -gt 0 ]] \
+  || die "EKS_FSX_CAPACITY_GIB must be a positive integer (got '$EKS_FSX_CAPACITY_GIB')."
+[[ "$EKS_KUBERAY_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+  || die "EKS_KUBERAY_VERSION must look like 1.1.0 (got '$EKS_KUBERAY_VERSION')."
+if [[ -n "$CAPACITY_RESERVATION_ID" ]]; then
+  [[ "$CAPACITY_RESERVATION_ID" =~ ^cr-[0-9a-f]+$ ]] \
+    || die "CAPACITY_RESERVATION_ID must look like cr-0123abcd... (got '$CAPACITY_RESERVATION_ID')."
+  [[ "$EKS_LEARNER_INSTANCE_TYPE" =~ ^[a-z][a-z0-9]*\.[a-z0-9]+$ ]] \
+    || die "EKS_LEARNER_INSTANCE_TYPE must be an instance type (got '$EKS_LEARNER_INSTANCE_TYPE')."
+fi
+if [[ -n "$EKS_ROLLOUT_SUBNET_IDS" ]]; then
+  [[ "$EKS_ROLLOUT_SUBNET_IDS" =~ ^subnet-[0-9a-f]+(,subnet-[0-9a-f]+)*$ ]] \
+    || die "EKS_ROLLOUT_SUBNET_IDS must be a comma-separated list of subnet-ids (got '$EKS_ROLLOUT_SUBNET_IDS')."
+fi
+if [[ -n "$EKS_EVAL_LEARNER_SUBNET_IDS" ]]; then
+  [[ "$EKS_EVAL_LEARNER_SUBNET_IDS" =~ ^subnet-[0-9a-f]+(,subnet-[0-9a-f]+)*$ ]] \
+    || die "EKS_EVAL_LEARNER_SUBNET_IDS must be a comma-separated list of subnet-ids (got '$EKS_EVAL_LEARNER_SUBNET_IDS')."
+fi
+# Reform knobs (Codex red-team): RAY_*_CONTAINER flow into kubectl exec / bash -c strings
+# (validate as safe names); REFORM_TIMEOUT/REFORM_RECYCLE_EVERY enter Bash arithmetic
+# (validate as plain positive integers so a value like 'x[$(cmd)]' can't inject).
+[[ "$RAY_HEAD_CONTAINER" =~ ^[A-Za-z0-9._-]+$ ]] || die "RAY_HEAD_CONTAINER must be a container name (got '$RAY_HEAD_CONTAINER')."
+[[ "$RAY_WORKER_CONTAINER" =~ ^[A-Za-z0-9._-]+$ ]] || die "RAY_WORKER_CONTAINER must be a container name (got '$RAY_WORKER_CONTAINER')."
+[[ "$REFORM_TIMEOUT" =~ ^[0-9]+$ && "$REFORM_TIMEOUT" -gt 0 ]] || die "REFORM_TIMEOUT must be a positive integer (got '$REFORM_TIMEOUT')."
+[[ "$REFORM_RECYCLE_EVERY" =~ ^[0-9]+$ && "$REFORM_RECYCLE_EVERY" -gt 0 ]] || die "REFORM_RECYCLE_EVERY must be a positive integer (got '$REFORM_RECYCLE_EVERY')."
+# EVAL CONFIG DIVISIBILITY (RLinf validate_embodied_cfg): total_num_envs (N) MUST be
+# divisible by env_world_size, which equals the eval node count num_nodes = 1 head/
+# eval-learner + num_rollout_workers (the entrypoint places env on every node, 0..num_nodes-1).
+# If not, the eval head asserts + crash-loops (never emits eval/success_once). Validate
+# here and, if it fails, name the worker counts that DO divide N so the fix is obvious.
+EKS_NUM_NODES=$(( EKS_NUM_ROLLOUT_WORKERS + 1 ))
+if (( N % EKS_NUM_NODES != 0 )); then
+  _valid_workers="$(python3 -c "n=$N; print(', '.join(str(d-1) for d in range(2,n+1) if n%d==0 and d-1>=1))" 2>/dev/null || echo '?')"
+  die "eval requires N (total_num_envs=${N}) divisible by num_nodes (1 + EKS_NUM_ROLLOUT_WORKERS = ${EKS_NUM_NODES}); ${N} % ${EKS_NUM_NODES} = $(( N % EKS_NUM_NODES )). Set EKS_NUM_ROLLOUT_WORKERS to one of: ${_valid_workers} (each yields num_nodes | ${N})."
 fi
 
 # Parse the reference row (comma-separated percentages) into an array.
@@ -441,20 +408,15 @@ PAYLOAD="${CKPT:-$MODEL_PATH_ARG}"
 PAYLOAD_KIND="EVAL_CKPT (actor .pt)"
 [[ -n "$MODEL_PATH_ARG" ]] && PAYLOAD_KIND="MODEL_PATH (base/SFT model dir)"
 
-# What the banner shows for the eval capacity target (HyperPod cluster vs EKS stack).
-if [[ "$COMPUTE_BACKEND" == "eks" ]]; then
-  CLUSTER_DISPLAY="${EKS_CLUSTER_NAME} (stack ${EKS_STACK_NAME})"
-  # Node count = num_rollout_workers rollout + 1 eval-learner (both rollout_instance_type).
-  EKS_TOTAL_G6E=$(( EKS_NUM_ROLLOUT_WORKERS + 1 ))
-  EKS_TOPO_DISPLAY="${EKS_TOTAL_G6E}x ${EKS_ROLLOUT_INSTANCE_TYPE} (=${EKS_NUM_ROLLOUT_WORKERS} rollout +1 eval-learner)"
-  if [[ -n "$CAPACITY_RESERVATION_ID" ]]; then
-    EKS_TOPO_DISPLAY="${EKS_TOPO_DISPLAY}; +1 CB learner ${EKS_LEARNER_INSTANCE_TYPE} (CR set)"
-  else
-    EKS_TOPO_DISPLAY="${EKS_TOPO_DISPLAY}; no p5 (g6e-only eval)"
-  fi
+# What the banner shows for the eval capacity target (EKS stack).
+CLUSTER_DISPLAY="${EKS_CLUSTER_NAME} (stack ${EKS_STACK_NAME})"
+# Node count = num_rollout_workers rollout + 1 eval-learner (both rollout_instance_type).
+EKS_TOTAL_G6E=$(( EKS_NUM_ROLLOUT_WORKERS + 1 ))
+EKS_TOPO_DISPLAY="${EKS_TOTAL_G6E}x ${EKS_ROLLOUT_INSTANCE_TYPE} (=${EKS_NUM_ROLLOUT_WORKERS} rollout +1 eval-learner)"
+if [[ -n "$CAPACITY_RESERVATION_ID" ]]; then
+  EKS_TOPO_DISPLAY="${EKS_TOPO_DISPLAY}; +1 CB learner ${EKS_LEARNER_INSTANCE_TYPE} (CR set)"
 else
-  CLUSTER_DISPLAY="${HYPERPOD_CLUSTER_NAME}"
-  EKS_TOPO_DISPLAY=""
+  EKS_TOPO_DISPLAY="${EKS_TOPO_DISPLAY}; no p5 (g6e-only eval)"
 fi
 
 echo "============================================================================"
@@ -476,7 +438,7 @@ echo "==========================================================================
 if [[ "$EXECUTE" -eq 1 ]]; then
   read -r -p "Type 'eval-checkpoint' to confirm a REAL (PAID) eval sweep: " _confirm
   [[ "$_confirm" == "eval-checkpoint" ]] || die "Confirmation mismatch — aborting."
-  # Execute-mode preflight on the parameterized context (fail-fast, mirrors deploy script).
+  # Execute-mode preflight on the parameterized context (fail-fast).
   [[ -n "$ACCOUNT_ID" ]]     || die "CDK_DEFAULT_ACCOUNT is empty. Export it (no baked default in this mirror script)."
   [[ -n "$VPC_ID" ]]         || die "VPC_ID is empty. Export VPC_ID=<vpc-id>."
   [[ -n "$S3_DATA_BUCKET" ]] || die "S3_DATA_BUCKET is empty. Export S3_DATA_BUCKET=<bucket>."
@@ -486,22 +448,17 @@ fi
 # =============================================================================
 #  Eval-cluster lifecycle guard — teardown + max-runtime deadline (SKILL #14)
 # =============================================================================
-# teardown_eval_cluster(): idempotent, routed through run(). Reuses the deploy-script
-# teardown ordering (SKILL #8/#10): delete-cluster (and/or scale instance groups to 0)
-# is the authoritative "no g6e outlives the script" action, issued BEFORE any cdk destroy.
-# TEARDOWN_MODE=delete-cluster (default, full) | scale-to-0 (lighter, keeps the stack).
-TEARDOWN_MODE="${TEARDOWN_MODE:-delete-cluster}"
 TEARDOWN_DONE=0
 
-# teardown_eval_eks(): eks-backend teardown. The eks eval capacity is EKS *managed
-# nodegroups* (eval-learner + rollout), NOT a SageMaker cluster — so we scale them to 0
-# via `aws eks update-nodegroup-config ... desiredSize=0` (per the deploy-eks-training
-# SKILL). This is the eks equivalent of the SKILL #14 idle-burn guard: a crashed/hung
-# eval head pod cannot keep g6e nodes alive once their nodegroups are at desired=0.
-# The EKS cluster + FSx + CFN stack are RETAINED (fast re-run). Idempotent + dry-run-visible.
+# teardown_eval_eks(): eks teardown. The eval capacity is EKS *managed nodegroups*
+# (eval-learner + rollout), NOT a SageMaker cluster — so we scale them to 0 via
+# `aws eks update-nodegroup-config ... desiredSize=0` (per the deploy-eks-training
+# SKILL). This is the SKILL #14 idle-burn guard: a crashed/hung eval head pod cannot
+# keep g6e nodes alive once their nodegroups are at desired=0. The EKS cluster + FSx +
+# CFN stack are RETAINED (fast re-run). Idempotent + dry-run-visible.
 teardown_eval_eks() {
   echo "    (eks: scale eval-learner + rollout managed nodegroups to desired=0; EKS cluster + stack retained)"
-  echo "    (NOT sagemaker delete-cluster — eks capacity is EKS managed nodegroups; SKILL #14 idle-burn guard)"
+  echo "    (eks capacity is EKS managed nodegroups; SKILL #14 idle-burn guard)"
   if [[ -n "$EKS_EVAL_LEARNER_NG" && -n "$EKS_ROLLOUT_NG" ]]; then
     run aws eks update-nodegroup-config \
       --cluster-name "$EKS_CLUSTER_NAME" --region "$REGION" \
@@ -520,27 +477,9 @@ teardown_eval_cluster() {
   [[ "$TEARDOWN_DONE" -eq 1 ]] && return 0
   TEARDOWN_DONE=1
   say "TEARDOWN — releasing the g6e eval capacity (idempotent; runs on EVERY exit path)"
-  # eks backend: scale managed nodegroups to 0 (not a SageMaker cluster op).
-  if [[ "$COMPUTE_BACKEND" == "eks" ]]; then
-    teardown_eval_eks
-    ok "Teardown issued — no eval capacity outlives this script."
-    return 0
-  fi
-  # hyperpod-eks backend (default): SageMaker HyperPod-cluster teardown — UNCHANGED.
-  if [[ "$TEARDOWN_MODE" == "scale-to-0" ]]; then
-    # Lighter path: scale both instance groups to 0 (keeps the CFN stack for a fast re-run).
-    echo "    (scale-to-0: zero the eval-learner + rollout instance groups; stack retained)"
-    run aws sagemaker update-cluster \
-      --cluster-name "$HYPERPOD_CLUSTER_NAME" --region "$REGION" \
-      --instance-groups '[{"InstanceGroupName":"eval-learner","InstanceCount":0},{"InstanceGroupName":"rollout","InstanceCount":0}]'
-  else
-    # Full path: delete-cluster BEFORE any cdk destroy (SKILL #8/#10 ordering) so the
-    # SageMaker cluster + its ENIs are gone first and no g6e keeps running.
-    echo "    (delete-cluster: full release of the g6e eval cluster; SKILL #8/#10 order)"
-    run aws sagemaker delete-cluster \
-      --cluster-name "$HYPERPOD_CLUSTER_NAME" --region "$REGION"
-  fi
-  ok "Teardown issued — no eval cluster outlives this script."
+  # Scale managed nodegroups to 0 (not a SageMaker cluster op).
+  teardown_eval_eks
+  ok "Teardown issued — no eval capacity outlives this script."
 }
 
 # on_exit(): the trap. Fires on normal completion, non-zero failure, AND interrupt.
@@ -688,9 +627,9 @@ patch_stage() {
   run kubectl exec -n "$K8S_NAMESPACE" "$FSX_POD" ${FSX_CT:+-c "$FSX_CT"} -- bash "$PATCH_SCRIPT" set "$stage"
 }
 
-# launch_eval_eks(): eks-backend provision. There is NO deploy script on the eks path —
-# it deploys GR00TRLEKSStack directly via `cdk deploy --context compute_backend=eks
-# --context mode=eval ...` (per the deploy-eks-training SKILL). vpc_id / s3_data_bucket /
+# launch_eval_eks(): eks provision. There is NO deploy script on this path — it deploys
+# GR00TRLEKSStack directly via `cdk deploy --context compute_backend=eks --context
+# mode=eval ...` (per the deploy-eks-training SKILL). vpc_id / s3_data_bucket /
 # image_uri come from env; eval_ckpt (or model_path) + eval_total_envs thread the payload
 # through app.py -> the head-pod eval env. ARRAY-SAFE (Codex red-team): the env + context
 # tokens are passed to run() as an argv ARRAY (`run env "${envs[@]}" cdk ... "${ctx[@]}"`),
@@ -772,31 +711,12 @@ restore_eval_ng_desired() {
   fi
 }
 
-# launch_eval(): provision/point the g6e-only eval cluster at the checkpoint for one stage.
-# Dispatches by backend: eks -> cdk deploy GR00TRLEKSStack (launch_eval_eks);
-# hyperpod-eks (default) -> deploy-hyperpod-eks.sh MODE=eval (unchanged, below).
-# Everything is env-prefixed and run array-safe (run env "${envs[@]}" ...) so dry-run prints the full invocation.
+# launch_eval(): provision/point the g6e-only eval cluster at the checkpoint for one stage
+# via cdk deploy GR00TRLEKSStack (launch_eval_eks). Everything is env-prefixed and run
+# array-safe (run env "${envs[@]}" ...) so dry-run prints the full invocation.
 launch_eval() {
   local stage="$1"
-  if [[ "$COMPUTE_BACKEND" == "eks" ]]; then
-    launch_eval_eks "$stage"
-    return 0
-  fi
-  local envs=(
-    "AWS_REGION=${REGION}" "CDK_DEFAULT_REGION=${REGION}" "AWS_DEFAULT_REGION=${REGION}"
-    "CDK_DEFAULT_ACCOUNT=${ACCOUNT_ID}" "VPC_ID=${VPC_ID}" "S3_DATA_BUCKET=${S3_DATA_BUCKET}"
-    "IMAGE_URI=${IMAGE_URI}" "MODE=eval" "EVAL_TOTAL_ENVS=${N}"
-  )
-  [[ -n "$HYPERPOD_AMI_ID" ]] && envs+=( "HYPERPOD_AMI_ID=${HYPERPOD_AMI_ID}" )
-  if [[ -n "$EVAL_CKPT_VAL" ]]; then
-    envs+=( "EVAL_CKPT=${EVAL_CKPT_VAL}" )
-  else
-    envs+=( "MODEL_PATH=${MODEL_PATH_VAL}" )
-  fi
-  echo "    Launch MODE=eval sweep for stage ${stage} (g6e-only; 1 eval-learner + rollout, NO p5)"
-  # Array-safe (Codex red-team): pass the env as an argv array to `env`, not a bash -c
-  # string — so VPC_ID/IMAGE_URI/EVAL_CKPT (may contain ://, /) can't be shell-reparsed.
-  run env "${envs[@]}" "$DEPLOY_SCRIPT" --execute
+  launch_eval_eks "$stage"
 }
 
 # _reader: the tfevents scalar reader (shared). Reads the LAST eval/success_once value
@@ -837,7 +757,7 @@ latest_eval_logdir() {
 # pods, let KubeRay rebuild, and poll `ray status` until num_nodes are Active — periodically
 # recycling any not-Ready workers so they re-register against the STABILIZED head GCS. This
 # is what makes a multi-stage sweep work in ONE invocation with no human/agent in the loop.
-# Deadline-guarded (REFORM_TIMEOUT and the per-stage MAX_RUNTIME). eks backend only.
+# Deadline-guarded (REFORM_TIMEOUT and the per-stage MAX_RUNTIME).
 # HEAD_START_EPOCH: the fresh head POD's status.startTime (epoch s) after the most recent
 # reform reached num_nodes. wait_for_fresh_eval only accepts a LOG_DIR whose mtime is >=
 # this — proving the POST-reform fresh head created it (a pre-reform/old-head dir has an
@@ -942,15 +862,12 @@ read_success_once() {
 #  STEP 2 — Per-stage sweep -> collect k/N
 # =============================================================================
 say "STEP 2 — Per-stage success_stage sweep (MODE=eval, N=${N})"
-# SELF-CONTAINED (eks): the script drives the whole stage machine in ONE invocation with
+# SELF-CONTAINED: the script drives the whole stage machine in ONE invocation with
 # NO human/agent in the loop — deploy the stack + form the cluster ONCE, then per stage:
 # patch success_stage on FSx -> REFORM the RayCluster (fresh head re-reads the stage) ->
-# wait for a FRESH eval/success_once -> read it. (hyperpod-eks keeps the per-stage deploy
-# path and is single-stage-gated in early validation.)
-if [[ "$COMPUTE_BACKEND" == "eks" ]]; then
-  say "Provision the eks eval stack + form the initial RayCluster (once)"
-  launch_eval "${STAGES%% *}"     # initial cdk deploy + restore_eval_ng_desired
-fi
+# wait for a FRESH eval/success_once -> read it.
+say "Provision the eks eval stack + form the initial RayCluster (once)"
+launch_eval "${STAGES%% *}"     # initial cdk deploy + restore_eval_ng_desired
 
 KVALS=()          # collected k (successes) per swept stage, index-aligned with STAGE_ARR
 STAGE_ARR=()      # the stages actually swept, in order
@@ -964,11 +881,7 @@ for stage in $STAGES; do
   # FRESHNESS baseline: the newest eval LOG_DIR BEFORE this stage's run. A genuinely fresh
   # stage run (head re-reads success_stage after the reform) yields a NEW LOG_DIR != this.
   PRE_LOGDIR="$(latest_eval_logdir || true)"
-  if [[ "$COMPUTE_BACKEND" == "eks" ]]; then
-    reform_raycluster_eks "$STAGE_START"    # fresh head reads the just-patched success_stage
-  else
-    launch_eval "$stage"                     # hyperpod-eks: per-stage deploy (single-stage)
-  fi
+  reform_raycluster_eks "$STAGE_START"    # fresh head reads the just-patched success_stage
   # Wait for a FRESH LOG_DIR (!= baseline) with eval/success_once — fails closed on overrun.
   LOG_DIR="$(wait_for_fresh_eval "$stage" "$STAGE_START" "$PRE_LOGDIR")"
   if [[ "$EXECUTE" -eq 1 ]]; then

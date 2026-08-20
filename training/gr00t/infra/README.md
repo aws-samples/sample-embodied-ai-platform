@@ -82,7 +82,7 @@ cdk deploy IsaacGr00tBatchStack IsaacLabDcvStack
 ```bash
 # Skip automatic build by providing a pre-built image
 cdk deploy IsaacGr00tBatchStack IsaacLabDcvStack \
-  --context ecr_image_uri=123456789012.dkr.ecr.us-west-2.amazonaws.com/gr00t-finetune:latest
+  --context ecr_image_uri=<your-account>.dkr.ecr.<region>.amazonaws.com/gr00t-finetune:latest
 ```
 
 **Using existing AWS resources:**
@@ -165,7 +165,7 @@ cdk deploy IsaacGr00tBatchStack IsaacLabDcvStack \
   --context vpc_id=vpc-12345 \
   --context efs_id=fs-12345 \
   --context efs_sg_id=sg-12345 \
-  --context ecr_image_uri=123456789012.dkr.ecr.us-west-2.amazonaws.com/gr00t-finetune:latest \
+  --context ecr_image_uri=<your-account>.dkr.ecr.<region>.amazonaws.com/gr00t-finetune:latest \
   --context dataset_bucket=my-dataset-bucket \
   --context s3_upload_uri=s3://my-checkpoint-bucket/gr00t/checkpoints
 ```
@@ -194,7 +194,7 @@ You can also use context in [cdk.json](cdk.json) to provide existing resource ID
     "vpc_id": "vpc-xxxxxxxx",
     "efs_id": "fs-xxxxxxxx",
     "efs_sg_id": "sg-xxxxxxxx",
-    "ecr_image_uri": "123456789012.dkr.ecr.us-west-2.amazonaws.com/gr00t-finetune:latest",
+    "ecr_image_uri": "<your-account>.dkr.ecr.<region>.amazonaws.com/gr00t-finetune:latest",
     "dataset_bucket": "my-dataset-bucket",
     "s3_upload_uri": "s3://my-checkpoint-bucket/gr00t/checkpoints"
   }

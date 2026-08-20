@@ -54,12 +54,14 @@ CATKIN_IGNORE
 # credentials
 .env
 
-# AWS CDK
+# AWS CDK (repo-wide)
+cdk.out/
+cdk.context.json
+__pycache__/
+*.pyc
 training/**/infra/cdk.out/*
 training/**/infra/cdk.context.json
 workstation/cdk.out/*
-dcv/cdk.out/*
-dcv/cdk.context.json
 
 # Kiro IDE settings
 .kiro/

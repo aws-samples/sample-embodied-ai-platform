@@ -501,7 +501,7 @@ class EKSKubeRayStack(Stack):
                 "nvidia.com/gpu": "8",
             },
             "num_rollout_workers_env_value": str(num_rollout_workers),
-            # Additive + reversible (mirrors the eval_head_pod / HyperPod train
+            # Additive + reversible (mirrors the eval_head_pod train
             # pattern): when model_path is set, train FROM that checkpoint (e.g.
             # the SFT base) instead of the entrypoint's RL-checkpoint default;
             # when val_check_interval is set, stream in-flight aggregate eval to
