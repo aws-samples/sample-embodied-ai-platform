@@ -22,6 +22,14 @@ Deploy (EKS + KubeRay - eval on a saved checkpoint):
     --context mode=eval \\
     --context eval_ckpt=/mnt/fsx/rl-training/results/<run>/checkpoints/global_step_N/actor/model_state_dict/full_weights.pt
 
+Deploy (EKS + KubeRay - eval of a base/SFT model on FSx):
+  cdk deploy --context compute_backend=eks \\
+    --context vpc_id=<your-vpc-id> \\
+    --context s3_data_bucket=<your-s3-bucket> \\
+    --context image_uri=<your-account>.dkr.ecr.<region>.amazonaws.com/<your-repo>:<tag> \\
+    --context mode=eval \\
+    --context model_path=/mnt/fsx/models/<your-model-dir>
+
 Context parameters:
   vpc_id                - Existing VPC ID (creates new if omitted for batch-mnp)
   efs_id                - Existing EFS file system ID (batch-mnp/sagemaker only)
@@ -36,6 +44,15 @@ Context parameters:
   compute_backend       - "batch-mnp" (default), "sagemaker", or "eks"
   "mode"                - "train" (default) or "eval" — routes the EKS backend to training or standalone eval
   "eval_ckpt"           - Full path to actor checkpoint (.pt) for mode=eval; ignored for mode=train
+  "model_path"          - Full FSx-visible path (mount root /mnt/fsx) to the model dir. When omitted, the entrypoint's default (RL model) is used. Enables SFT/RL model swap without editing the entrypoint.
+  "eval_total_envs"     - Optional integer. When set, appends EVAL_TOTAL_ENVS=<val> to the eval head-pod env, which entrypoint-eks.sh reads to override env.eval.total_num_envs. Omit to fall through to the yaml default (64). Used by Plan 07.1.1-06 for the N=100 diagnostic sweep.
+  "eval_actor_gbs"      - Optional integer. When set, appends EVAL_ACTOR_GBS=<val> to the eval head-pod env, which entrypoint-eks.sh reads to override actor.global_batch_size. Omit to fall through to the yaml default (2048). Used by Plan 07.1.1-07 for the N=100 diagnostic sweep: EVAL_ACTOR_GBS=1280 with mbs=128 unlocks world_size=10 required for 10-node topology (satisfies RLinf validator gbs % (mbs * world_size) == 0). Safe in eval mode because actor.global_batch_size is consumed only by the FSDP trainer, which eval_embodied_agent.py never spawns.
+  "task_description"    - Optional string. When set, appends TASK_DESCRIPTION=<val> to the eval head-pod env, which entrypoint-eks.sh reads to override env.eval.init_params.task_description. Omit to fall through to the yaml default ("install trocar from box"). Used by Plan 07.1.1-08 to diagnose whether NVIDIA's 83% SFT Stage 1 baseline was measured with a different task description (e.g., "assemble trocar from tray" — the SFT dataset's canonical annotation). Additive-only; D-09 reversibility preserved when unset.
+  "eval_inject_noise"   - Optional string. When set to "true", appends EVAL_INJECT_NOISE=true to the eval head-pod env. On the FSx-side, the patched RLinf gr00t_action_model.py reads this env var and, when true, uses the train-mode noise formula (flow_sde + noise_level yaml default) at eval time instead of the deterministic x_t_std=0 branch. Used by Plan 07.1.1-13 to test whether NVIDIA's 83% SFT Stage 1 was measured on a code state where temperature_eval actually applied at eval time. Requires the corresponding FSx-side patch (Plan 13 Task 1) to have any effect. Additive-only; D-09 reversibility preserved when unset — the patched Python code preserves original eval-mode behavior byte-identically when EVAL_INJECT_NOISE is unset.
+  "noise_level"         - Optional string (float). When set, appends NOISE_LEVEL=<val> to the eval head-pod env, and entrypoint-eks.sh emits ++actor.rl_head_config.noise_level=<val> as a Hydra override. Used only when eval_inject_noise=true. Yaml default is 0.3 (flow_sde). Plan 07.1.1-13 Stage B sweeps {0.1, 0.6, 1.0} to characterize the noise-vs-success curve. Additive-only; unset preserves shipped yaml default.
+  "kuberay_version"     - Optional string (EKS only). KubeRay operator Helm chart version. Default "1.1.0" keeps the validated eks stack byte-identical (A9-3) — a deploy without this flag synthesizes exactly today's frozen 1.1.0 stack. Pass --context kuberay_version=1.2.0 for the async deploy only (KubeRay 1.2.0 is needed for async node-recovery per PRD §8). Reversibility (D-06): omit the flag to fall back to the 1.1.0 default; no in-place mutation of the validated stack.
+  "rollout_subnet_ids"  - Optional string (EKS only). Default-off capacity-resilient rollout knob (Phase 12). Unset keeps the RolloutNodes node group on the single-AZ FSx subnet (byte-identical synth to today). Set to one or more comma-separated private subnet IDs to place the rollout fleet cross-AZ (e.g. us-east-2b) while the learner (pinned to the 2a Capacity Block) and FSx stay in us-east-2a. Applies to the RolloutNodes NG ONLY — the (CB) learner NG stays on the FSx subnet, and the eval-learner NG stays on the FSx subnet unless eval_learner_subnet_ids is also set. Reversible by omitting the flag; subnet IDs are supplied at deploy via --context and never committed.
+  "eval_learner_subnet_ids" - Optional string (EKS only). Default-off capacity-resilient EVAL knob (Phase 13). Unset keeps the EvalLearnerNodes NG (which runs the eval head pod) on the single-AZ FSx subnet (byte-identical synth). Set to comma-separated private subnet IDs to place the eval-learner in another AZ (e.g. us-east-2b) when the FSx AZ is g6e-capacity-dry; FSx stays in us-east-2a and is read cross-AZ (the static CSI PV has no topology affinity). Pair with rollout_subnet_ids=<same subnet> so the eval head + rollout workers co-locate intra-AZ. Reversible by omitting; subnet IDs supplied at deploy via --context, never committed.
 """
 import os
 import aws_cdk as cdk
@@ -84,6 +101,21 @@ elif compute_backend == "eks":
         capacity_reservation_id=app.node.try_get_context("capacity_reservation_id"),
         mode=app.node.try_get_context("mode") or "train",
         eval_ckpt=app.node.try_get_context("eval_ckpt"),
+        model_path=app.node.try_get_context("model_path"),
+        # None => train head pod omits VAL_CHECK_INTERVAL => historical behavior.
+        val_check_interval=app.node.try_get_context("val_check_interval"),
+        # None => entrypoint default ENVS_PER_WORKER=32 (total_num_envs =
+        # num_rollout_workers * 32). Lower it to shrink the co-located rollout
+        # L40S GPU footprint (32/GPU OOMs the 46 GiB L40S at the Eagle lm_head).
+        envs_per_worker=app.node.try_get_context("envs_per_worker"),
+        eval_total_envs=app.node.try_get_context("eval_total_envs"),
+        eval_actor_gbs=app.node.try_get_context("eval_actor_gbs"),
+        task_description=app.node.try_get_context("task_description"),
+        eval_inject_noise=app.node.try_get_context("eval_inject_noise"),
+        noise_level=app.node.try_get_context("noise_level"),
+        kuberay_version=app.node.try_get_context("kuberay_version") or "1.1.0",
+        rollout_subnet_ids=app.node.try_get_context("rollout_subnet_ids"),
+        eval_learner_subnet_ids=app.node.try_get_context("eval_learner_subnet_ids"),
         env=env,
     )
 else:

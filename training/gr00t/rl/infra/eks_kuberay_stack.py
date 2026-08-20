@@ -56,6 +56,17 @@ class EKSKubeRayStack(Stack):
         capacity_reservation_id: str = None,
         mode: str = "train",
         eval_ckpt: str = None,
+        model_path: str = None,
+        val_check_interval: str = None,
+        envs_per_worker: str = None,
+        eval_total_envs: str = None,
+        eval_actor_gbs: str = None,
+        task_description: str = None,
+        eval_inject_noise: str = None,
+        noise_level: str = None,
+        kuberay_version: str = "1.1.0",
+        rollout_subnet_ids: str = None,
+        eval_learner_subnet_ids: str = None,
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -187,26 +198,25 @@ class EKSKubeRayStack(Stack):
         # region 5. Node groups (pinned to FSx subnet for single-AZ alignment)
         # ==============================================================
         # Training learner NG: capacity-block-backed H100 fleet.
-        # CRITICAL: Do NOT change min/max/desired between eval and train modes.
-        # CFN compares the synth template against its stored last-deployed
-        # template — any diff triggers an UpdateNodegroupConfig call, which
-        # validates the LT's CapacityReservationSpecification. That check
-        # fails once the CR expires. Keep this NG's scaling config identical
-        # to the last successful training deploy (min=max=desired=1), so
-        # eval-mode deploys are a no-op for this NG (no CFN update fired,
-        # no CR check triggered). Scale to 0 out-of-band after training runs.
-        learner_ng_kwargs = dict(
-            instance_types=[ec2.InstanceType(learner_instance_type)],
-            ami_type=eks.NodegroupAmiType.AL2023_X86_64_NVIDIA,
-            min_size=1,
-            max_size=1,
-            desired_size=1,
-            disk_size=200,
-            labels={"node-role": "learner"},
-            subnets=ec2.SubnetSelection(subnets=[fsx_subnet]),
-        )
-
+        # Gated on capacity_reservation_id: no CR → no NG created. Once a CR
+        # expires or is not supplied, the whole CB-bound NG (and its launch
+        # template) drops out of synth so CFN can cleanly remove them without
+        # trying to validate an expired CapacityReservationSpecification.
+        # This unblocks on-demand eval-mode deploys after a training CR ends
+        # without booking a fresh block. Training deploys still require a CR
+        # anyway, so this is functionally equivalent for that path.
+        learner_ng = None
         if capacity_reservation_id:
+            learner_ng_kwargs = dict(
+                instance_types=[ec2.InstanceType(learner_instance_type)],
+                ami_type=eks.NodegroupAmiType.AL2023_X86_64_NVIDIA,
+                min_size=1,
+                max_size=1,
+                desired_size=1,
+                disk_size=200,
+                labels={"node-role": "learner"},
+                subnets=ec2.SubnetSelection(subnets=[fsx_subnet]),
+            )
             learner_lt = ec2.CfnLaunchTemplate(
                 self,
                 "LearnerLaunchTemplate",
@@ -238,8 +248,24 @@ class EKSKubeRayStack(Stack):
                 id=learner_lt.ref,
                 version=learner_lt.attr_latest_version_number,
             )
+            learner_ng = cluster.add_nodegroup_capacity("LearnerNodes", **learner_ng_kwargs)
 
-        learner_ng = cluster.add_nodegroup_capacity("LearnerNodes", **learner_ng_kwargs)
+        # Eval-learner NG subnet selection (capacity-resilient eval knob, mirrors the
+        # rollout_subnet_ids pattern). Default-off: when eval_learner_subnet_ids is unset,
+        # this is exactly [fsx_subnet] so the synthesized template is byte-identical to
+        # the single-AZ default. Set it (comma-separated private subnet IDs at deploy via
+        # --context) to place the eval-learner — which runs the eval head pod — in another
+        # AZ (e.g. us-east-2b) when the FSx AZ (2a) is g6e-capacity-dry. FSx stays in 2a and
+        # is read cross-AZ (the static CSI PV has no topology/nodeAffinity, so a pod in
+        # another AZ binds + mounts it over the VPC; cross-AZ data-transfer cost applies).
+        # Pair with rollout_subnet_ids=<same subnet> so head + workers co-locate intra-AZ.
+        if eval_learner_subnet_ids:
+            eval_learner_subnets = [
+                ec2.Subnet.from_subnet_id(self, f"EvalLearnerSubnet{i}", sid.strip())
+                for i, sid in enumerate(eval_learner_subnet_ids.split(","))
+            ]
+        else:
+            eval_learner_subnets = [fsx_subnet]
 
         # Eval learner NG: ON_DEMAND, no CR, no LT. Independent of the training
         # NG's capacity-block launch template — so `cdk deploy --context mode=eval`
@@ -255,8 +281,24 @@ class EKSKubeRayStack(Stack):
             desired_size=1 if is_eval else 0,
             disk_size=200,
             labels={"node-role": "eval-learner"},
-            subnets=ec2.SubnetSelection(subnets=[fsx_subnet]),
+            subnets=ec2.SubnetSelection(subnets=eval_learner_subnets),
         )
+
+        # Rollout NG subnet selection (Phase 12 capacity-resilient knob).
+        # Default-off: when rollout_subnet_ids is unset, this list is exactly
+        # [fsx_subnet] so the synthesized template is byte-identical to the
+        # single-AZ default. When set (comma-separated private subnet IDs passed
+        # at deploy via --context), it overrides ONLY the rollout NG subnet(s) —
+        # enabling a cross-AZ rollout fleet (e.g. us-east-2b) while the learner
+        # (2a Capacity-Block launch template) and FSx stay in us-east-2a.
+        # Reversible by omitting the flag. IDs never committed here.
+        if rollout_subnet_ids:
+            rollout_subnets = [
+                ec2.Subnet.from_subnet_id(self, f"RolloutSubnet{i}", sid.strip())
+                for i, sid in enumerate(rollout_subnet_ids.split(","))
+            ]
+        else:
+            rollout_subnets = [fsx_subnet]
 
         rollout_ng = cluster.add_nodegroup_capacity(
             "RolloutNodes",
@@ -267,7 +309,7 @@ class EKSKubeRayStack(Stack):
             desired_size=num_rollout_workers,
             disk_size=200,
             labels={"node-role": "rollout"},
-            subnets=ec2.SubnetSelection(subnets=[fsx_subnet]),
+            subnets=ec2.SubnetSelection(subnets=rollout_subnets),
         )
         # endregion
 
@@ -321,7 +363,8 @@ class EKSKubeRayStack(Stack):
                 "mofedEnabled": False,
             },
         )
-        nvidia_chart.node.add_dependency(learner_ng)
+        if learner_ng is not None:
+            nvidia_chart.node.add_dependency(learner_ng)
         nvidia_chart.node.add_dependency(eval_learner_ng)
         nvidia_chart.node.add_dependency(rollout_ng)
         # endregion
@@ -336,7 +379,7 @@ class EKSKubeRayStack(Stack):
             repository="https://ray-project.github.io/kuberay-helm/",
             namespace="kuberay-system",
             create_namespace=True,
-            version="1.1.0",
+            version=kuberay_version,
             values={},
         )
         # endregion
@@ -458,7 +501,23 @@ class EKSKubeRayStack(Stack):
                 "nvidia.com/gpu": "8",
             },
             "num_rollout_workers_env_value": str(num_rollout_workers),
-            "extra_env": [],
+            # Additive + reversible (mirrors the eval_head_pod / HyperPod train
+            # pattern): when model_path is set, train FROM that checkpoint (e.g.
+            # the SFT base) instead of the entrypoint's RL-checkpoint default;
+            # when val_check_interval is set, stream in-flight aggregate eval to
+            # TensorBoard every N global_steps; when envs_per_worker is set, it
+            # overrides the entrypoint default (32) that drives
+            # env.train.total_num_envs = num_rollout_workers * ENVS_PER_WORKER —
+            # lowering it shrinks the co-located rollout L40S GPU footprint (the
+            # Eagle/Qwen3 lm_head logits AND the Isaac Sim allocation both scale
+            # with envs/GPU; 32/GPU OOM'd a 46 GiB L40S — see Phase 12 RUN-LOG).
+            # All unset => extra_env is empty and the train head env is
+            # byte-identical to historical behavior.
+            "extra_env": [
+                *([{"name": "MODEL_PATH", "value": model_path}] if model_path else []),
+                *([{"name": "VAL_CHECK_INTERVAL", "value": str(val_check_interval)}] if val_check_interval else []),
+                *([{"name": "ENVS_PER_WORKER", "value": str(envs_per_worker)}] if envs_per_worker else []),
+            ],
             "worker_replicas": num_rollout_workers,
         }
         eval_head_pod = {
@@ -483,6 +542,12 @@ class EKSKubeRayStack(Stack):
             "extra_env": [
                 {"name": "MODE", "value": "eval"},
                 {"name": "EVAL_CKPT", "value": eval_ckpt or ""},
+                *([{"name": "MODEL_PATH", "value": model_path}] if model_path else []),
+                *([{"name": "EVAL_TOTAL_ENVS", "value": str(eval_total_envs)}] if eval_total_envs else []),
+                *([{"name": "EVAL_ACTOR_GBS", "value": str(eval_actor_gbs)}] if eval_actor_gbs else []),
+                *([{"name": "TASK_DESCRIPTION", "value": task_description}] if task_description else []),
+                *([{"name": "EVAL_INJECT_NOISE", "value": str(eval_inject_noise)}] if eval_inject_noise else []),
+                *([{"name": "NOISE_LEVEL", "value": str(noise_level)}] if noise_level else []),
             ],
             "worker_replicas": num_rollout_workers,
         }
@@ -657,6 +722,16 @@ class EKSKubeRayStack(Stack):
                                                     "value": "1",
                                                 },
                                                 {
+                                                    # Rollout L40S (46 GiB) hosts co-located Isaac Sim
+                                                    # (~22 GiB) + GR00T Eagle/Qwen3 policy inference on
+                                                    # one GPU. The first predict_action_batch OOM'd at
+                                                    # the Eagle-VLM lm_head (Phase 12 Wave 2). The
+                                                    # expandable-segments allocator reduces fragmentation
+                                                    # so the transient logits allocation can fit.
+                                                    "name": "PYTORCH_CUDA_ALLOC_CONF",
+                                                    "value": "expandable_segments:True",
+                                                },
+                                                {
                                                     "name": "NCCL_IB_DISABLE",
                                                     "value": "1",
                                                 },
@@ -734,12 +809,13 @@ class EKSKubeRayStack(Stack):
             value=cluster.cluster_endpoint,
             description="EKS cluster API endpoint",
         )
-        CfnOutput(
-            self,
-            "LearnerNodeGroupArn",
-            value=learner_ng.nodegroup_arn,
-            description=f"Learner node group ARN ({learner_instance_type})",
-        )
+        if learner_ng is not None:
+            CfnOutput(
+                self,
+                "LearnerNodeGroupArn",
+                value=learner_ng.nodegroup_arn,
+                description=f"Learner node group ARN ({learner_instance_type})",
+            )
         CfnOutput(
             self,
             "EvalLearnerNodeGroupArn",

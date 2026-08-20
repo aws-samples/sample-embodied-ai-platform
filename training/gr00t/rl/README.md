@@ -179,6 +179,37 @@ kubectl logs -n training -l ray.io/node-type=head | grep -A2 'success_once'
 - The eval topology is driven by Hydra overrides in `entrypoint-eks.sh` (`env.eval.total_num_envs=64, algorithm.eval_rollout_epoch=1, ++env.eval.ignore_terminations=True, ++env.eval.use_fixed_reset_state_ids=True, ++env.eval.max_episode_steps=256`) matching the yaml defaults. Component placement uses hardware-rank ranges (`env=0-N, rollout=0-N, actor=0-N` where `N = TOTAL_EXPECTED - 1`) to spawn one worker per Ray node — a scalar value like `env=1` would parse as "1 process on GPU rank 1" and pile every env onto a single GPU regardless of cluster size. To change env count, edit that override list.
 - Video output size is roughly a few hundred MB per 64-episode run (256 frames per episode × 64 episodes).
 
+### One-command multi-stage eval sweep (`eval-checkpoint.sh`)
+
+`infra/eval-checkpoint.sh` runs the per-stage `success_stage` sweep (N=64, Wilson 95% CI) on a checkpoint and prints per-stage `eval/success_once` — the NVIDIA-comparable 4-number row. It is **self-contained on `--backend eks`**: ONE `--execute` sweeps all four stages autonomously (deploy once → per stage: patch `success_stage` → reform the RayCluster → wait for the metric → read → teardown). Dry-run by default; `--execute` plus a typed confirmation is required to spend.
+
+```bash
+cd training/gr00t/rl/infra
+export AWS_REGION=us-east-2 AWS_DEFAULT_REGION=us-east-2 CDK_DEFAULT_REGION=us-east-2 \
+       CDK_DEFAULT_ACCOUNT=<your-account> VPC_ID=<your-vpc-id> S3_DATA_BUCKET=<your-s3-bucket> \
+       IMAGE_URI=<your-account>.dkr.ecr.us-east-2.amazonaws.com/<your-repo>:<tag>
+
+# Dry-run (safe): prints the full plan, spends $0
+./eval-checkpoint.sh --backend eks \
+  --ckpt s3://<your-s3-bucket>/<your-run-path>/global_step_N/actor/model_state_dict/full_weights.pt \
+  --n 64
+
+# Real (PAID): add --execute (then type the confirmation string it prints)
+./eval-checkpoint.sh --backend eks \
+  --ckpt s3://<your-s3-bucket>/<your-run-path>/global_step_N/actor/model_state_dict/full_weights.pt \
+  --n 64 --execute
+```
+
+**Prerequisite:** stage `infra/patch-success-stage.sh` to `s3://<your-s3-bucket>/scratch/step-a/patch-success-stage.sh` (the DRA maps it to `/mnt/fsx/scratch/step-a/`, where the script reads it per stage). It is committed here as the first-class copy of the runbook helper.
+
+**Three gotchas the script handles for you:**
+
+1. **`--ckpt` may be `s3://<your-s3-bucket>/<key>` OR the FSx path.** The head entrypoint loads the checkpoint as a LOCAL FSx path (`test -f`), NOT an s3 URI. The script auto-translates `s3://<your-s3-bucket>/<key>` → `/mnt/fsx/<key>` (the DRA map). Passing a raw `s3://` URI to `cdk deploy` directly (without the script) crashes the head with `EVAL_CKPT file not found`.
+2. **`env.eval.total_num_envs` (N) MUST be divisible by `num_nodes` = `1 + num_rollout_workers`** (eval places one env process on every node). Otherwise RLinf's `validate_embodied_cfg` asserts and the head **crash-loops** (never emits the metric; looks like a Ray-formation hang but is not). For N=64 use a worker count from {1,3,7,15,31,63}; the script defaults to **7 workers (8 nodes)** and validates + lists valid counts if you change `--n`.
+3. **Per-stage RayCluster reform is automatic.** The `only_eval` head auto-restarts after each stage and takes a NEW Ray GCS cluster-id that orphans the workers (they fail to re-register with a "GCS authentication error"). Between stages the workers must be recycled until all `num_nodes` re-register. The script's per-stage reform does this for you; driving a sweep by hand means repeating that step every stage.
+
+**Cross-AZ capacity fallback:** the eval-learner (head) node group is pinned to the FSx AZ by default. If that AZ is g6e-capacity-dry, run the eval fleet in another AZ via `EKS_ROLLOUT_SUBNET_IDS=<other-AZ-subnet-id>` and `EKS_EVAL_LEARNER_SUBNET_IDS=<other-AZ-subnet-id>` (FSx stays put and is read cross-AZ; the static CSI PV has no topology affinity). Probe capacity first with `infra/capacity-probe.sh --subnet <subnet-id> --instance-type g6e.8xlarge --capacity 9`.
+
 ## Architecture
 
 ### Batch MNP (Homogeneous)

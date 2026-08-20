@@ -28,7 +28,24 @@ echo "NODE_ROLE: ${NODE_ROLE:-unset}"
 # ==============================================================
 FSX_MOUNT="/mnt/fsx"
 
-RLINF_PATH="${FSX_MOUNT}/third_party/RLinf"
+# --- PPO_MODE async branch (task #73 / Phase 09, D-05) ------------------------
+# The async arm (Arm B) uses a SEPARATE RLinf checkout at
+# ${FSX_MOUNT}/third_party/RLinf-async (@ fbc72dd6, native async PPO + upstream
+# #1414 _broadcast fix), leaving the frozen sync checkout at
+# ${FSX_MOUNT}/third_party/RLinf (@ 649e7579 + local _broadcast patch) byte-
+# untouched (A9-3). This RLINF_PATH reassignment happens HERE — BEFORE the
+# PYTHONPATH construction below — so that under PPO_MODE=async, python imports
+# (including train_async.py's own package imports) resolve from RLinf-async and
+# NOT the sync checkout. Deferring this to Section 6 would leave PYTHONPATH
+# pinned at the sync RLinf, silently importing the wrong framework while running
+# train_async.py — the one failure that would invalidate the paid comparison.
+# When PPO_MODE is unset (or "sync"), RLINF_PATH is byte-identical to the
+# historical default and the sync arm is unchanged.
+if [ "${PPO_MODE:-sync}" = "async" ]; then
+    RLINF_PATH="${FSX_MOUNT}/third_party/RLinf-async"
+else
+    RLINF_PATH="${FSX_MOUNT}/third_party/RLinf"
+fi
 GROOT_PATH="${FSX_MOUNT}/third_party/Isaac-GR00T"
 EMBODIED_PATH="${FSX_MOUNT}/third_party/embodied-ai-platform"
 ISAACLAB_PATH="${FSX_MOUNT}/third_party/IsaacLab"
@@ -100,20 +117,50 @@ if [ "${MODE:-train}" = "train" ]; then
         # Section 6: Launch training (train mode, learner pod)
         # ==============================================================
         # User-configurable training parameters (override via container env vars)
-        CONFIG_NAME="${CONFIG_NAME:-isaaclab_ppo_gr00t_assemble_trocar}"
-        MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-32}"
-        GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-True}"
+        # PPO_MODE-gated defaults (task #73 / Phase 09, D-05). When PPO_MODE is
+        # unset or "sync", every default below is byte-identical to the historical
+        # sync arm (CONFIG_NAME=isaaclab_ppo_gr00t_assemble_trocar, mbs 32,
+        # gradient_checkpointing True, train_embodied_agent.py). When "async", the
+        # defaults switch to the async config + validated H100 async FSDP settings
+        # (mbs 128, gradient_checkpointing False) so the entrypoint's own Hydra CLI
+        # overrides below do NOT clobber the async yaml's baked settings. Explicit
+        # container env vars still win in either mode (the ${VAR:-default} pattern).
+        # rollout_epoch is NOT touched here (D-09 — the async yaml keeps it at 1).
+        if [ "${PPO_MODE:-sync}" = "async" ]; then
+            _DEFAULT_CONFIG_NAME="isaaclab_async_ppo_gr00t_assemble_trocar"
+            _DEFAULT_MICRO_BATCH_SIZE="128"
+            _DEFAULT_GRADIENT_CHECKPOINTING="False"
+            _DEFAULT_TRAIN_SCRIPT="${RLINF_PATH}/examples/embodiment/train_async.py"
+        else
+            _DEFAULT_CONFIG_NAME="isaaclab_ppo_gr00t_assemble_trocar"
+            _DEFAULT_MICRO_BATCH_SIZE="32"
+            _DEFAULT_GRADIENT_CHECKPOINTING="True"
+            _DEFAULT_TRAIN_SCRIPT="${RLINF_PATH}/examples/embodiment/train_embodied_agent.py"
+        fi
+        CONFIG_NAME="${CONFIG_NAME:-${_DEFAULT_CONFIG_NAME}}"
+        MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-${_DEFAULT_MICRO_BATCH_SIZE}}"
+        GRADIENT_CHECKPOINTING="${GRADIENT_CHECKPOINTING:-${_DEFAULT_GRADIENT_CHECKPOINTING}}"
         ENVS_PER_WORKER="${ENVS_PER_WORKER:-32}"
         MAX_EPOCHS="${MAX_EPOCHS:-1000}"
         SAVE_INTERVAL="${SAVE_INTERVAL:-2}"
+        # Additive + default-off (D-09 pattern, mirrors EVAL_TOTAL_ENVS/TASK_DESCRIPTION):
+        # optional in-TB eval cadence. -1 => OFF => NO Hydra override is emitted below, so
+        # the train launch args stay byte-identical to the historical behavior. When set to
+        # N, emits runner.val_check_interval=N via the conditional VAL_CHECK_ARGS array.
+        # NOTE: runner.save_interval MUST be divisible by val_check_interval (CONTEXT.md).
+        VAL_CHECK_INTERVAL="${VAL_CHECK_INTERVAL:--1}"
 
-        TRAIN_SCRIPT="${RLINF_PATH}/examples/embodiment/train_embodied_agent.py"
+        TRAIN_SCRIPT="${_DEFAULT_TRAIN_SCRIPT}"
         EXT_CONFIG_PATH="/tmp/rlinf_config_eks"
         if [ -n "${RESUME_DIR:-}" ] && [ -n "${RESUME_LOG_DIR:-}" ]; then
             LOG_DIR="${RESUME_LOG_DIR}"
             echo "Resuming run, reusing existing log dir: ${LOG_DIR}"
         else
-            LOG_DIR="${FSX_MOUNT}/rl-training/results/${CONFIG_NAME}_eks/$(date +'%Y%m%d-%H%M%S')"
+            # Provenance-in-path: <config>_<backend>_<mode>/<timestamp>. COMPUTE_BACKEND
+            # is set by the CDK RayCluster env ("eks" or "hyperpod-eks"); defaults to eks.
+            # Distinguishes eks vs hyperpod and train vs eval at a glance (was ..._eks/,
+            # which collided across both backends and both modes).
+            LOG_DIR="${FSX_MOUNT}/rl-training/results/${CONFIG_NAME}_${COMPUTE_BACKEND:-eks}_train/$(date +'%Y%m%d-%H%M%S')"
         fi
         TOTAL_ENVS=$((NUM_EXPECTED_WORKERS * ENVS_PER_WORKER))
 
@@ -173,6 +220,16 @@ if [ "${MODE:-train}" = "train" ]; then
             RESUME_ARGS+=("runner.resume_dir=${RESUME_DIR}")
         fi
 
+        # Additive in-TB eval override (conditional-args-array pattern, mirrors RESUME_ARGS):
+        # emit runner.val_check_interval ONLY when VAL_CHECK_INTERVAL != -1. When -1/unset the
+        # array is empty and the launch args are byte-identical to today (reversibility).
+        VAL_CHECK_ARGS=()
+        if [ "${VAL_CHECK_INTERVAL}" != "-1" ]; then
+            echo "  Val check interval: ${VAL_CHECK_INTERVAL} (in-TB eval every N steps)"
+            echo "  NOTE: ensure runner.save_interval=${SAVE_INTERVAL} is divisible by ${VAL_CHECK_INTERVAL} (CONTEXT.md)."
+            VAL_CHECK_ARGS+=("runner.val_check_interval=${VAL_CHECK_INTERVAL}")
+        fi
+
         /isaac-sim/python.sh "${TRAIN_SCRIPT}" \
             --config-path "${EXT_CONFIG_PATH}" \
             --config-name "${CONFIG_NAME}" \
@@ -185,7 +242,8 @@ if [ "${MODE:-train}" = "train" ]; then
             "hydra.searchpath=[file://${RLINF_PATH}/examples/embodiment/config]" \
             "actor.micro_batch_size=${MICRO_BATCH_SIZE}" \
             "actor.fsdp_config.gradient_checkpointing=${GRADIENT_CHECKPOINTING}" \
-            "${RESUME_ARGS[@]}"
+            "${RESUME_ARGS[@]}" \
+            "${VAL_CHECK_ARGS[@]}"
 
         # Cleanup GPU monitoring
         kill $DMON_PID 2>/dev/null || true
@@ -248,7 +306,8 @@ elif [ "${MODE}" = "eval" ]; then
         # Section 6b: Launch eval (eval mode, learner pod)
         # ==============================================================
         CONFIG_NAME="${CONFIG_NAME:-isaaclab_ppo_gr00t_assemble_trocar}"
-        LOG_DIR="${FSX_MOUNT}/rl-training/results/${CONFIG_NAME}_eks/$(date +'%Y%m%d-%H%M%S')"
+        # Provenance-in-path (see train branch): <config>_<backend>_eval/<timestamp>.
+        LOG_DIR="${FSX_MOUNT}/rl-training/results/${CONFIG_NAME}_${COMPUTE_BACKEND:-eks}_eval/$(date +'%Y%m%d-%H%M%S')"
         EVAL_SCRIPT="${RLINF_PATH}/examples/embodiment/eval_embodied_agent.py"
 
         # Video sink parent must exist before Hydra evaluates env.eval.video_cfg.
@@ -295,7 +354,76 @@ elif [ "${MODE}" = "eval" ]; then
         #                                          NUM_ROLLOUT_WORKERS env var which is
         #                                          injected by CDK from the top-level
         #                                          `num_rollout_workers` context param)
-        #   env.eval.total_num_envs=64            (NVIDIA benchmark; matches yaml default)
+        #   env.eval.total_num_envs=${EVAL_TOTAL_ENVS:-64}
+        #                                          (NVIDIA WeChat-confirmed 2026-07-27: they used N=64.
+        #                                          Docs claiming N=100 are stale. Default 64 matches
+        #                                          yaml + Plan 03/05 config byte-identically when
+        #                                          EVAL_TOTAL_ENVS is unset. Setting EVAL_TOTAL_ENVS
+        #                                          at deploy time — via Plan 06 Task 2's CDK
+        #                                          `--context eval_total_envs=<N>` param — overrides
+        #                                          the yaml default for one deploy without changing
+        #                                          the entrypoint's shipped byte-identical fallback.
+        #                                          Reversibility (D-09): omit both the context param
+        #                                          and the env var and behavior is byte-identical to
+        #                                          Step A / Plan 03 / Plan 05.)
+        #   actor.global_batch_size=${EVAL_ACTOR_GBS:-2048}
+        #                                          (RLinf's `validate_embodied_cfg` asserts
+        #                                          `actor.global_batch_size % (actor.micro_batch_size * actor_world_size) == 0`.
+        #                                          At shipped yaml defaults (gbs=2048, mbs=128),
+        #                                          world_size must divide 2048/128 = 16 → world_size
+        #                                          ∈ {1, 2, 4, 8, 16}. That blocks N=100 at any safe
+        #                                          env-density (N=100 requires world_size ∈ {5, 10, 20, 25, 50, 100}).
+        #                                          Plan 07 sets EVAL_ACTOR_GBS=1280 at deploy time so
+        #                                          1280/128 = 10 matches world_size=10 (10 nodes @
+        #                                          10 envs/GPU for N=100). Safety: actor.global_batch_size
+        #                                          is consumed ONLY by the FSDP trainer, which
+        #                                          eval_embodied_agent.py never spawns (verified at
+        #                                          lines 44-51 — only MultiStepRolloutWorker + EnvWorker).
+        #                                          Override is a validator-appeasement no-op in eval mode.
+        #                                          Reversibility (D-09): omit both `--context eval_actor_gbs`
+        #                                          and env var; default 2048 = shipped yaml, behavior
+        #                                          byte-identical to Plan 03/05.)
+        #   ++env.eval.init_params.task_description=${TASK_DESCRIPTION:-install trocar from box}
+        #                                          (Plan 07.1.1-08 diagnostic override for the SFT Stage 1
+        #                                          +14pp anomaly. RLinf's shipped yaml
+        #                                          env/isaaclab_assemble_trocar.yaml:24 uses
+        #                                          `task_description: "install trocar from box"` with a
+        #                                          comment noting "yields better results than 'assemble
+        #                                          trocar from tray' because the model was trained with
+        #                                          this specific task description". Plans 03/05/07 all used
+        #                                          this tuned default; N=228 pooled Stage 1 sits at 97.4%
+        #                                          vs NVIDIA's 83%. Hypothesis: NVIDIA measured the 83%
+        #                                          BEFORE finding this tuning, so their number is with
+        #                                          `"assemble trocar from tray"` (the SFT dataset's
+        #                                          canonical annotation). Setting TASK_DESCRIPTION at
+        #                                          deploy time — via Plan 08 Task 2's CDK
+        #                                          `--context task_description=<str>` param — overrides
+        #                                          the yaml default for one deploy without changing the
+        #                                          entrypoint's shipped byte-identical fallback.
+        #                                          Reversibility (D-09): omit both the context param and
+        #                                          the env var; default "install trocar from box"
+        #                                          preserves Plan 03/05/07 byte-identity.)
+        #
+        # EVAL_INJECT_NOISE — Plan 07.1.1-13 diagnostic passthrough (no Hydra override needed here).
+        #                                          When EVAL_INJECT_NOISE=true is set at pod-env level
+        #                                          (via `--context eval_inject_noise=true` in CDK), the
+        #                                          patched RLinf gr00t_action_model.py's `sample_mean_var_val`
+        #                                          reads the env var directly at Python inference time and
+        #                                          switches the mode=="eval" branch to use the train-mode
+        #                                          noise formula (flow_sde + noise_level yaml default). This
+        #                                          tests whether NVIDIA's 83% SFT Stage 1 baseline was
+        #                                          measured on a code state where temperature_eval actually
+        #                                          applied at eval time (per NVIDIA Response 4 2026-08-09;
+        #                                          our code inspection shows temperature_eval currently has
+        #                                          NO effect on the RLinf GR00T eval path — x_t_std=0 in
+        #                                          gr00t_action_model.py:184, and huggingface_worker.py:120-135
+        #                                          only passes kwargs={"mode": mode}). The env var is a
+        #                                          diagnostic-only handle: default (unset) preserves prior
+        #                                          Plan 03/05/07 behavior byte-identically because the FSx-
+        #                                          side patch only takes the alternate branch when
+        #                                          EVAL_INJECT_NOISE=="true".
+        #                                          Reversibility (D-09): unset EVAL_INJECT_NOISE + restore
+        #                                          FSx file from .orig-plan13 = fully reversible.
         #   algorithm.eval_rollout_epoch=1        (1 × 64 = 64 episodes with
         #                                          ignore_terminations=True; matches yaml)
         #   ++env.eval.ignore_terminations=True   (matches yaml default, explicit for defense)
@@ -340,6 +468,17 @@ elif [ "${MODE}" = "eval" ]; then
         # examples/embodiment/config/robotwin_place_empty_cup_ppo_openvlaoft_eval.yaml.
         RANK_RANGE="0-$((TOTAL_EXPECTED - 1))"
 
+        # Plan 07.1.1-13 Stage B noise sweep Hydra override (only emitted when NOISE_LEVEL is set):
+        # `++actor.rl_head_config.noise_level=<X>` overrides the yaml default (0.3) for the
+        # flow_sde train-mode noise formula. Only matters when the FSx-side patch is active
+        # AND EVAL_INJECT_NOISE=true, because otherwise mode=eval takes the deterministic
+        # branch (x_t_std=0). When NOISE_LEVEL unset, entire override is omitted → yaml default
+        # (0.3) applies → byte-identical to Stage A / Plan 03/05/07 behavior.
+        NOISE_LEVEL_ARG=()
+        if [ -n "${NOISE_LEVEL:-}" ]; then
+            NOISE_LEVEL_ARG+=("++actor.rl_head_config.noise_level=${NOISE_LEVEL}")
+        fi
+
         /isaac-sim/python.sh "${EVAL_SCRIPT}" \
             --config-path "${CONFIG_SRC}" \
             --config-name "${CONFIG_NAME}" \
@@ -348,7 +487,10 @@ elif [ "${MODE}" = "eval" ]; then
             "+cluster.component_placement.rollout=${RANK_RANGE}" \
             "+cluster.component_placement.env=${RANK_RANGE}" \
             "cluster.num_nodes=${TOTAL_EXPECTED}" \
-            "env.eval.total_num_envs=64" \
+            "env.eval.total_num_envs=${EVAL_TOTAL_ENVS:-64}" \
+            "actor.global_batch_size=${EVAL_ACTOR_GBS:-2048}" \
+            "++env.eval.init_params.task_description=${TASK_DESCRIPTION:-install trocar from box}" \
+            "${NOISE_LEVEL_ARG[@]}" \
             "algorithm.eval_rollout_epoch=1" \
             "++env.eval.ignore_terminations=True" \
             "++env.eval.use_fixed_reset_state_ids=True" \
