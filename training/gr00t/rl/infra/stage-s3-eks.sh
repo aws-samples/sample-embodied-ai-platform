@@ -5,8 +5,9 @@
 # Populates the S3 data bucket that the EKS stack's FSx-Lustre DRA lazily imports
 # from. It clones the pinned third-party repos, APPLIES the RLinf _broadcast patch
 # (patches/RLinf-649e7579-broadcast-raise.patch) to the RLinf checkout, downloads
-# the RL model, stages the repo-bundled workflows into the layout entrypoint-eks.sh
-# expects, and uploads everything to s3://$S3_DATA_BUCKET/{third_party,models,workflows}/.
+# the RL model, clones the pinned i4h-workflows tree (and overlays our custom RL
+# config) into the layout entrypoint-eks.sh expects, and uploads everything to
+# s3://$S3_DATA_BUCKET/{third_party,models,workflows}/.
 #
 # This is the EKS sibling of docker/buildspec-stage-efs.yml (the Batch/EFS CodeBuild
 # path). It differs in two deliberate ways:
@@ -53,6 +54,16 @@ RLINF_URL="https://github.com/RLinf/RLinf.git"
 GROOT_URL="https://github.com/NVIDIA/Isaac-GR00T.git"
 ISAACLAB_URL="https://github.com/isaac-sim/IsaacLab.git"
 ISAACLAB_ARENA_URL="https://github.com/isaac-sim/IsaacLab-Arena.git"
+
+# Workflows come from the COMPLETE i4h-workflows rheo/scripts tree (simulation, policy,
+# teleop_devices, utils, config — interdependent on PYTHONPATH; a hand-picked subset breaks
+# env creation, e.g. ModuleNotFoundError: teleop_devices). We clone it and overlay only our
+# custom RL config. Matches the internal EFS buildspec (which also pins i4h-workflows).
+I4H_WORKFLOWS_URL="https://github.com/isaac-for-healthcare/i4h-workflows.git"
+# Pin to the exact commit the v0.5.0 tag points at (fb7727e) — NOT the movable tag —
+# so a re-stage is byte-repeatable even if the tag is later re-pointed to a new commit.
+I4H_WORKFLOWS_SHA="fb7727ef12e980022997fccb6cbca5621e4616e4"
+I4H_WORKFLOWS_HUMAN="v0.5.0"   # informational: what this pinned commit corresponds to
 
 MODEL_REPO="nvidia/GR00T-N1.5-RL-Rheo-AssembleTrocar"
 # Pin the model to the shipped revision (b54e142) so a re-stage is byte-repeatable
@@ -127,8 +138,8 @@ die()  { echo ""; echo "    [FATAL] $*" >&2; exit 1; }
 [[ -n "$S3_DATA_BUCKET" ]] || die "S3_DATA_BUCKET is empty. Export S3_DATA_BUCKET=<bucket> (no baked default in this mirror script)."
 [[ -n "$AWS_REGION" ]]     || die "AWS_REGION is empty. Export AWS_REGION=<region> — it MUST match the S3 bucket + FSx region (DRA is same-region)."
 [[ -f "$PATCH_PATH" ]]     || die "broadcast patch not found at ${PATCH_PATH} — cannot stage RLinf without it (fail closed)."
-[[ -d "$WORKFLOWS_SRC/simulation" && -d "$WORKFLOWS_SRC/policy" ]] \
-  || die "repo-bundled workflows not found under ${WORKFLOWS_SRC} (expected simulation/ and policy/)."
+[[ -f "$WORKFLOWS_SRC/simulation/rl/rlinf_ext/config/isaaclab_ppo_gr00t_assemble_trocar.yaml" ]] \
+  || die "custom RL config overlay not found (expected ${WORKFLOWS_SRC}/simulation/rl/rlinf_ext/config/isaaclab_ppo_gr00t_assemble_trocar.yaml). The full workflows tree is cloned from i4h-workflows; only this overlay must be in-repo."
 command -v git >/dev/null 2>&1 || die "git not found on PATH."
 command -v aws >/dev/null 2>&1 || die "aws CLI not found on PATH."
 command -v hf  >/dev/null 2>&1 || die "hf (huggingface-hub CLI) not found on PATH — 'pip install huggingface-hub'."
@@ -228,18 +239,41 @@ else
 fi
 
 # =============================================================================
-#  STEP 4 — Stage the repo-bundled workflows into the entrypoint layout
-#  entrypoint-eks.sh expects WORKFLOW_PATH=/mnt/fsx/workflows/rheo/scripts, with
-#  simulation/rl/rlinf_ext under workflows/rheo/scripts/simulation/rl/rlinf_ext.
-#  Mirror the EFS buildspec's cp layout (cp -r simulation and policy into it).
+#  STEP 4 — Stage the COMPLETE i4h workflows tree + overlay our custom RL config
+#  entrypoint-eks.sh puts WORKFLOW_PATH=/mnt/fsx/workflows/rheo/scripts on PYTHONPATH.
+#  The packages under rheo/scripts (simulation, policy, teleop_devices, utils, config)
+#  are INTERDEPENDENT — staging a subset breaks Isaac Sim env creation at import time
+#  (e.g. ModuleNotFoundError: simulation.assets / teleop_devices). So we clone the pinned
+#  i4h-workflows and stage its COMPLETE rheo/scripts tree, then overlay ONLY our custom RL
+#  config (the eval/training yaml + training_backend) on top. Fail closed.
 # =============================================================================
-say "STEP 4 — Stage workflows into workflows/rheo/scripts/"
+say "STEP 4 — Stage COMPLETE i4h rheo/scripts @ ${I4H_WORKFLOWS_HUMAN} (${I4H_WORKFLOWS_SHA:0:7}) + overlay custom RL config"
 WORKFLOWS_SCRIPTS="${WORKFLOWS_STAGE}/rheo/scripts"
 rm -rf "$WORKFLOWS_STAGE"
 mkdir -p "$WORKFLOWS_SCRIPTS"
-cp -r "${WORKFLOWS_SRC}/simulation" "${WORKFLOWS_SCRIPTS}/"
-cp -r "${WORKFLOWS_SRC}/policy"     "${WORKFLOWS_SCRIPTS}/"
-ok "workflows staged at ${WORKFLOWS_SCRIPTS} (simulation/, policy/)"
+I4H_DIR="${WORKDIR}/i4h-workflows"
+rm -rf "$I4H_DIR"
+# Treeless clone + checkout the pinned COMMIT (a raw SHA can't be used with
+# --branch/--depth 1). Blobs fetch lazily; the full commit graph makes any SHA
+# checkout-able. Fail closed at every step (no || true masking).
+git clone --filter=blob:none "$I4H_WORKFLOWS_URL" "$I4H_DIR" \
+  || die "git clone of i4h-workflows failed (fail closed)."
+git -C "$I4H_DIR" checkout "$I4H_WORKFLOWS_SHA" \
+  || die "git checkout ${I4H_WORKFLOWS_SHA} (i4h-workflows ${I4H_WORKFLOWS_HUMAN}) failed — pin may have drifted (fail closed)."
+I4H_SCRIPTS="${I4H_DIR}/workflows/rheo/scripts"
+[[ -d "${I4H_SCRIPTS}/simulation" && -d "${I4H_SCRIPTS}/teleop_devices" ]] \
+  || die "i4h-workflows @ ${I4H_WORKFLOWS_SHA:0:7} is missing expected rheo/scripts packages (simulation/, teleop_devices/)."
+cp -r "${I4H_SCRIPTS}/." "${WORKFLOWS_SCRIPTS}/"
+# Overlay our custom RL config (our eval/training yaml + training_backend) ON TOP of upstream.
+cp -r "${WORKFLOWS_SRC}/simulation/rl/rlinf_ext/config/." \
+      "${WORKFLOWS_SCRIPTS}/simulation/rl/rlinf_ext/config/" \
+  || die "failed to overlay custom RL config onto the staged workflows."
+# Assert the interdependent sibling packages actually landed in the STAGED tree
+# (not just the clone) BEFORE upload — these are the exact ones a subset-vendored
+# tree dropped (ModuleNotFoundError: teleop_devices / simulation.assets, smoke bugs #2/#3).
+[[ -d "${WORKFLOWS_SCRIPTS}/teleop_devices" && -d "${WORKFLOWS_SCRIPTS}/simulation/assets" ]] \
+  || die "staged workflows missing teleop_devices/ or simulation/assets/ after copy (fail closed)."
+ok "workflows staged: complete i4h rheo/scripts @ ${I4H_WORKFLOWS_HUMAN} (${I4H_WORKFLOWS_SHA:0:7}) + custom RL config overlay"
 
 # =============================================================================
 #  STEP 5 — Upload to S3 (every sync gated by --dryrun unless --execute)
@@ -279,11 +313,20 @@ s3_sync "${WORKFLOWS_STAGE}"            "s3://${S3_DATA_BUCKET}/workflows/"
 #  STEP 6 — Verification (execute mode)
 # =============================================================================
 if [[ "$EXECUTE" -eq 1 ]]; then
-  say "STEP 6 — Verify uploaded key prefixes"
+  say "STEP 6 — Verify uploaded key prefixes (FAIL CLOSED — marker withheld if any missing)"
+  # Each prefix MUST resolve to >=1 object or we abort BEFORE writing _STAGING_COMPLETE,
+  # so a half-staged bucket can never be marked ready. The last two entries are the
+  # interdependent sibling packages a subset-vendored tree silently dropped (smoke
+  # bugs #2/#3: ModuleNotFoundError teleop_devices / simulation.assets).
   for _pfx in "third_party/RLinf/" "third_party/Isaac-GR00T/" "third_party/IsaacLab/" \
-              "third_party/IsaacLab-Arena/" "models/${MODEL_DIRNAME}/" "workflows/rheo/scripts/"; do
+              "third_party/IsaacLab-Arena/" "models/${MODEL_DIRNAME}/" \
+              "workflows/rheo/scripts/simulation/" \
+              "workflows/rheo/scripts/simulation/assets/" \
+              "workflows/rheo/scripts/teleop_devices/"; do
     echo "    aws s3 ls s3://${S3_DATA_BUCKET}/${_pfx}"
-    aws s3 ls "s3://${S3_DATA_BUCKET}/${_pfx}" --region "$AWS_REGION" || warn "no objects listed under ${_pfx}"
+    aws s3 ls "s3://${S3_DATA_BUCKET}/${_pfx}" --region "$AWS_REGION" >/dev/null 2>&1 \
+      || die "post-upload verify FAILED: no objects under ${_pfx} — staging incomplete (marker NOT written, fail closed)."
+    ok "verified ${_pfx}"
   done
   # Publish the READY marker LAST. Because `set -e` aborts on any earlier sync
   # failure, the marker is present ONLY when all six prefixes converged — operators

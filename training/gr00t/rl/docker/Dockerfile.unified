@@ -77,6 +77,20 @@ RUN git clone https://github.com/isaac-sim/IsaacLab-Arena.git /opt/IsaacLab-Aren
     && /isaac-sim/python.sh -m pip install --no-cache-dir --no-deps -e /opt/IsaacLab-Arena \
     && /isaac-sim/python.sh -c "import isaaclab_arena_g1; print(f'IsaacLab-Arena installed: {isaaclab_arena_g1.__file__}')"
 
+# lightwheel-sdk — REQUIRED by IsaacLab-Arena's object_library.py (module-level
+# `from lightwheel_sdk.loader import object_loader`, triggered by Arena's blanket
+# asset registration on any teleop/env import). Arena is installed --no-deps above,
+# so this transitive dep is otherwise missing and the trocar env worker dies with
+# `ModuleNotFoundError: No module named 'lightwheel_sdk'` (Phase 14 us-west-2 smoke).
+# The SDK is Apache-2.0 and public on PyPI; the trocar USD assets themselves load
+# from the PUBLIC NVIDIA Omniverse CDN (see workflows/.../simulation/assets/assets.py
+# ASSET_PATH, CC-BY-NC-4.0) — NOT via the lightwheel_sdk authenticated API — so no
+# LightWheel account/credentials are needed at build or run time. The container does
+# need outbound HTTPS to omniverse-content-production.s3-us-west-2.amazonaws.com at
+# RUNTIME to stream the USD assets. Pinned for byte-repeatable rebuilds.
+RUN /isaac-sim/python.sh -m pip install --no-cache-dir "lightwheel-sdk==1.0.3" \
+    && /isaac-sim/python.sh -c "from lightwheel_sdk.loader import object_loader; print('lightwheel_sdk import OK (object_loader present)')"
+
 # AWS utilities
 RUN /isaac-sim/python.sh -m pip install --no-cache-dir awscli boto3
 

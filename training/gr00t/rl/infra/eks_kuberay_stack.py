@@ -85,17 +85,26 @@ class EKSKubeRayStack(Stack):
         is_eval = mode == "eval"
 
         # Effective container image. This stack only CONSUMES an image; it never
-        # builds one (that is GR00TRLArtifactsStack's job).
-        #   - image_uri provided  -> bring-your-own; use it as-is.
-        #   - image_uri omitted   -> DEFAULT to the artifacts stack's ECR repo at
-        #     gr00t-rl-unified:<image_tag> (the artifacts stack must have been
-        #     deployed + the pipeline run first; prepare-artifacts.sh resolves a
-        #     pinned digest for the deploy line).
-        image_tag = "latest"
+        # builds one (that is GR00TRLArtifactsStack's job). image_uri is REQUIRED and
+        # must be an explicit, verified reference — ideally a digest.
+        #
+        # We deliberately do NOT fall back to a floating ':latest' tag. A mutable tag
+        # can resolve to an unverified or half-built image, and can even resolve to a
+        # DIFFERENT digest between synth and the pod's pull — quietly landing the wrong
+        # image on a GPU cluster. Fail closed at synth instead. The normal path is
+        # infra/prepare-artifacts.sh, which builds+verifies the image and passes the
+        # pinned gr00t-rl-unified@sha256:<digest> on the deploy line; app.py also skips
+        # instantiating this stack when no image_uri is in context, so the phase-1
+        # artifacts-stack deploy (before any digest exists) is unaffected.
         if not image_uri:
-            image_uri = (
-                f"{Stack.of(self).account}.dkr.ecr."
-                f"{Stack.of(self).region}.amazonaws.com/gr00t-rl-unified:{image_tag}"
+            raise ValueError(
+                "GR00TRLEKSStack requires an explicit image_uri (no ':latest' "
+                "fallback). Prefer a digest: "
+                "<acct>.dkr.ecr.<region>.amazonaws.com/gr00t-rl-unified@sha256:<digest>. "
+                "Deploy GR00TRLArtifactsStack, then run infra/prepare-artifacts.sh to "
+                "build+verify the image and deploy with the resolved digest — or pass "
+                "--context image_uri=... explicitly (e.g. from "
+                "scripts/build_unified_and_push.sh)."
             )
 
         # ==============================================================

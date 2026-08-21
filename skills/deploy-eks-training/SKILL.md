@@ -15,9 +15,10 @@ Deploy and run PPO training for GR00T N1.5 on EKS with KubeRay using heterogeneo
 - vCPU quota: 384+ for G instances (quota code `L-DB2E81BA`)
 - ECR image `<account>.dkr.ecr.<region>.amazonaws.com/gr00t-rl-unified@sha256:<digest>`, built + pushed by the `GR00T-RL-Pipeline` CodeBuild project (owned by `GR00TRLArtifactsStack`), driven by `infra/prepare-artifacts.sh` (Steps 1-2) — or by the manual `scripts/build_unified_and_push.sh` self-build (bring-your-own image). The workload deploys the wrapper-resolved `@sha256` digest, NOT the mutable `:latest` tag.
 - S3 bucket in the SAME region as FSx with staged training data (DRA-linked to FSx) — staged by the same `GR00T-RL-Pipeline` project's stage-data arm, driven by `infra/prepare-artifacts.sh` (Step 2)
-- VPC with NAT gateway (private subnets need egress)
+- VPC with NAT gateway (private subnets need egress) — ideally ≥2 private subnets in different AZs so you can chase g6e capacity
+- **Runtime asset egress:** worker pods stream the trocar USD scene/props from the **public** NVIDIA Omniverse CDN (`omniverse-content-production.s3-us-west-2.amazonaws.com`) at run time — the NAT egress above covers it, no credentials. Those assets are CC-BY-NC-4.0 (NonCommercial). `lightwheel-sdk` (public PyPI, Apache-2.0) is baked into the image; no LightWheel account is required.
 - CDK dependencies: `pip install -r training/gr00t/rl/infra/requirements.txt`
-- kubectl installed locally
+- kubectl + `jq` installed locally (`prepare-artifacts.sh` parses build JSON with `jq`)
 
 ### Choosing a region
 
@@ -43,19 +44,30 @@ s3://<bucket>/
 │   ├── IsaacLab/       (commit 941ebdf4a)
 │   └── IsaacLab-Arena/ (commit dba099565)
 ├── models/
-│   └── GR00T-N1.5-RL-Rheo-AssembleTrocar/
+│   └── GR00T-N1.5-RL-Rheo-AssembleTrocar/   (model rev b54e142)
 └── workflows/
-    └── rheo/scripts/simulation/rl/rlinf_ext/
+    └── rheo/scripts/            # COMPLETE i4h-workflows tree, cloned by stage-s3-eks.sh @ v0.5.0 (fb7727e)
+        ├── simulation/          # tasks/assemble_trocar, assets/, rl/rlinf_ext/ (+ our tuned config overlay)
+        ├── policy/
+        ├── teleop_devices/      # sibling pkg the task cfg imports — MUST be present (else ModuleNotFoundError)
+        ├── utils/
+        └── config/
 ```
 
-These versions are pinned for compatibility. Do NOT bump the RLinf pin (see Known Issues).
+These versions are pinned for compatibility. Do NOT bump the RLinf pin (see Known Issues). The
+`workflows/rheo/scripts` tree is staged **whole** from a pinned commit of i4h-workflows (only our
+`simulation/rl/rlinf_ext/config` overlay is layered on top) — a hand-picked subset silently drops
+interdependent sibling packages and breaks env creation at import time.
 
 ## Steps
 
-The build/stage/deploy flow is **3 stacks / 3 steps**. There is **NO deployment auto-trigger**:
-a direct `cdk deploy GR00TRLEKSStack` WITHOUT completing Steps 1-2 is **unsupported** — the
-cluster would point at a nonexistent image / unstaged data. Always drive the image build + data
-staging through `prepare-artifacts.sh`, which gates the EKS deploy on verified artifacts.
+The build/stage/deploy flow is **two stacks, three phases** (deploy `GR00TRLArtifactsStack` →
+build image + stage data via the `GR00T-RL-Pipeline` project → deploy the consumer
+`GR00TRLEKSStack`). There is **NO deployment auto-trigger**: a direct `cdk deploy GR00TRLEKSStack`
+WITHOUT completing Steps 1-2 is **unsupported** — in fact the stack **fails synth** without an
+explicit `image_uri` (there is deliberately no floating `:latest` fallback). Always drive the image
+build + data staging through `prepare-artifacts.sh`, which gates the EKS deploy on verified
+artifacts and hands `cdk deploy` the resolved `@sha256` digest.
 
 ### 0. Set the region env (once, reused by every step)
 
@@ -128,25 +140,18 @@ aws eks update-kubeconfig --name gr00t-rl-eks --region <region> \
   --role-arn arn:aws:iam::<account>:role/gr00t-rl-eks-admin-<region>
 ```
 
-### 4. Post-Deploy: Create Entrypoint ConfigMap
+### 4. Post-Deploy: entrypoint ConfigMap (created by CDK — no manual step)
 
-The entrypoint is mounted via ConfigMap (not baked into the image):
+The `entrypoint-eks` ConfigMap is **created by the CDK stack** — `eks_kuberay_stack.py` reads
+`docker/entrypoint-eks.sh` at synth time and materializes the ConfigMap, which is mounted into the
+Ray pods. You do **NOT** create it by hand; a manual `kubectl create configmap` is neither needed
+nor recommended (it drifts from the committed entrypoint).
 
+To pick up an **edited** entrypoint, re-deploy the stack (clean path). For quick in-place iteration,
+recycle the workers once the head is stable:
 ```bash
-kubectl create configmap entrypoint-eks \
-  --from-file=entrypoint-eks.sh=/path/to/training/gr00t/rl/docker/entrypoint-eks.sh \
-  -n training --dry-run=client -o yaml | kubectl apply -f -
-```
-
-Then delete pods to pick up the new ConfigMap (KubeRay recreates them):
-```bash
-kubectl delete pods -n training --all
-```
-
-**Important:** After head restarts, workers may get stuck (connected to old head IP). Delete workers once head is stable:
-```bash
-# Wait ~2 min for head to stabilize, then:
-kubectl delete pods -n training -l ray-role=worker
+# After a head restart, workers may still target the old head IP. Once the head is stable (~2 min):
+kubectl delete pods -n training -l ray-role=worker   # KubeRay recreates them against the new head
 ```
 
 ### 5. Verify Cluster Health
@@ -241,6 +246,13 @@ aws eks delete-cluster --name gr00t-rl-eks --region <region>
 aws cloudformation delete-stack --stack-name GR00TRLEKSStack --region <region>
 ```
 
+**Leave `GR00TRLArtifactsStack` standing.** It persists across EKS teardowns (it owns the built
+image + the pipeline), and its ECR repo `gr00t-rl-unified` is created with a **RETAIN** policy —
+destroying the stack orphans the repo, and a later re-deploy then collides on the name (the Batch
+stack also references `gr00t-rl-unified`). An idle ECR repo + an untriggered CodeBuild project cost
+essentially nothing. If you truly must remove it, delete the repo explicitly afterward:
+`aws ecr delete-repository --repository-name gr00t-rl-unified --force --region <region>`.
+
 ## Architecture
 
 ```
@@ -290,7 +302,8 @@ Training parameters are **env-var configurable** on the head pod:
 | RLinf | `649e757` | Does NOT require weight_syncer |
 | Isaac-GR00T | `4af2b62` | Has `gr00t.experiment.data_config` |
 | IsaacLab | Latest from i4h-workflows | |
-| Ray | 2.9.0 | KubeRay cluster version |
+| Ray | 2.47.0 | RayCluster `rayVersion` (RLinf minimum; matches the image's `ray[default]==2.47.0`) |
+| lightwheel-sdk | 1.0.3 | Public PyPI (Apache-2.0); baked into the image so IsaacLab-Arena's `object_library` import resolves. Trocar USD assets load from the public Omniverse CDN (CC-BY-NC-4.0), not the SDK's authenticated API |
 
 **Critical:** RLinf `bc3d8aa`+ requires `weight_syncer` config. Isaac-GR00T `3df8b38` lacks `data_config`. Always use the versions pinned in the i4h-workflows repo.
 

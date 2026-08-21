@@ -15,18 +15,40 @@ Reinforcement learning post-training for NVIDIA GR00T N1.5 on the Assemble Troca
 
 ### Prerequisites
 
-- AWS account with GPU quota (384 vCPUs for G instances in your region)
-- CDK CLI installed (`npm install -g aws-cdk`)
-- Python 3.10+ with CDK dependencies: `pip install -r infra/requirements.txt`
-- **EKS backend**: VPC with private subnets that have NAT gateway egress (nodes must reach EKS API + ECR)
+Starting from a fresh AWS account, in your chosen region (keep S3 + ECR + VPC + FSx all in **one**
+region — the FSx DRA requires same-region S3):
+
+- **CLIs:** `aws` (v2), `cdk` (`npm install -g aws-cdk`), `docker` (only for the manual self-build),
+  and `jq` (`prepare-artifacts.sh` parses build JSON with it). Python 3.10+ with the CDK deps:
+  `pip install -r infra/requirements.txt`.
+- **GPU quota:** enough **G-instance vCPUs** for your fleet (e.g. a benchmark eval on 8× g6e.8xlarge
+  = 256 vCPUs; a training learner + rollout fleet is larger). Request the *"Running On-Demand G and
+  VT instances"* quota (code `L-DB2E81BA`) in your region **before** deploying — new accounts start
+  well below what a real run needs, and increases can take hours to days.
+- **VPC:** a VPC with **≥2 private subnets in different AZs**, each with **NAT gateway egress**
+  (nodes must reach the EKS API, ECR, PyPI/GitHub, and the public Omniverse asset CDN — see the
+  asset note below). Pick AZ(s) that actually have g6e capacity; **probe first** with
+  `infra/capacity-probe.sh --subnet <subnet-id> --instance-type g6e.8xlarge --capacity <n>`.
+- **S3 data bucket (same region):** `aws s3 mb s3://<your-bucket> --region <region>`. It's the
+  DRA source FSx-Lustre lazily imports from; `stage-s3-eks.sh` populates it.
+- **CDK bootstrap (once per account/region):**
+  `cdk bootstrap aws://$(aws sts get-caller-identity --query Account --output text)/<region>`.
+- **Runtime egress for assets:** the trocar task streams its USD scene/props at runtime from the
+  **public** NVIDIA Omniverse CDN (`omniverse-content-production.s3-us-west-2.amazonaws.com`, no
+  credentials). These "Powered by LightWheel" assets are **CC-BY-NC-4.0 (NonCommercial)** — fine for
+  research/eval; not for commercial redeployment of the assets themselves. No LightWheel account is
+  needed (`lightwheel-sdk` is a public PyPI package baked into the image; the assets load by URL).
 
 ### Deploy (EKS — recommended, validated)
 
-The EKS build/stage/deploy flow is **3 stacks / 3 steps**. There is **NO deployment
-auto-trigger**: a direct `cdk deploy GR00TRLEKSStack` WITHOUT completing Steps 1-2 is
-**unsupported** — the cluster would point at a nonexistent image / unstaged data. The image
-build + data staging are driven through `prepare-artifacts.sh`, which gates the EKS deploy on
-verified artifacts and deploys the resolved `@sha256` digest (NOT the mutable `:latest` tag).
+The EKS build/stage/deploy flow is **two stacks, three phases**: (1) deploy the persistent
+`GR00TRLArtifactsStack` (ECR repo + the `GR00T-RL-Pipeline` CodeBuild project), (2) build the
+image + stage the data through that pipeline, (3) deploy the consumer `GR00TRLEKSStack` with the
+resolved image digest. There is **NO deployment auto-trigger**: a direct `cdk deploy
+GR00TRLEKSStack` WITHOUT completing phases 1-2 is **unsupported** — in fact the stack now
+**fails synth** if you don't pass an explicit `image_uri` (there is deliberately no floating
+`:latest` fallback). The image build + data staging are driven through `prepare-artifacts.sh`,
+which gates the EKS deploy on verified artifacts and deploys the resolved `@sha256` digest.
 
 ```bash
 # 0. Region env (reused by every step)
@@ -158,9 +180,26 @@ AWS_DEFAULT_REGION=<region> cdk destroy --force
 aws eks delete-cluster --name gr00t-rl-eks --region <region>
 ```
 
+> **Do NOT destroy `GR00TRLArtifactsStack` as part of routine teardown.** It is designed to persist
+> across EKS teardowns (it owns the built image + the pipeline). Its ECR repo `gr00t-rl-unified` is
+> created with a **RETAIN** policy, so destroying the stack leaves the repo behind; a later re-deploy
+> then **collides** on the existing repo name (the Batch stack also references `gr00t-rl-unified`).
+> If you truly must remove it, delete the repo explicitly afterward
+> (`aws ecr delete-repository --repository-name gr00t-rl-unified --force --region <region>`) before
+> re-deploying. For normal cost control, just tear down the EKS stack and leave the artifacts stack
+> (an idle ECR repo + an untriggered CodeBuild project cost essentially nothing).
+
 ## Modes
 
 The EKS + KubeRay backend supports two runtime modes via a `mode` CDK context param. Unset (or `mode=train`) preserves today's behavior; `mode=eval` runs standalone evaluation on a saved checkpoint.
+
+> **The `cdk deploy GR00TRLEKSStack …` commands in this section are the *advanced redeploy* path** —
+> they assume you have **already** completed phases 1-2 (artifacts stack deployed, image built +
+> data staged) and are re-deploying the consumer stack against an existing, **verified** image.
+> Pass `image_uri` as a **pinned digest** (`…/gr00t-rl-unified@sha256:<digest>`), not a floating
+> tag — the stack fails synth without an explicit `image_uri` and never falls back to `:latest`.
+> For a first deploy (or any time the image/data changed), use `prepare-artifacts.sh` (Quick Start
+> phase 2) instead: it builds, verifies, resolves the digest, and runs this deploy for you.
 
 ### MODE=train (default)
 
@@ -174,7 +213,7 @@ AWS_DEFAULT_REGION=<region> cdk deploy GR00TRLEKSStack \
   --context compute_backend=eks \
   --context vpc_id=<your-vpc-id> \
   --context s3_data_bucket=<your-s3-bucket> \
-  --context image_uri=<your-ecr-uri> \
+  --context image_uri=<account>.dkr.ecr.<region>.amazonaws.com/gr00t-rl-unified@sha256:<digest> \
   --context capacity_reservation_id=<your-cr-id>
 ```
 
@@ -191,7 +230,7 @@ AWS_DEFAULT_REGION=<region> cdk deploy GR00TRLEKSStack \
   --context compute_backend=eks \
   --context vpc_id=<your-vpc-id> \
   --context s3_data_bucket=<your-s3-bucket> \
-  --context image_uri=<your-ecr-uri> \
+  --context image_uri=<account>.dkr.ecr.<region>.amazonaws.com/gr00t-rl-unified@sha256:<digest> \
   --context mode=eval \
   --context eval_ckpt=/mnt/fsx/<your-run-path>/checkpoints/global_step_N/actor/model_state_dict/full_weights.pt
 ```
@@ -203,7 +242,7 @@ AWS_DEFAULT_REGION=<region> cdk deploy GR00TRLEKSStack \
   --context compute_backend=eks \
   --context vpc_id=<your-vpc-id> \
   --context s3_data_bucket=<your-s3-bucket> \
-  --context image_uri=<your-ecr-uri> \
+  --context image_uri=<account>.dkr.ecr.<region>.amazonaws.com/gr00t-rl-unified@sha256:<digest> \
   --context mode=eval \
   --context num_rollout_workers=7 \
   --context eval_ckpt=/mnt/fsx/<your-run-path>/checkpoints/global_step_N/actor/model_state_dict/full_weights.pt
@@ -366,12 +405,19 @@ training/gr00t/rl/
 ├── scripts/
 │   ├── build_unified_and_push.sh  # Manual self-build of the unified image (bring-your-own)
 │   └── submit_training.sh       # Job submission helper
-└── workflows/
-    ├── policy/gr00t_config.py   # GR00T data config
-    └── simulation/
-        ├── rl/rlinf_ext/        # RLinf extension (env registration, model patching)
-        └── tasks/assemble_trocar/  # IsaacLab task definition
+└── workflows/                  # ONLY our custom RL config overlay (NOT the full tree)
+    └── simulation/rl/rlinf_ext/config/
+        ├── isaaclab_ppo_gr00t_assemble_trocar.yaml  # tuned PPO hyperparams (overrides upstream)
+        ├── training_backend/fsdp.yaml               # our FSDP backend config (not in upstream)
+        └── env/, model/                             # (identical to upstream, kept for a self-contained overlay)
 ```
+
+> The complete i4h-workflows `rheo/scripts` tree (`simulation/`, `policy/`, `teleop_devices/`,
+> `utils/`, `config/` — interdependent on `PYTHONPATH`) is **cloned at stage time** by
+> `stage-s3-eks.sh` from a **pinned commit** of `isaac-for-healthcare/i4h-workflows` (v0.5.0), and
+> only the `config/` overlay above is layered on top. The repo intentionally does **not** vendor a
+> subset of that tree — a hand-picked subset silently drops interdependent siblings and breaks env
+> creation at import time (e.g. `ModuleNotFoundError: teleop_devices`).
 
 ## Troubleshooting
 

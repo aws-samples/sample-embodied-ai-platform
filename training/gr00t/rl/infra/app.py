@@ -56,6 +56,7 @@ Context parameters:
   "fsx_subnet_id"       - Optional string (EKS only). Pins the single-AZ FSx-Lustre filesystem (and the CB/on-demand learner NG that co-locates with it) to a SPECIFIC private subnet instead of the first PRIVATE_WITH_EGRESS subnet (index 0). Set it to the subnet in the AZ that actually holds g6e/H100 capacity so FSx and the learner land together. Unset keeps the historical select_subnets(...).subnets[0] default (byte-identical synth). Subnet ID supplied at deploy via --context, never committed.
 """
 import os
+import sys
 import aws_cdk as cdk
 from mnp_batch_stack import RLBatchMNPStack
 from eks_kuberay_stack import EKSKubeRayStack
@@ -132,6 +133,21 @@ if compute_backend in ("batch-mnp", "sagemaker"):
         image_uri=app.node.try_get_context("image_uri"),
         num_rollout_nodes=int(app.node.try_get_context("num_rollout_nodes") or 4),
         env=env,
+    )
+elif compute_backend == "eks" and not app.node.try_get_context("image_uri"):
+    # The EKS stack is a PURE consumer of a pre-built image — it requires an explicit,
+    # verified image_uri (digest preferred) and never fabricates a floating :latest.
+    # When no image_uri is in context we SKIP instantiating it, so that phase-1
+    # `cdk deploy GR00TRLArtifactsStack --context compute_backend=eks ...` (build the
+    # image; no digest exists yet) can synth+deploy on its own. To deploy the EKS
+    # backend, use infra/prepare-artifacts.sh (builds+verifies the image, then deploys
+    # with --context image_uri=<resolved @sha256 digest>) or pass image_uri yourself.
+    print(
+        "[app] compute_backend=eks but no image_uri context — skipping GR00TRLEKSStack "
+        "(pure image consumer). Expected when deploying GR00TRLArtifactsStack first. "
+        "Deploy the EKS backend via infra/prepare-artifacts.sh or pass "
+        "--context image_uri=<...@sha256:digest>.",
+        file=sys.stderr,
     )
 elif compute_backend == "eks":
     stack = EKSKubeRayStack(
