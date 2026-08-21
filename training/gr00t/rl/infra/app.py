@@ -36,7 +36,7 @@ Context parameters:
   efs_sg_id             - EFS security group ID (batch-mnp/sagemaker only)
   s3_data_bucket        - S3 bucket name with staged training data (EKS only, DRA-linked to FSx)
   fsx_capacity_gib      - FSx for Lustre capacity in GiB (EKS only, default: 1200)
-  image_uri             - Pre-built ECR URI for unified image (skips CodeBuild if provided)
+  image_uri             - Pre-built ECR URI for the unified image (required for EKS). Normally the wrapper-resolved @sha256 digest built by the GR00T-RL-Pipeline CodeBuild project (GR00TRLArtifactsStack) and handed over by infra/prepare-artifacts.sh; or a bring-your-own image from scripts/build_unified_and_push.sh. There is no in-stack CodeBuild auto-trigger.
   num_rollout_nodes     - Number of rollout child nodes for batch-mnp/sagemaker (default: 4)
   num_rollout_workers   - Number of rollout worker pods for eks (default: 4)
   learner_instance_type - EC2 instance type for learner node group (default: g6e.48xlarge)
@@ -53,11 +53,13 @@ Context parameters:
   "kuberay_version"     - Optional string (EKS only). KubeRay operator Helm chart version. Default "1.1.0" keeps the validated eks stack byte-identical (A9-3) — a deploy without this flag synthesizes exactly today's frozen 1.1.0 stack. Pass --context kuberay_version=1.2.0 for the async deploy only (KubeRay 1.2.0 is needed for async node-recovery per PRD §8). Reversibility (D-06): omit the flag to fall back to the 1.1.0 default; no in-place mutation of the validated stack.
   "rollout_subnet_ids"  - Optional string (EKS only). Default-off capacity-resilient rollout knob (Phase 12). Unset keeps the RolloutNodes node group on the single-AZ FSx subnet (byte-identical synth to today). Set to one or more comma-separated private subnet IDs to place the rollout fleet cross-AZ (e.g. us-east-2b) while the learner (pinned to the 2a Capacity Block) and FSx stay in us-east-2a. Applies to the RolloutNodes NG ONLY — the (CB) learner NG stays on the FSx subnet, and the eval-learner NG stays on the FSx subnet unless eval_learner_subnet_ids is also set. Reversible by omitting the flag; subnet IDs are supplied at deploy via --context and never committed.
   "eval_learner_subnet_ids" - Optional string (EKS only). Default-off capacity-resilient EVAL knob (Phase 13). Unset keeps the EvalLearnerNodes NG (which runs the eval head pod) on the single-AZ FSx subnet (byte-identical synth). Set to comma-separated private subnet IDs to place the eval-learner in another AZ (e.g. us-east-2b) when the FSx AZ is g6e-capacity-dry; FSx stays in us-east-2a and is read cross-AZ (the static CSI PV has no topology affinity). Pair with rollout_subnet_ids=<same subnet> so the eval head + rollout workers co-locate intra-AZ. Reversible by omitting; subnet IDs supplied at deploy via --context, never committed.
+  "fsx_subnet_id"       - Optional string (EKS only). Pins the single-AZ FSx-Lustre filesystem (and the CB/on-demand learner NG that co-locates with it) to a SPECIFIC private subnet instead of the first PRIVATE_WITH_EGRESS subnet (index 0). Set it to the subnet in the AZ that actually holds g6e/H100 capacity so FSx and the learner land together. Unset keeps the historical select_subnets(...).subnets[0] default (byte-identical synth). Subnet ID supplied at deploy via --context, never committed.
 """
 import os
 import aws_cdk as cdk
 from mnp_batch_stack import RLBatchMNPStack
 from eks_kuberay_stack import EKSKubeRayStack
+from artifacts_stack import GR00TRLArtifactsStack
 
 app = cdk.App()
 
@@ -66,6 +68,26 @@ app = cdk.App()
 # sets only a partial region env (e.g. AWS_REGION but not CDK_DEFAULT_REGION) while the
 # rest of the bash tooling/docs default elsewhere. Fail closed instead: require one of
 # the region env vars to be exported to the intended target region.
+#
+# Additionally REJECT disagreement: if two of the three region env vars are set to
+# DIFFERENT non-empty values, that is an operator error (partial re-export) that
+# would otherwise silently resolve to whichever wins the precedence order below —
+# and misdeploy to a region where the S3/VPC/FSx don't live. Fail closed instead.
+_region_sources = {
+    "CDK_DEFAULT_REGION": os.environ.get("CDK_DEFAULT_REGION"),
+    "AWS_REGION": os.environ.get("AWS_REGION"),
+    "AWS_DEFAULT_REGION": os.environ.get("AWS_DEFAULT_REGION"),
+}
+_distinct_regions = {v for v in _region_sources.values() if v}
+if len(_distinct_regions) > 1:
+    _detail = ", ".join(
+        f"{k}={v!r}" for k, v in _region_sources.items() if v
+    )
+    raise SystemExit(
+        "Conflicting AWS region env vars — refusing to guess. "
+        f"Set them all to the SAME region (or unset the extras). Saw: {_detail}. "
+        "Keep S3 + ECR + VPC + FSx all in that ONE region (the FSx DRA requires same-region S3)."
+    )
 _region = (
     os.environ.get("CDK_DEFAULT_REGION")
     or os.environ.get("AWS_REGION")
@@ -84,6 +106,21 @@ env = cdk.Environment(
 )
 
 compute_backend = app.node.try_get_context("compute_backend") or "batch-mnp"
+
+# Shared artifacts stack (persistent ECR repo `gr00t-rl-unified` + the mode-switched
+# GR00T-RL-Pipeline CodeBuild project). Used by the EKS-family backends, which are
+# pure consumers of the built image + staged bucket. Deploy this FIRST, then drive it
+# with infra/prepare-artifacts.sh, then deploy the backend stack with the resolved
+# image_uri. Instantiated as its own stack so it OWNS those resources persistently
+# (independent of any single backend deploy).
+if compute_backend in ("eks", "hyperpod-eks"):
+    GR00TRLArtifactsStack(
+        app,
+        "GR00TRLArtifactsStack",
+        s3_data_bucket=app.node.try_get_context("s3_data_bucket"),
+        image_tag=app.node.try_get_context("image_tag") or "latest",
+        env=env,
+    )
 
 if compute_backend in ("batch-mnp", "sagemaker"):
     stack = RLBatchMNPStack(
@@ -133,6 +170,7 @@ elif compute_backend == "eks":
         kuberay_version=app.node.try_get_context("kuberay_version") or "1.1.0",
         rollout_subnet_ids=app.node.try_get_context("rollout_subnet_ids"),
         eval_learner_subnet_ids=app.node.try_get_context("eval_learner_subnet_ids"),
+        fsx_subnet_id=app.node.try_get_context("fsx_subnet_id"),
         env=env,
     )
 else:

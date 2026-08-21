@@ -23,8 +23,9 @@ phases:
       - rm -rf /mnt/efs/third_party/RLinf
       - git clone https://github.com/RLinf/RLinf.git /mnt/efs/third_party/RLinf && cd /mnt/efs/third_party/RLinf && git checkout 649e7579775997ade74efff33a7c23e90c61e60a || true
       # NOTE: the RLinf _broadcast patch is applied on the EKS path by
-      # infra/stage-s3-eks.sh (run via the GR00T-RL-Stage-S3 CodeBuild project).
-      # The Batch/EFS path here is legacy and relies on the auto-recover harness.
+      # infra/stage-s3-eks.sh (run via the GR00T-RL-Pipeline CodeBuild project,
+      # stage-data mode). The Batch/EFS path here is legacy and relies on the
+      # auto-recover harness.
       - echo "Staging Isaac-GR00T..."
       - rm -rf /mnt/efs/third_party/Isaac-GR00T
       - git clone https://github.com/NVIDIA/Isaac-GR00T.git /mnt/efs/third_party/Isaac-GR00T && cd /mnt/efs/third_party/Isaac-GR00T && git checkout 4af2b622892f7dcb5aae5a3fb70bcb02dc217b96 || true

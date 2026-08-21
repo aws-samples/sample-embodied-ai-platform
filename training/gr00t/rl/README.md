@@ -20,27 +20,52 @@ Reinforcement learning post-training for NVIDIA GR00T N1.5 on the Assemble Troca
 - Python 3.10+ with CDK dependencies: `pip install -r infra/requirements.txt`
 - **EKS backend**: VPC with private subnets that have NAT gateway egress (nodes must reach EKS API + ECR)
 
-### Deploy
+### Deploy (EKS — recommended, validated)
+
+The EKS build/stage/deploy flow is **3 stacks / 3 steps**. There is **NO deployment
+auto-trigger**: a direct `cdk deploy GR00TRLEKSStack` WITHOUT completing Steps 1-2 is
+**unsupported** — the cluster would point at a nonexistent image / unstaged data. The image
+build + data staging are driven through `prepare-artifacts.sh`, which gates the EKS deploy on
+verified artifacts and deploys the resolved `@sha256` digest (NOT the mutable `:latest` tag).
 
 ```bash
+# 0. Region env (reused by every step)
 cd training/gr00t/rl/infra
+export AWS_REGION=<region> AWS_DEFAULT_REGION=<region> CDK_DEFAULT_REGION=<region>
+export CDK_DEFAULT_ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
 
-# Option A: EKS + KubeRay (recommended, validated) — FSx-Lustre backed by S3
-AWS_REGION=<region> AWS_DEFAULT_REGION=<region> CDK_DEFAULT_REGION=<region> cdk deploy \
-  --context compute_backend=eks \
-  --context vpc_id=<your-vpc-id> \
-  --context s3_data_bucket=<your-s3-bucket> \
-  --context image_uri=<your-ecr-image-uri> \
-  --context learner_instance_type=g6e.48xlarge \
-  --context rollout_instance_type=g6e.4xlarge
+# 1. Persistent artifacts stack: gr00t-rl-unified ECR repo + the gated GR00T-RL-Pipeline
+#    CodeBuild project. Deploy ONCE (persists across EKS teardowns).
+cdk deploy GR00TRLArtifactsStack --context compute_backend=eks --context s3_data_bucket=<bucket>
 
-# Option B: Batch MNP (homogeneous, simpler — quick experiments only)
-AWS_REGION=<region> AWS_DEFAULT_REGION=<region> cdk deploy --context compute_backend=batch-mnp
+# 2. Build image + stage data, poll, verify, then deploy EKS with the verified digest.
+./prepare-artifacts.sh --region <region> --mode all --deploy --deploy-stack GR00TRLEKSStack -- \
+    --context vpc_id=<vpc> --context s3_data_bucket=<bucket> --context mode=eval \
+    --context rollout_instance_type=g6e.8xlarge --context num_rollout_workers=1 \
+    --context eval_total_envs=8 --context rollout_subnet_ids=<subnet> \
+    --context eval_learner_subnet_ids=<subnet> --context fsx_subnet_id=<subnet>
 ```
 
-The EKS backend takes `vpc_id`, `s3_data_bucket`, and `image_uri` (required), plus optional
-`learner_instance_type` / `rollout_instance_type`. It does **not** use EFS — storage is FSx for
-Lustre backed by S3 (see Architecture). This matches Step 2 of the `deploy-eks-training` skill.
+`GR00T-RL-Pipeline` is the ONE mode-switched CodeBuild project (`STAGE_MODE ∈ {build-image,
+stage-data, all}`) owned by `GR00TRLArtifactsStack`. `prepare-artifacts.sh` kicks it, polls
+to completion, verifies the ECR digest and/or the `s3://.../_STAGING_COMPLETE` marker landed,
+and only then runs `cdk deploy GR00TRLEKSStack` with `image_uri=<...@sha256:digest>`. Everything
+after `--` is forwarded verbatim to `cdk deploy` (do not pass `image_uri=`/`compute_backend=` —
+the wrapper owns them). `--mode data` re-stages only; append optional
+`--context learner_instance_type=` / `rollout_instance_type=` after `--`. Omit `--deploy` to
+stop after verify and just print the exact deploy line. The EKS backend does **not** use EFS —
+storage is FSx for Lustre backed by S3 (see Architecture). This matches the `deploy-eks-training`
+skill.
+
+**Manual alternative (bring-your-own image):** `scripts/build_unified_and_push.sh --region <region>`
+does a local `docker build`/`push` to the same `gr00t-rl-unified` repo and prints the
+`--context image_uri=<repo>@sha256:<digest>` line to hand to `cdk deploy` (or to
+`prepare-artifacts.sh --mode data --image-uri <...>`).
+
+```bash
+# Batch MNP (homogeneous, simpler — quick experiments only)
+AWS_REGION=<region> AWS_DEFAULT_REGION=<region> cdk deploy --context compute_backend=batch-mnp
+```
 
 ### Stage Training Data (EFS)
 
@@ -58,29 +83,34 @@ This stages:
 - Training workflows (rlinf_ext, configs, task definition)
 
 This EFS CodeBuild step is for the **batch-mnp / sagemaker** backends only — the EKS backend
-uses FSx-Lustre backed by S3, so stage to S3 with `infra/stage-s3-eks.sh` (below) instead.
+uses FSx-Lustre backed by S3, staged by the `GR00T-RL-Pipeline` stage-data arm (see below).
 
 ### Stage Training Data (EKS → S3/FSx)
 
 The EKS backend reads its data from FSx-Lustre, which lazily imports from an S3 bucket via a
-Data Repository Association. Staging that bucket is handled by the **`GR00T-RL-Stage-S3`
-CodeBuild project**, which runs **automatically on `cdk deploy`** (via an `AwsCustomResource`
-that triggers the build once). It clones the pinned third-party repos, **applies the RLinf
-`_broadcast` patch**, downloads the model, stages the workflows, and uploads everything to
-`$S3_DATA_BUCKET`. To re-run it any time:
+Data Repository Association. Staging that bucket is the **stage-data arm of the single
+`GR00T-RL-Pipeline` CodeBuild project** (owned by `GR00TRLArtifactsStack`), driven + gated by
+`infra/prepare-artifacts.sh` in Step 2 of the Deploy flow above — there is **no** auto-trigger.
+The stage-data arm runs `infra/stage-s3-eks.sh`: it clones the pinned third-party repos,
+**applies the RLinf `_broadcast` patch**, downloads the model, stages the workflows, uploads
+everything to `$S3_DATA_BUCKET`, and writes the `s3://$S3_DATA_BUCKET/_STAGING_COMPLETE` marker
+last on full success.
+
+To re-stage any time (e.g. after changing a pin, patch, or workflow):
 
 ```bash
-aws codebuild start-build --project-name GR00T-RL-Stage-S3 --region <region>
+# gated wrapper (verifies the marker, then can deploy with the verified image):
+./prepare-artifacts.sh --region <region> --mode data
+# or the pipeline directly:
+aws codebuild start-build --project-name GR00T-RL-Pipeline \
+  --environment-variables-override name=STAGE_MODE,value=stage-data,type=PLAINTEXT \
+  --region <region>
 ```
 
-Because staging auto-runs on deploy and FSx imports lazily via the DRA, no manual step is
-required for a first deploy.
-
-Under the hood CodeBuild runs `docker/buildspec-stage-s3.yml` → `infra/stage-s3-eks.sh` (that
-script is committed here for the curious / local dev; you never need to run it by hand).
-
-You may deploy to any region with p5/p5e + g6e capacity; keep S3 + ECR + VPC + FSx all in that
-ONE region (the FSx DRA requires same-region S3) and probe capacity first with `infra/capacity-probe.sh`.
+`infra/stage-s3-eks.sh` is the fail-closed engine CodeBuild runs (committed here for local dev /
+inspection; you never need to run it by hand). You may deploy to any region with p5/p5e + g6e
+capacity; keep S3 + ECR + VPC + FSx all in that ONE region (the FSx DRA requires same-region S3)
+and probe capacity first with `infra/capacity-probe.sh`.
 
 ### Run Training
 
@@ -318,13 +348,15 @@ training/gr00t/rl/
 │   ├── entrypoint.sh            # Batch MNP entrypoint
 │   ├── entrypoint-eks.sh        # EKS/KubeRay entrypoint
 │   ├── buildspec-stage-efs.yml  # CodeBuild: stage code + model to EFS (Batch)
-│   ├── buildspec-stage-s3.yml   # CodeBuild: stage code + model to S3 (EKS/FSx)
+│   ├── buildspec-pipeline.yml   # CodeBuild: GR00T-RL-Pipeline (build-image|stage-data|all)
 │   └── requirements-unified.txt # Python dependencies
 ├── infra/
 │   ├── app.py                   # CDK app (routes compute_backend)
 │   ├── mnp_batch_stack.py       # Batch MNP CDK stack
 │   ├── eks_kuberay_stack.py     # EKS + KubeRay CDK stack
-│   ├── stage-s3-eks.sh          # Staging script CodeBuild runs (EKS → S3/FSx)
+│   ├── artifacts_stack.py       # GR00TRLArtifactsStack: persistent ECR + GR00T-RL-Pipeline
+│   ├── prepare-artifacts.sh     # Gated build+stage wrapper (kicks pipeline, verifies, deploys)
+│   ├── stage-s3-eks.sh          # Staging engine the pipeline's stage-data arm runs (EKS → S3/FSx)
 │   ├── eval-checkpoint.sh       # One-command multi-stage eval sweep (EKS)
 │   ├── capacity-probe.sh        # Probe GPU capacity in a subnet before deploy
 │   ├── patch-success-stage.sh   # Per-stage success_stage patch (eval sweep helper)
@@ -332,6 +364,7 @@ training/gr00t/rl/
 ├── patches/
 │   └── RLinf-649e7579-broadcast-raise.patch  # RLinf _broadcast re-raise (applied at stage time)
 ├── scripts/
+│   ├── build_unified_and_push.sh  # Manual self-build of the unified image (bring-your-own)
 │   └── submit_training.sh       # Job submission helper
 └── workflows/
     ├── policy/gr00t_config.py   # GR00T data config
@@ -348,7 +381,7 @@ training/gr00t/rl/
 | FSDP NCCL deadlock | cpu_offload enabled | Never set cpu_offload=True |
 | torch.compile hangs forever | Incompatible with Isaac Sim multi-process | TORCHDYNAMO_DISABLE=1 |
 | Ray kills workers (Batch) | System RAM >95% after 2 iterations | Use EKS backend (768 GB RAM) or set RAY_memory_usage_threshold=0.99 |
-| Pods can't find `/mnt/fsx/third_party` on first deploy (EKS) | Staging (CodeBuild) still running — `cdk deploy` returns before the ~15-20 min `GR00T-RL-Stage-S3` build finishes; FSx imports lazily via the DRA | Wait for staging to converge and confirm the marker: `aws s3 ls s3://<your-s3-bucket>/_STAGING_COMPLETE` (KubeRay self-heals the head until data lands) |
+| Pods can't find `/mnt/fsx/third_party` on first deploy (EKS) | Data not staged yet — `prepare-artifacts.sh` gates the deploy on the `GR00T-RL-Pipeline` stage-data arm (~15-20 min), so this only bites if you bypassed the wrapper; FSx imports lazily via the DRA | Confirm the marker: `aws s3 ls s3://<your-s3-bucket>/_STAGING_COMPLETE` (KubeRay self-heals the head until data lands) |
 | Region mismatch / CDK lookup uses wrong region (EKS) | Only a partial region env var set | Set `AWS_REGION` (and `CDK_DEFAULT_REGION`/`AWS_DEFAULT_REGION`) explicitly; keep S3 + ECR + VPC + FSx in the SAME region (the FSx DRA requires same-region S3) |
 | Pods Pending (EKS) | Insufficient GPU quota or node not Ready | Check `kubectl describe node` and service quotas |
 | `ray: command not found` (EKS) | Ray binary not on PATH | PATH env var includes /isaac-sim/kit/python/bin |

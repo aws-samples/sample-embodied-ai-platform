@@ -103,7 +103,7 @@ set -euo pipefail
 #  Configuration (override via env vars before invoking — NO internal defaults)
 # =============================================================================
 # Region / account: no baked default — the account must be supplied by the operator.
-REGION="${AWS_REGION:-us-east-2}"
+REGION="${AWS_REGION:-}"        # REQUIRED — export AWS_REGION (no baked default; fail closed below)
 ACCOUNT_ID="${CDK_DEFAULT_ACCOUNT:-}"
 
 # Required CDK/deploy context, all parameterized (no safe defaults — operator supplies):
@@ -323,6 +323,7 @@ if [[ -z "$CKPT" && -z "$MODEL_PATH_ARG" ]]; then
 fi
 [[ "$N" =~ ^[0-9]+$ && "$N" -gt 0 ]] || die "--n must be a positive integer (got '$N')."
 [[ "$MAX_RUNTIME" =~ ^[0-9]+$ && "$MAX_RUNTIME" -gt 0 ]] || die "--max-runtime must be a positive integer seconds (got '$MAX_RUNTIME')."
+[[ -n "$REGION" ]] || die "no region — export AWS_REGION before invoking (no baked default)."
 
 # STAGES validation: non-empty AND every token in 1..4 (an empty/whitespace --stages
 # would otherwise sweep zero stages and print a bogus "PASS"). Enforced for dry-run too.

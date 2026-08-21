@@ -1,0 +1,89 @@
+version: 0.2
+
+# CodeBuild buildspec for the GR00T-RL-Pipeline project (defined in
+# infra/artifacts_stack.py — GR00TRLArtifactsStack). ONE mode-switched project that
+# replaces the former single-purpose staging-only project: it can BUILD the
+# unified image AND STAGE code+model to the S3 bucket the FSx-Lustre DRA imports from.
+#
+# STAGE_MODE (env, default "all"):
+#   build-image  -> build + push the unified image only   (needs ECR_REPOSITORY_NAME)
+#   stage-data   -> run infra/stage-s3-eks.sh only         (needs S3_DATA_BUCKET)
+#   all          -> image THEN data (both env required)
+# Any other STAGE_MODE fails loudly (exit 2) — a typo must NOT no-op to green.
+#
+# ECR login + NGC login + IMAGE_URI live INSIDE the image arm only: stage-data must
+# not require ECR/NGC creds. pre_build only does account/region assertions + the hf CLI.
+#
+# The source asset root is the rl/ dir, so docker/Dockerfile.unified,
+# infra/stage-s3-eks.sh, patches/, and workflows/ are all under $CODEBUILD_SRC_DIR.
+
+phases:
+  install:
+    commands:
+      - echo "GR00T-RL-Pipeline started on $(date) (STAGE_MODE=${STAGE_MODE:-all})"
+  pre_build:
+    commands:
+      # Strict mode validation — reject an unknown STAGE_MODE up front instead of
+      # letting the build silently succeed having done nothing.
+      - |
+        case "${STAGE_MODE:-all}" in
+          build-image|stage-data|all) echo "STAGE_MODE=${STAGE_MODE:-all}" ;;
+          *) echo "unknown STAGE_MODE '${STAGE_MODE:-all}' (expected build-image|stage-data|all)"; exit 2 ;;
+        esac
+      - export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      # AWS_DEFAULT_REGION MUST already be set by the CodeBuild project (region-agnostic
+      # — NO us-east-2/us-west-2 fallback baked in). Fail closed if unset.
+      - test -n "${AWS_DEFAULT_REGION:-}" || { echo "AWS_DEFAULT_REGION not set by the CodeBuild project"; exit 1; }
+      # hf CLI (used by stage-s3-eks.sh in stage-data/all) needs huggingface-hub >= 0.34.
+      - pip install --quiet "huggingface-hub>=0.34,<1.0"
+  build:
+    commands:
+      - cd "$CODEBUILD_SRC_DIR"
+      # ---- image arm: build-image|all (build THEN, in the second block, data) ----
+      - |
+        case "${STAGE_MODE:-all}" in
+          build-image|all)
+            echo "== build-image: building + pushing the unified image =="
+            test -n "${ECR_REPOSITORY_NAME:-}" || { echo "ECR_REPOSITORY_NAME required for STAGE_MODE=${STAGE_MODE:-all}"; exit 1; }
+            # ECR login — only the image arm touches ECR (stage-data never does).
+            aws ecr get-login-password --region "$AWS_DEFAULT_REGION" \
+              | docker login --username AWS --password-stdin "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com" \
+              || { echo "ECR docker login failed"; exit 1; }
+            # NGC login for nvcr.io. The isaac-sim base is PUBLIC so this is
+            # best-effort for the public base image, but RETRIED (not `|| true`) to
+            # ride out transient registry hiccups. If NGC_API_KEY is set and login
+            # still fails after the retries, that is a real credential/registry error
+            # — fail the build (do NOT silently proceed).
+            NGC_OK=0
+            for i in 1 2 3; do docker login nvcr.io -u '$oauthtoken' -p "${NGC_API_KEY:-}" && { NGC_OK=1; break; }; sleep 5; done
+            if [ "$NGC_OK" -ne 1 ] && [ -n "${NGC_API_KEY:-}" ]; then echo "NGC login failed with NGC_API_KEY set"; exit 1; fi
+            IMAGE_TAG="${IMAGE_TAG:-latest}"
+            IMAGE_REPO="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$ECR_REPOSITORY_NAME"
+            # Push a UNIQUE per-build tag (build-$CODEBUILD_BUILD_NUMBER) so every
+            # build is individually addressable/rollback-able, PLUS the moving
+            # IMAGE_TAG (default latest) that the EKS stack / prepare-artifacts.sh
+            # resolve to a digest.
+            BUILD_TAG="build-${CODEBUILD_BUILD_NUMBER}"
+            echo "Building $IMAGE_REPO:$IMAGE_TAG (+ :$BUILD_TAG)"
+            docker build -f docker/Dockerfile.unified -t "$IMAGE_REPO:$IMAGE_TAG" -t "$IMAGE_REPO:$BUILD_TAG" docker \
+              || { echo "docker build failed"; exit 1; }
+            docker push "$IMAGE_REPO:$IMAGE_TAG" || { echo "docker push :$IMAGE_TAG failed"; exit 1; }
+            docker push "$IMAGE_REPO:$BUILD_TAG" || { echo "docker push :$BUILD_TAG failed"; exit 1; }
+            ;;
+        esac
+      # ---- data arm: stage-data|all (so `all` runs image first, then data) ----
+      - |
+        case "${STAGE_MODE:-all}" in
+          stage-data|all)
+            echo "== stage-data: staging code+model to the S3 data bucket =="
+            test -n "${S3_DATA_BUCKET:-}" || { echo "S3_DATA_BUCKET required for STAGE_MODE=${STAGE_MODE:-all}"; exit 1; }
+            # Stage under CODEBUILD_SRC_DIR (the ~800 GB X2_LARGE disk), NOT /tmp.
+            mkdir -p "$CODEBUILD_SRC_DIR/.stage" && df -h "$CODEBUILD_SRC_DIR"
+            # --yes = non-interactive confirm (CI); the script still fails closed on
+            # any clone/checkout/patch/verify failure.
+            bash infra/stage-s3-eks.sh --execute --yes --workdir "$CODEBUILD_SRC_DIR/.stage"
+            ;;
+        esac
+  post_build:
+    commands:
+      - echo "GR00T-RL-Pipeline complete on $(date)"

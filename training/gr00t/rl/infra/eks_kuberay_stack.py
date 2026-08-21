@@ -8,6 +8,11 @@ Deploys an EKS cluster with:
   - FSx for Lustre (PERSISTENT_2) backed by S3 via Data Repository Association
   - RayCluster CR with heterogeneous head (8 GPU) + workers (1 GPU each)
 
+This stack is a pure CONSUMER of the unified image + staged data bucket. The
+image is built and the bucket is staged by the standalone GR00TRLArtifactsStack
+(infra/artifacts_stack.py) — deploy that first, then drive it with
+infra/prepare-artifacts.sh, then deploy this stack with the resolved image_uri.
+
 Deploy:
   cdk deploy --context compute_backend=eks \\
     --context vpc_id=<your-vpc-id> \\
@@ -15,23 +20,18 @@ Deploy:
     --context image_uri=<your-account>.dkr.ecr.<region>.amazonaws.com/<your-repo>:<tag>
 """
 
-import os
 import pathlib
 
 from aws_cdk import (
     Stack,
     CfnOutput,
     CfnJson,
-    Duration,
     RemovalPolicy,
     aws_eks as eks,
     aws_ec2 as ec2,
     aws_fsx as fsx,
     aws_s3 as s3,
-    aws_s3_assets as s3_assets,
     aws_iam as iam,
-    aws_codebuild as codebuild,
-    custom_resources as cr,
 )
 from aws_cdk.lambda_layer_kubectl_v31 import KubectlV31Layer
 from constructs import Construct
@@ -72,6 +72,7 @@ class EKSKubeRayStack(Stack):
         kuberay_version: str = "1.1.0",
         rollout_subnet_ids: str = None,
         eval_learner_subnet_ids: str = None,
+        fsx_subnet_id: str = None,
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -82,6 +83,20 @@ class EKSKubeRayStack(Stack):
         if mode not in ("train", "eval"):
             raise ValueError(f"Unknown mode: {mode}. Expected 'train' or 'eval'.")
         is_eval = mode == "eval"
+
+        # Effective container image. This stack only CONSUMES an image; it never
+        # builds one (that is GR00TRLArtifactsStack's job).
+        #   - image_uri provided  -> bring-your-own; use it as-is.
+        #   - image_uri omitted   -> DEFAULT to the artifacts stack's ECR repo at
+        #     gr00t-rl-unified:<image_tag> (the artifacts stack must have been
+        #     deployed + the pipeline run first; prepare-artifacts.sh resolves a
+        #     pinned digest for the deploy line).
+        image_tag = "latest"
+        if not image_uri:
+            image_uri = (
+                f"{Stack.of(self).account}.dkr.ecr."
+                f"{Stack.of(self).region}.amazonaws.com/gr00t-rl-unified:{image_tag}"
+            )
 
         # ==============================================================
         # region 1. Import existing VPC and S3 data bucket
@@ -159,10 +174,18 @@ class EKSKubeRayStack(Stack):
         # ==============================================================
         # region 4. FSx for Lustre filesystem + Data Repository Association
         # ==============================================================
-        # FSx is single-AZ — pick one private subnet and pin node groups to it
-        fsx_subnet = vpc.select_subnets(
-            subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
-        ).subnets[0]
+        # FSx is single-AZ — pick one private subnet and pin node groups to it.
+        # Default (fsx_subnet_id unset): first PRIVATE_WITH_EGRESS subnet, so the
+        # synthesized template is byte-identical to the historical single-AZ default.
+        # Set fsx_subnet_id (--context) to pin FSx + the CB/on-demand learner NG to a
+        # SPECIFIC subnet (e.g. the AZ that actually has g6e/H100 capacity) instead of
+        # whichever subnet lands at index 0.
+        if fsx_subnet_id:
+            fsx_subnet = ec2.Subnet.from_subnet_id(self, "FsxSubnet", fsx_subnet_id)
+        else:
+            fsx_subnet = vpc.select_subnets(
+                subnet_type=ec2.SubnetType.PRIVATE_WITH_EGRESS
+            ).subnets[0]
 
         fsx_security_group = ec2.SecurityGroup.from_security_group_id(
             self, "FsxSGImport", fsx_sg_id
@@ -254,6 +277,24 @@ class EKSKubeRayStack(Stack):
                 version=learner_lt.attr_latest_version_number,
             )
             learner_ng = cluster.add_nodegroup_capacity("LearnerNodes", **learner_ng_kwargs)
+        elif not is_eval:
+            # Train mode with NO capacity reservation: still create a schedulable
+            # learner NG, otherwise the head pod (nodeSelector node-role=learner)
+            # has nowhere to land and the RayCluster never forms. This is a plain
+            # ON_DEMAND nodegroup (no capacity-block launch template) with the same
+            # node-role=learner label + desired size 1. Eval mode is unaffected — it
+            # routes the head pod to the eval-learner NG below.
+            learner_ng = cluster.add_nodegroup_capacity(
+                "LearnerNodes",
+                instance_types=[ec2.InstanceType(learner_instance_type)],
+                ami_type=eks.NodegroupAmiType.AL2023_X86_64_NVIDIA,
+                min_size=1,
+                max_size=1,
+                desired_size=1,
+                disk_size=200,
+                labels={"node-role": "learner"},
+                subnets=ec2.SubnetSelection(subnets=[fsx_subnet]),
+            )
 
         # Eval-learner NG subnet selection (capacity-resilient eval knob, mirrors the
         # rollout_subnet_ids pattern). Default-off: when eval_learner_subnet_ids is unset,
@@ -571,7 +612,10 @@ class EKSKubeRayStack(Stack):
                     },
                 },
                 "spec": {
-                    "rayVersion": "2.9.0",
+                    # Match the Ray shipped in the unified image (2.47.0). A stale
+                    # rayVersion here trips KubeRay's version-compat checks / GCS
+                    # handshake against the real ray binary in the container.
+                    "rayVersion": "2.47.0",
                     "headGroupSpec": {
                         "rayStartParams": {
                             "dashboard-host": "0.0.0.0",
@@ -797,106 +841,17 @@ class EKSKubeRayStack(Stack):
         raycluster.node.add_dependency(fsx_pvc)
         raycluster.node.add_dependency(training_ns)
         raycluster.node.add_dependency(entrypoint_cm)
+        # The FSx Data Repository Association must exist before the RayCluster pods
+        # start, or the first pod to read /mnt/fsx mounts an un-linked filesystem and
+        # sees none of the S3-staged code/model (the DRA is what lazily imports it).
+        raycluster.node.add_dependency(fsx_dra)
         # endregion
 
-        # ==============================================================
-        # region 12.5. S3 staging via CodeBuild (tried-and-true, repeatable)
-        # ==============================================================
-        # Public deployers do NOT hand-stage the data bucket. This CodeBuild
-        # project runs the SAME fail-closed engine as a local operator would
-        # (infra/stage-s3-eks.sh, invoked non-interactively with --execute --yes):
-        # clone the pinned third-party repos, APPLY the RLinf _broadcast patch
-        # (patches/RLinf-649e7579-broadcast-raise.patch, verified via sentinel),
-        # download the RL model, stage the bundled workflows, and upload
-        # everything to s3://<data-bucket>/{third_party,models,workflows}/ — which
-        # the FSx-Lustre DRA then lazily imports. It is auto-triggered once on
-        # deploy and is re-runnable any time with:
-        #   aws codebuild start-build --project-name GR00T-RL-Stage-S3
-        #
-        # The source asset is the whole rl/ dir (NOT just docker/) so the buildspec
-        # can reach infra/stage-s3-eks.sh, patches/, and workflows/. cdk.out and
-        # bytecode are excluded to keep the asset small.
-        rl_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-        s3_stage_source = s3_assets.Asset(
-            self,
-            "S3StageSourceAsset",
-            path=rl_dir,
-            exclude=[
-                "*.pyc",
-                "__pycache__",
-                ".git",
-                ".git/**",
-                "infra/cdk.out",
-                "infra/cdk.out/**",
-                "infra/cdk.context.json",
-                "docker/Dockerfile.*",
-            ],
-        )
-        s3_stage_build = codebuild.Project(
-            self,
-            "S3StageBuild",
-            project_name="GR00T-RL-Stage-S3",
-            description=(
-                "Stage pinned third-party code (RLinf _broadcast patch applied), "
-                "the RL model, and workflows to the S3 data bucket for the EKS/FSx DRA"
-            ),
-            source=codebuild.Source.s3(
-                bucket=s3_stage_source.bucket,
-                path=s3_stage_source.s3_object_key,
-            ),
-            environment=codebuild.BuildEnvironment(
-                build_image=codebuild.LinuxBuildImage.STANDARD_7_0,
-                # LARGE = ~128 GB disk — room for the pinned repos + model clone
-                # before upload (no EFS mount here, so staging is local-then-sync).
-                compute_type=codebuild.ComputeType.LARGE,
-            ),
-            build_spec=codebuild.BuildSpec.from_source_filename(
-                "docker/buildspec-stage-s3.yml"
-            ),
-            environment_variables={
-                "S3_DATA_BUCKET": codebuild.BuildEnvironmentVariable(
-                    value=data_bucket.bucket_name
-                ),
-                "AWS_REGION": codebuild.BuildEnvironmentVariable(
-                    value=Stack.of(self).region
-                ),
-                "AWS_DEFAULT_REGION": codebuild.BuildEnvironmentVariable(
-                    value=Stack.of(self).region
-                ),
-            },
-            timeout=Duration.hours(2),
-        )
-        s3_stage_source.grant_read(s3_stage_build.role)
-        data_bucket.grant_read_write(s3_stage_build.role)
-
-        # Auto-trigger staging on first deploy; re-run manually any time.
-        s3_stage_trigger = cr.AwsCustomResource(
-            self,
-            "S3StageTrigger",
-            policy=cr.AwsCustomResourcePolicy.from_sdk_calls(
-                resources=cr.AwsCustomResourcePolicy.ANY_RESOURCE
-            ),
-            timeout=Duration.minutes(5),
-            on_create=cr.AwsSdkCall(
-                service="CodeBuild",
-                action="startBuild",
-                parameters={"projectName": s3_stage_build.project_name},
-                physical_resource_id=cr.PhysicalResourceId.of(
-                    f"{s3_stage_build.project_name}-initial"
-                ),
-            ),
-            on_update=cr.AwsSdkCall(
-                service="CodeBuild",
-                action="batchGetProjects",
-                parameters={"names": [s3_stage_build.project_name]},
-                physical_resource_id=cr.PhysicalResourceId.of(
-                    f"{s3_stage_build.project_name}-initial"
-                ),
-            ),
-            install_latest_aws_sdk=True,
-        )
-        s3_stage_trigger.node.add_dependency(s3_stage_build)
-        # endregion
+        # NOTE: the image build + S3 staging pipeline (ECR repo gr00t-rl-unified +
+        # the GR00T-RL-Pipeline CodeBuild project) formerly lived here. It has been
+        # extracted into the standalone GR00TRLArtifactsStack (infra/artifacts_stack.py)
+        # so it OWNS those resources persistently — this stack only consumes the
+        # resulting image_uri + the DRA-linked bucket. See that stack's docstring.
 
         # ==============================================================
         # region 13. CfnOutputs
@@ -955,16 +910,6 @@ class EKSKubeRayStack(Stack):
             "DataBucketName",
             value=data_bucket.bucket_name,
             description="S3 data bucket (DRA-linked to FSx)",
-        )
-        CfnOutput(
-            self,
-            "S3StageProject",
-            value=s3_stage_build.project_name,
-            description=(
-                "CodeBuild project that stages code+model to the data bucket "
-                "(auto-runs on deploy; re-run: aws codebuild start-build "
-                "--project-name GR00T-RL-Stage-S3)"
-            ),
         )
         CfnOutput(
             self,

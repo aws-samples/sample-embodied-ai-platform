@@ -13,8 +13,8 @@ Deploy and run PPO training for GR00T N1.5 on EKS with KubeRay using heterogeneo
 
 - AWS account with a target region that has p5/p5e + g6e capacity (e.g. us-east-2 — see "Choosing a region" below)
 - vCPU quota: 384+ for G instances (quota code `L-DB2E81BA`)
-- ECR image `<account>.dkr.ecr.<region>.amazonaws.com/gr00t-rl-unified:<tag>`, built and pushed via `training/gr00t/rl/scripts/build_and_push.sh` (reads the ECR repo from the stack outputs, does the ECR login + `docker build`/`docker push`)
-- S3 bucket in the SAME region as FSx with staged training data (DRA-linked to FSx) — populate it with `infra/stage-s3-eks.sh` (see Step 1)
+- ECR image `<account>.dkr.ecr.<region>.amazonaws.com/gr00t-rl-unified@sha256:<digest>`, built + pushed by the `GR00T-RL-Pipeline` CodeBuild project (owned by `GR00TRLArtifactsStack`), driven by `infra/prepare-artifacts.sh` (Steps 1-2) — or by the manual `scripts/build_unified_and_push.sh` self-build (bring-your-own image). The workload deploys the wrapper-resolved `@sha256` digest, NOT the mutable `:latest` tag.
+- S3 bucket in the SAME region as FSx with staged training data (DRA-linked to FSx) — staged by the same `GR00T-RL-Pipeline` project's stage-data arm, driven by `infra/prepare-artifacts.sh` (Step 2)
 - VPC with NAT gateway (private subnets need egress)
 - CDK dependencies: `pip install -r training/gr00t/rl/infra/requirements.txt`
 - kubectl installed locally
@@ -31,9 +31,10 @@ before deploying. Recommended regions where this was validated / capacity tends 
 
 ## S3 Data Layout
 
-Populate the bucket with `infra/stage-s3-eks.sh` (Step 1) — you should not have to build
-this layout by hand. The script produces exactly this tree (FSx-Lustre lazily imports it
-via the DRA on first access):
+The bucket is populated by the `GR00T-RL-Pipeline` stage-data arm (Step 2, driven by
+`infra/prepare-artifacts.sh`) — you should not have to build this layout by hand. Under
+the hood it runs `infra/stage-s3-eks.sh`, which produces exactly this tree (FSx-Lustre
+lazily imports it via the DRA on first access):
 ```
 s3://<bucket>/
 ├── third_party/
@@ -51,71 +52,73 @@ These versions are pinned for compatibility. Do NOT bump the RLinf pin (see Know
 
 ## Steps
 
-### 1. Stage Data to S3 (EKS)
+The build/stage/deploy flow is **3 stacks / 3 steps**. There is **NO deployment auto-trigger**:
+a direct `cdk deploy GR00TRLEKSStack` WITHOUT completing Steps 1-2 is **unsupported** — the
+cluster would point at a nonexistent image / unstaged data. Always drive the image build + data
+staging through `prepare-artifacts.sh`, which gates the EKS deploy on verified artifacts.
 
-Staging is performed by the **`GR00T-RL-Stage-S3` CodeBuild project**, which runs
-**AUTOMATICALLY on `cdk deploy`** (Step 2, via an `AwsCustomResource` that fires
-`startBuild` once). It clones the pinned third-party repos (RLinf `649e757`, Isaac-GR00T
-`4af2b62`, IsaacLab `941ebdf4a`, IsaacLab-Arena `dba099565`), APPLIES the `_broadcast` patch
-to the RLinf checkout (`patches/RLinf-649e7579-broadcast-raise.patch`), downloads the RL
-model, stages the repo-bundled workflows into `workflows/rheo/scripts/`, and uploads
-everything to `s3://$S3_DATA_BUCKET/{third_party,models,workflows}/`.
-
-To re-run staging any time (e.g. to refresh the bucket), start the project directly:
-
-```bash
-aws codebuild start-build --project-name GR00T-RL-Stage-S3 --region <region>
-```
-
-Watch it in the CodeBuild console, or from the CLI:
-
-```bash
-aws codebuild batch-get-builds --region <region> \
-  --ids "$(aws codebuild list-builds-for-project --project-name GR00T-RL-Stage-S3 \
-           --region <region> --query 'ids[0]' --output text)"
-```
-
-**Because staging auto-runs on deploy and FSx-Lustre lazily imports the objects via the DRA
-on first access, no manual staging step is required for a first deploy.**
-
-_Secondary (dev only):_ the same work is what CodeBuild runs under the hood —
-`docker/buildspec-stage-s3.yml` → `infra/stage-s3-eks.sh --execute --yes`. You can also run
-that script locally to inspect or iterate. It is **fail-closed** (a failed
-clone/checkout/patch aborts) and **dry-run by default** (every `aws s3 sync` runs with
-`--dryrun` until you pass `--execute`):
+### 0. Set the region env (once, reused by every step)
 
 ```bash
 cd training/gr00t/rl/infra
-export S3_DATA_BUCKET=<bucket-name> AWS_REGION=<region>   # same region as the bucket + FSx
-
-# Dry-run (safe): clones/patches/downloads locally, prints what WOULD upload, writes $0 to S3
-./stage-s3-eks.sh
-
-# Real (writes to S3): add --execute (then type 'stage-s3-eks' to confirm)
-./stage-s3-eks.sh --execute
+export AWS_REGION=<region> AWS_DEFAULT_REGION=<region> CDK_DEFAULT_REGION=<region>
+export CDK_DEFAULT_ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
 ```
 
-### 2. Deploy CDK Stack
+### 1. Deploy the persistent artifacts stack (ECR + gated pipeline)
+
+`GR00TRLArtifactsStack` owns the persistent `gr00t-rl-unified` ECR repo and the single
+mode-switched **`GR00T-RL-Pipeline`** CodeBuild project. Deploy it ONCE (it persists across
+EKS teardowns):
 
 ```bash
-cd training/gr00t/rl/infra
-
-AWS_REGION=<region> AWS_DEFAULT_REGION=<region> CDK_DEFAULT_REGION=<region> \
-  CDK_DEFAULT_ACCOUNT=<account-id> cdk deploy \
+cdk deploy GR00TRLArtifactsStack \
   --context compute_backend=eks \
-  --context vpc_id=<vpc-id> \
-  --context s3_data_bucket=<bucket-name> \
-  --context image_uri=<ecr-image-uri> \
-  --require-approval never
+  --context s3_data_bucket=<bucket>
 ```
 
-Optional context overrides:
+`GR00T-RL-Pipeline` is a single project driven by `STAGE_MODE ∈ {build-image, stage-data, all}`:
+`build-image` builds + pushes the unified image; `stage-data` runs `infra/stage-s3-eks.sh`
+(clones the pinned third-party repos — RLinf `649e757`, Isaac-GR00T `4af2b62`, IsaacLab
+`941ebdf4a`, IsaacLab-Arena `dba099565` — APPLIES the `_broadcast` patch, downloads the RL
+model, stages the workflows, uploads to `s3://$S3_DATA_BUCKET/{third_party,models,workflows}/`,
+and writes the `_STAGING_COMPLETE` marker last on full success); `all` runs both.
+
+### 2. Build image + stage data, then deploy EKS with the verified digest
+
+`infra/prepare-artifacts.sh` drives + gates the pipeline: it kicks `GR00T-RL-Pipeline`,
+polls to completion, VERIFIES the artifacts actually landed (the pushed ECR image digest
+and/or the `s3://.../_STAGING_COMPLETE` marker), and only then deploys `GR00TRLEKSStack`
+with the resolved `@sha256` digest as `image_uri`. It fails closed at every step:
+
+```bash
+cd training/gr00t/rl/infra
+./prepare-artifacts.sh --region <region> --mode all --deploy --deploy-stack GR00TRLEKSStack -- \
+    --context vpc_id=<vpc> --context s3_data_bucket=<bucket> --context mode=eval \
+    --context rollout_instance_type=g6e.8xlarge --context num_rollout_workers=1 \
+    --context eval_total_envs=8 --context rollout_subnet_ids=<subnet> \
+    --context eval_learner_subnet_ids=<subnet> --context fsx_subnet_id=<subnet>
+```
+
+Everything after `--` is forwarded verbatim to `cdk deploy`. Do **not** pass `image_uri=` or
+`compute_backend=` there — the wrapper owns them (it rejects them if you try). `--mode`
+selects the pipeline arm: `all` (build + stage), `image` (build only), or `data` (re-stage
+only; requires `--image-uri <...@sha256:...>` or a resolvable existing digest to deploy with).
+Omit `--deploy` to stop after verify and just print the exact deploy line.
+
+Optional EKS `--context` overrides (append after `--`):
 - `--context learner_instance_type=g6e.48xlarge` (default)
 - `--context rollout_instance_type=g6e.4xlarge` (default)
 - `--context fsx_capacity_gib=1200` (default, minimum for PERSISTENT_2)
 - `--context num_rollout_workers=4` (default)
 
-Creates: EKS cluster, FSx for Lustre (PERSISTENT_2) + DRA, GPU node groups, KubeRay operator, NVIDIA device plugin, FSx CSI driver, RayCluster CR. Takes ~25-30 minutes.
+The EKS deploy creates: EKS cluster, FSx for Lustre (PERSISTENT_2) + DRA, GPU node groups,
+KubeRay operator, NVIDIA device plugin, FSx CSI driver, RayCluster CR. Takes ~25-30 minutes.
+
+**Manual alternative (bring-your-own image):** `scripts/build_unified_and_push.sh --region <region>`
+does a local `docker build`/`push` to the same `gr00t-rl-unified` repo and prints the
+`--context image_uri=<repo>@sha256:<digest>` line to hand to `cdk deploy` (or to
+`prepare-artifacts.sh --mode data --image-uri <...>`).
 
 ### 3. Configure kubectl Access
 
@@ -312,9 +315,11 @@ deletion of `eval_embodied_agent.py`. The `_broadcast` deadlock (below) is fixed
 | Multi-stage eval reports stage-1's number for all stages | The head must be reformed between stages so it re-reads `success_stage`; use eval-checkpoint.sh (handles it). §6.5 gotcha 3 |
 | g6e-dry in the FSx AZ | Run eval/rollout cross-AZ via `EKS_ROLLOUT_SUBNET_IDS`/`EKS_EVAL_LEARNER_SUBNET_IDS`; FSx read cross-AZ. §6.5 |
 | Silent ~3h hang; `ValueError: Unsupported object type` / `invalid load key` after a Gloo broadcast failure (`_broadcast` deadlock) | `stage-s3-eks.sh` applies `patches/RLinf-649e7579-broadcast-raise.patch` (RLinf swallows the broadcast exception and reads uninitialized buffers as pickle); the patch re-raises so training dies loudly and `auto-recover` restarts from the latest checkpoint. Keep RLinf pinned at `649e757` — do NOT bump the pin to fix this |
-| Head pod restarts / can't find `/mnt/fsx/third_party` right after a first deploy | Staging runs in CodeBuild (`GR00T-RL-Stage-S3`, ~15-20 min incl. the ~5.5 GB model) and is fire-and-forget, so `cdk deploy` returns before it finishes; the head may restart until the data lands (KubeRay self-heals). Confirm staging converged: `aws s3 ls s3://<bucket>/_STAGING_COMPLETE` (the marker is written last, only on full success) |
-| Changed the patch / pins / workflows and need to re-stage | A `cdk deploy` update does NOT auto-re-stage. Re-run `aws codebuild start-build --project-name GR00T-RL-Stage-S3 --region <region>`; `aws s3 sync --delete` converges the bucket to the new tree |
-| CodeBuild staging fails with S3 `AccessDenied` | If the data bucket uses a customer-managed KMS key, grant the `GR00T-RL-Stage-S3` role `kms:Encrypt`/`kms:Decrypt`/`kms:GenerateDataKey` on that key (the bucket `grant_read_write` alone does not cover a CMK), or use SSE-S3 |
+| Head pod restarts / can't find `/mnt/fsx/third_party` right after a first deploy | Data may not have landed yet. `prepare-artifacts.sh` gates the EKS deploy on staging (Step 2), so this only bites if you bypassed the wrapper. Confirm staging converged (the `GR00T-RL-Pipeline` stage-data arm, ~15-20 min incl. the ~5.5 GB model): `aws s3 ls s3://<bucket>/_STAGING_COMPLETE` (the marker is written last, only on full success). FSx imports lazily via the DRA; KubeRay self-heals the head until data lands |
+| Changed the patch / pins / workflows and need to re-stage | Re-run the stage-data arm: `./prepare-artifacts.sh --region <region> --mode data` (or `aws codebuild start-build --project-name GR00T-RL-Pipeline --environment-variables-override name=STAGE_MODE,value=stage-data,type=PLAINTEXT --region <region>`); `aws s3 sync --delete` converges the bucket to the new tree |
+| CodeBuild staging fails with S3 `AccessDenied` | If the data bucket uses a customer-managed KMS key, grant the `GR00T-RL-Pipeline` role `kms:Encrypt`/`kms:Decrypt`/`kms:GenerateDataKey` on that key (the bucket `grant_read_write` alone does not cover a CMK), or use SSE-S3 |
+| **Before public release:** EKS is pinned to Kubernetes 1.31 | k8s 1.31 is in AWS EKS **extended support** (ends 2026-11-26). Bump `eks.KubernetesVersion` in `infra/eks_kuberay_stack.py` off `V1_31` to a standard-support version (and re-validate KubeRay/addon compatibility) before a public release |
+| **Before public release:** workload should pin the image by digest | The EKS workload must run the wrapper-resolved `@sha256:<digest>` (what `prepare-artifacts.sh` verifies + hands to `cdk deploy`), NOT the mutable `:latest` tag — `:latest` can drift to an unverified image. Confirm the deployed `image_uri` is a `@sha256` reference, not a tag |
 
 ## Related Files
 

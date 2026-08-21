@@ -77,8 +77,8 @@ WORKDIR=""     # --workdir <dir>; default = a mktemp dir created below
 EXECUTE=0
 # Non-interactive confirm bypass for CI / CodeBuild (still REQUIRES --execute).
 # Set via --yes or STAGE_S3_ASSUME_YES=1. A human at a TTY should NOT use this —
-# it exists so docker/buildspec-stage-s3.yml (the GR00T-RL-Stage-S3 CodeBuild
-# project) can run this exact engine unattended.
+# it exists so docker/buildspec-pipeline.yml (the GR00T-RL-Pipeline CodeBuild
+# project, stage-data mode) can run this exact engine unattended.
 ASSUME_YES=0
 [[ "${STAGE_S3_ASSUME_YES:-0}" =~ ^(1|true|yes|YES)$ ]] && ASSUME_YES=1
 
@@ -262,6 +262,12 @@ s3_sync() {
 }
 
 say "STEP 5 — Upload to s3://${S3_DATA_BUCKET}/"
+# Clear any stale READY marker BEFORE the first upload so a failed/interrupted run
+# can never leave a _STAGING_COMPLETE that predates this attempt. It is rewritten
+# LAST, only on success (STEP 6). Dry-run writes nothing, so this is execute-only.
+if [[ "$EXECUTE" -eq 1 ]]; then
+  aws s3 rm "s3://${S3_DATA_BUCKET}/_STAGING_COMPLETE" --region "$AWS_REGION" || true
+fi
 s3_sync "${THIRD_PARTY}/RLinf"          "s3://${S3_DATA_BUCKET}/third_party/RLinf/"
 s3_sync "${THIRD_PARTY}/Isaac-GR00T"    "s3://${S3_DATA_BUCKET}/third_party/Isaac-GR00T/"
 s3_sync "${THIRD_PARTY}/IsaacLab"       "s3://${S3_DATA_BUCKET}/third_party/IsaacLab/"

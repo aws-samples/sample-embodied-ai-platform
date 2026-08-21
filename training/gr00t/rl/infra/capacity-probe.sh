@@ -44,7 +44,7 @@
 set -euo pipefail
 
 # --- Configuration (non-secret defaults; NO internal IDs) -------------------
-REGION="${REGION:-${AWS_REGION:-us-east-2}}"
+REGION="${REGION:-${AWS_REGION:-}}"              # REQUIRED — pass --region or export AWS_REGION (no baked default)
 SUBNET_ID="${SUBNET_ID:-}"                       # REQUIRED — the AZ subnet to probe
 INSTANCE_TYPE="${INSTANCE_TYPE:-g6e.8xlarge}"
 CAPACITY="${CAPACITY:-2}"                         # small canary (RESEARCH open-Q1)
@@ -69,6 +69,7 @@ done
 log(){ echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" >&2; }
 
 [ -n "$SUBNET_ID" ] || { echo "ERROR: --subnet <SUBNET_ID> is required (the AZ to probe)" >&2; exit 2; }
+[ -n "$REGION" ] || { echo "ERROR: no region — pass --region <r> or export AWS_REGION (no baked default)" >&2; exit 2; }
 
 # A unique tag so cleanup can find launched instances even if we were interrupted
 # mid-launch and never captured the create-fleet response.
