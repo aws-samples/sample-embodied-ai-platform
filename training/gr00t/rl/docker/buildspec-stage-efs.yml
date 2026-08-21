@@ -22,14 +22,9 @@ phases:
       - mkdir -p /mnt/efs/third_party
       - rm -rf /mnt/efs/third_party/RLinf
       - git clone https://github.com/RLinf/RLinf.git /mnt/efs/third_party/RLinf && cd /mnt/efs/third_party/RLinf && git checkout 649e7579775997ade74efff33a7c23e90c61e60a || true
-      # Apply the _broadcast patch so the Batch/EFS path is patched like the EKS/S3 path
-      # (infra/stage-s3-eks.sh). RLinf stays pinned @ 649e7579; the patch is applied here.
-      # NOTE: no `|| true` — a failed --check/apply must FAIL THE BUILD (fail closed).
-      - echo "Applying RLinf _broadcast patch..."
-      - export RLINF_PATCH="$CODEBUILD_SRC_DIR/training/gr00t/rl/patches/RLinf-649e7579-broadcast-raise.patch"
-      - git -C /mnt/efs/third_party/RLinf apply --check "$RLINF_PATCH"
-      - git -C /mnt/efs/third_party/RLinf apply "$RLINF_PATCH"
-      - grep -q RLINF-COLLECTIVE-DESYNC /mnt/efs/third_party/RLinf/rlinf/scheduler/collective/multi_channel_pg.py
+      # NOTE: the RLinf _broadcast patch is applied on the EKS path by
+      # infra/stage-s3-eks.sh (run via the GR00T-RL-Stage-S3 CodeBuild project).
+      # The Batch/EFS path here is legacy and relies on the auto-recover harness.
       - echo "Staging Isaac-GR00T..."
       - rm -rf /mnt/efs/third_party/Isaac-GR00T
       - git clone https://github.com/NVIDIA/Isaac-GR00T.git /mnt/efs/third_party/Isaac-GR00T && cd /mnt/efs/third_party/Isaac-GR00T && git checkout 4af2b622892f7dcb5aae5a3fb70bcb02dc217b96 || true

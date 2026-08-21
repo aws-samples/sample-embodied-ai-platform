@@ -60,9 +60,22 @@ uses FSx-Lustre backed by S3, so stage to S3 with `infra/stage-s3-eks.sh` (below
 ### Stage Training Data (EKS → S3/FSx)
 
 The EKS backend reads its data from FSx-Lustre, which lazily imports from an S3 bucket via a
-Data Repository Association. Populate that bucket with `infra/stage-s3-eks.sh` — it clones the
-pinned third-party repos, **applies the RLinf `_broadcast` patch**, downloads the model, stages
-the workflows, and uploads everything to `$S3_DATA_BUCKET`. Fail-closed and dry-run by default:
+Data Repository Association. Staging that bucket is handled by the **`GR00T-RL-Stage-S3`
+CodeBuild project**, which runs **automatically on `cdk deploy`** (via an `AwsCustomResource`
+that triggers the build once). It clones the pinned third-party repos, **applies the RLinf
+`_broadcast` patch**, downloads the model, stages the workflows, and uploads everything to
+`$S3_DATA_BUCKET`. To re-run it any time:
+
+```bash
+aws codebuild start-build --project-name GR00T-RL-Stage-S3 --region <region>
+```
+
+Because staging auto-runs on deploy and FSx imports lazily via the DRA, no manual step is
+required for a first deploy.
+
+Under the hood CodeBuild runs `docker/buildspec-stage-s3.yml` → `infra/stage-s3-eks.sh
+--execute --yes`. You can also run that script locally for dev/inspection — it is fail-closed
+and dry-run by default (every `aws s3 sync` runs with `--dryrun` until you pass `--execute`):
 
 ```bash
 cd training/gr00t/rl/infra

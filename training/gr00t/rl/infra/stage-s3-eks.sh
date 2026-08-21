@@ -43,10 +43,11 @@ set -euo pipefail
 # =============================================================================
 #  Pinned versions (mirror docker/buildspec-stage-efs.yml EXACTLY)
 # =============================================================================
+# Full 40-char SHAs (not short refs) so the checkout is unambiguous + repeatable.
 RLINF_SHA="649e7579775997ade74efff33a7c23e90c61e60a"
 GROOT_SHA="4af2b622892f7dcb5aae5a3fb70bcb02dc217b96"
-ISAACLAB_SHA="941ebdf4a"
-ISAACLAB_ARENA_SHA="dba099565"
+ISAACLAB_SHA="941ebdf4ad1fbf89018777012bdfa4b5944c758f"
+ISAACLAB_ARENA_SHA="dba09956588dddae52897820686efd329d85da12"
 
 RLINF_URL="https://github.com/RLinf/RLinf.git"
 GROOT_URL="https://github.com/NVIDIA/Isaac-GR00T.git"
@@ -54,6 +55,9 @@ ISAACLAB_URL="https://github.com/isaac-sim/IsaacLab.git"
 ISAACLAB_ARENA_URL="https://github.com/isaac-sim/IsaacLab-Arena.git"
 
 MODEL_REPO="nvidia/GR00T-N1.5-RL-Rheo-AssembleTrocar"
+# Pin the model to the shipped revision (b54e142) so a re-stage is byte-repeatable
+# even if the HF repo's main branch moves. Override with MODEL_REVISION=<sha> if needed.
+MODEL_REVISION="${MODEL_REVISION:-b54e14286ed3f8392d614741748739e09c7fefe4}"
 MODEL_DIRNAME="GR00T-N1.5-RL-Rheo-AssembleTrocar"
 
 # =============================================================================
@@ -71,6 +75,12 @@ WORKFLOWS_SRC="${SCRIPT_DIR}/../workflows"
 
 WORKDIR=""     # --workdir <dir>; default = a mktemp dir created below
 EXECUTE=0
+# Non-interactive confirm bypass for CI / CodeBuild (still REQUIRES --execute).
+# Set via --yes or STAGE_S3_ASSUME_YES=1. A human at a TTY should NOT use this —
+# it exists so docker/buildspec-stage-s3.yml (the GR00T-RL-Stage-S3 CodeBuild
+# project) can run this exact engine unattended.
+ASSUME_YES=0
+[[ "${STAGE_S3_ASSUME_YES:-0}" =~ ^(1|true|yes|YES)$ ]] && ASSUME_YES=1
 
 # =============================================================================
 #  Arg parsing
@@ -82,6 +92,8 @@ usage() {
 stage-s3-eks.sh — usage
   --workdir <dir>   Clone/download into <dir> (default: a fresh mktemp dir).
   --execute         Actually WRITE to S3 (default = dry-run; every sync is --dryrun).
+  --yes             Skip the interactive confirm prompt (CI/CodeBuild only; still
+                    requires --execute). Also honored via STAGE_S3_ASSUME_YES=1.
   -h | --help       Show this help and exit (zero AWS calls).
 
 Required env vars (no defaults — region-agnostic, no baked bucket):
@@ -95,6 +107,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --workdir)  WORKDIR="${2:-}"; shift 2 ;;
     --execute)  EXECUTE=1; shift ;;
+    --yes)      ASSUME_YES=1; shift ;;
     -h|--help)  usage ;;
     *) echo "Unknown argument: $1 (use --help)"; exit 2 ;;
   esac
@@ -150,8 +163,12 @@ fi
 echo "============================================================================"
 
 if [[ "$EXECUTE" -eq 1 ]]; then
-  read -r -p "Type 'stage-s3-eks' to confirm writing to s3://${S3_DATA_BUCKET}/ : " _confirm
-  [[ "$_confirm" == "stage-s3-eks" ]] || die "Confirmation mismatch — aborting (nothing written)."
+  if [[ "$ASSUME_YES" -eq 1 ]]; then
+    warn "Non-interactive confirm (--yes / STAGE_S3_ASSUME_YES) — writing to s3://${S3_DATA_BUCKET}/"
+  else
+    read -r -p "Type 'stage-s3-eks' to confirm writing to s3://${S3_DATA_BUCKET}/ : " _confirm
+    [[ "$_confirm" == "stage-s3-eks" ]] || die "Confirmation mismatch — aborting (nothing written)."
+  fi
 fi
 
 # =============================================================================
@@ -204,10 +221,10 @@ if [[ -f "${MODEL_DIR}/config.json" ]]; then
   ok "model already present at ${MODEL_DIR} (config.json exists) — skipping download."
 else
   mkdir -p "$MODEL_DIR"
-  echo "    hf download ${MODEL_REPO} --local-dir ${MODEL_DIR}"
-  hf download "$MODEL_REPO" --local-dir "$MODEL_DIR" \
-    || die "hf download failed for ${MODEL_REPO} (fail closed)."
-  ok "model downloaded to ${MODEL_DIR}"
+  echo "    hf download ${MODEL_REPO} --revision ${MODEL_REVISION} --local-dir ${MODEL_DIR}"
+  hf download "$MODEL_REPO" --revision "$MODEL_REVISION" --local-dir "$MODEL_DIR" \
+    || die "hf download failed for ${MODEL_REPO}@${MODEL_REVISION} (fail closed — is the model gated? set HF_TOKEN)."
+  ok "model downloaded to ${MODEL_DIR} @ ${MODEL_REVISION}"
 fi
 
 # =============================================================================
@@ -229,10 +246,12 @@ ok "workflows staged at ${WORKFLOWS_SCRIPTS} (simulation/, policy/)"
 # =============================================================================
 # s3_sync(): the single S3-write choke point. In dry-run it appends --dryrun so the
 # aws CLI prints what WOULD copy and writes nothing; in --execute it copies for real.
-# Always excludes .git/* (partial-clone metadata must never land in the bucket).
+# Always excludes .git/* (partial-clone metadata must never land in the bucket) and
+# uses --delete so each prefix CONVERGES to the exact staged tree (stale files from a
+# prior/interrupted run are removed — important after the patch or a pin changes).
 s3_sync() {
   local src="$1" dst="$2"
-  local args=( aws s3 sync "$src" "$dst" --region "$AWS_REGION" --exclude '.git/*' )
+  local args=( aws s3 sync "$src" "$dst" --region "$AWS_REGION" --exclude '.git/*' --delete )
   if [[ "$EXECUTE" -eq 1 ]]; then
     echo "    RUN >> ${args[*]}"
     "${args[@]}"
@@ -260,7 +279,14 @@ if [[ "$EXECUTE" -eq 1 ]]; then
     echo "    aws s3 ls s3://${S3_DATA_BUCKET}/${_pfx}"
     aws s3 ls "s3://${S3_DATA_BUCKET}/${_pfx}" --region "$AWS_REGION" || warn "no objects listed under ${_pfx}"
   done
-  ok "Upload complete."
+  # Publish the READY marker LAST. Because `set -e` aborts on any earlier sync
+  # failure, the marker is present ONLY when all six prefixes converged — operators
+  # (and a future entrypoint gate) can check `aws s3 ls s3://<bucket>/_STAGING_COMPLETE`
+  # to distinguish "staging finished" from "staging still running / failed".
+  echo "READY $(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    | aws s3 cp - "s3://${S3_DATA_BUCKET}/_STAGING_COMPLETE" --region "$AWS_REGION" \
+    || die "failed to publish _STAGING_COMPLETE marker."
+  ok "Upload complete — published s3://${S3_DATA_BUCKET}/_STAGING_COMPLETE."
   echo "    NOTE: FSx-Lustre lazily imports these objects on first access via the DRA —"
   echo "          they need not be pre-warmed; the first pod to read a path triggers the import."
 else

@@ -15,18 +15,23 @@ Deploy:
     --context image_uri=<your-account>.dkr.ecr.<region>.amazonaws.com/<your-repo>:<tag>
 """
 
+import os
 import pathlib
 
 from aws_cdk import (
     Stack,
     CfnOutput,
     CfnJson,
+    Duration,
     RemovalPolicy,
     aws_eks as eks,
     aws_ec2 as ec2,
     aws_fsx as fsx,
     aws_s3 as s3,
+    aws_s3_assets as s3_assets,
     aws_iam as iam,
+    aws_codebuild as codebuild,
+    custom_resources as cr,
 )
 from aws_cdk.lambda_layer_kubectl_v31 import KubectlV31Layer
 from constructs import Construct
@@ -795,6 +800,105 @@ class EKSKubeRayStack(Stack):
         # endregion
 
         # ==============================================================
+        # region 12.5. S3 staging via CodeBuild (tried-and-true, repeatable)
+        # ==============================================================
+        # Public deployers do NOT hand-stage the data bucket. This CodeBuild
+        # project runs the SAME fail-closed engine as a local operator would
+        # (infra/stage-s3-eks.sh, invoked non-interactively with --execute --yes):
+        # clone the pinned third-party repos, APPLY the RLinf _broadcast patch
+        # (patches/RLinf-649e7579-broadcast-raise.patch, verified via sentinel),
+        # download the RL model, stage the bundled workflows, and upload
+        # everything to s3://<data-bucket>/{third_party,models,workflows}/ — which
+        # the FSx-Lustre DRA then lazily imports. It is auto-triggered once on
+        # deploy and is re-runnable any time with:
+        #   aws codebuild start-build --project-name GR00T-RL-Stage-S3
+        #
+        # The source asset is the whole rl/ dir (NOT just docker/) so the buildspec
+        # can reach infra/stage-s3-eks.sh, patches/, and workflows/. cdk.out and
+        # bytecode are excluded to keep the asset small.
+        rl_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        s3_stage_source = s3_assets.Asset(
+            self,
+            "S3StageSourceAsset",
+            path=rl_dir,
+            exclude=[
+                "*.pyc",
+                "__pycache__",
+                ".git",
+                ".git/**",
+                "infra/cdk.out",
+                "infra/cdk.out/**",
+                "infra/cdk.context.json",
+                "docker/Dockerfile.*",
+            ],
+        )
+        s3_stage_build = codebuild.Project(
+            self,
+            "S3StageBuild",
+            project_name="GR00T-RL-Stage-S3",
+            description=(
+                "Stage pinned third-party code (RLinf _broadcast patch applied), "
+                "the RL model, and workflows to the S3 data bucket for the EKS/FSx DRA"
+            ),
+            source=codebuild.Source.s3(
+                bucket=s3_stage_source.bucket,
+                path=s3_stage_source.s3_object_key,
+            ),
+            environment=codebuild.BuildEnvironment(
+                build_image=codebuild.LinuxBuildImage.STANDARD_7_0,
+                # LARGE = ~128 GB disk — room for the pinned repos + model clone
+                # before upload (no EFS mount here, so staging is local-then-sync).
+                compute_type=codebuild.ComputeType.LARGE,
+            ),
+            build_spec=codebuild.BuildSpec.from_source_filename(
+                "docker/buildspec-stage-s3.yml"
+            ),
+            environment_variables={
+                "S3_DATA_BUCKET": codebuild.BuildEnvironmentVariable(
+                    value=data_bucket.bucket_name
+                ),
+                "AWS_REGION": codebuild.BuildEnvironmentVariable(
+                    value=Stack.of(self).region
+                ),
+                "AWS_DEFAULT_REGION": codebuild.BuildEnvironmentVariable(
+                    value=Stack.of(self).region
+                ),
+            },
+            timeout=Duration.hours(2),
+        )
+        s3_stage_source.grant_read(s3_stage_build.role)
+        data_bucket.grant_read_write(s3_stage_build.role)
+
+        # Auto-trigger staging on first deploy; re-run manually any time.
+        s3_stage_trigger = cr.AwsCustomResource(
+            self,
+            "S3StageTrigger",
+            policy=cr.AwsCustomResourcePolicy.from_sdk_calls(
+                resources=cr.AwsCustomResourcePolicy.ANY_RESOURCE
+            ),
+            timeout=Duration.minutes(5),
+            on_create=cr.AwsSdkCall(
+                service="CodeBuild",
+                action="startBuild",
+                parameters={"projectName": s3_stage_build.project_name},
+                physical_resource_id=cr.PhysicalResourceId.of(
+                    f"{s3_stage_build.project_name}-initial"
+                ),
+            ),
+            on_update=cr.AwsSdkCall(
+                service="CodeBuild",
+                action="batchGetProjects",
+                parameters={"names": [s3_stage_build.project_name]},
+                physical_resource_id=cr.PhysicalResourceId.of(
+                    f"{s3_stage_build.project_name}-initial"
+                ),
+            ),
+            install_latest_aws_sdk=True,
+        )
+        s3_stage_trigger.node.add_dependency(s3_stage_build)
+        # endregion
+
+        # ==============================================================
         # region 13. CfnOutputs
         # ==============================================================
         CfnOutput(
@@ -851,6 +955,16 @@ class EKSKubeRayStack(Stack):
             "DataBucketName",
             value=data_bucket.bucket_name,
             description="S3 data bucket (DRA-linked to FSx)",
+        )
+        CfnOutput(
+            self,
+            "S3StageProject",
+            value=s3_stage_build.project_name,
+            description=(
+                "CodeBuild project that stages code+model to the data bucket "
+                "(auto-runs on deploy; re-run: aws codebuild start-build "
+                "--project-name GR00T-RL-Stage-S3)"
+            ),
         )
         CfnOutput(
             self,

@@ -53,14 +53,36 @@ These versions are pinned for compatibility. Do NOT bump the RLinf pin (see Know
 
 ### 1. Stage Data to S3 (EKS)
 
-`infra/stage-s3-eks.sh` is the supported way to populate `$S3_DATA_BUCKET` for the EKS
-backend. It clones the pinned third-party repos (RLinf `649e757`, Isaac-GR00T `4af2b62`,
-IsaacLab `941ebdf4a`, IsaacLab-Arena `dba099565`), APPLIES the `_broadcast` patch to the
-RLinf checkout (`patches/RLinf-649e7579-broadcast-raise.patch`), downloads the RL model,
-stages the repo-bundled workflows into `workflows/rheo/scripts/`, and uploads everything to
-`s3://$S3_DATA_BUCKET/{third_party,models,workflows}/`. It is **fail-closed** (a failed
+Staging is performed by the **`GR00T-RL-Stage-S3` CodeBuild project**, which runs
+**AUTOMATICALLY on `cdk deploy`** (Step 2, via an `AwsCustomResource` that fires
+`startBuild` once). It clones the pinned third-party repos (RLinf `649e757`, Isaac-GR00T
+`4af2b62`, IsaacLab `941ebdf4a`, IsaacLab-Arena `dba099565`), APPLIES the `_broadcast` patch
+to the RLinf checkout (`patches/RLinf-649e7579-broadcast-raise.patch`), downloads the RL
+model, stages the repo-bundled workflows into `workflows/rheo/scripts/`, and uploads
+everything to `s3://$S3_DATA_BUCKET/{third_party,models,workflows}/`.
+
+To re-run staging any time (e.g. to refresh the bucket), start the project directly:
+
+```bash
+aws codebuild start-build --project-name GR00T-RL-Stage-S3 --region <region>
+```
+
+Watch it in the CodeBuild console, or from the CLI:
+
+```bash
+aws codebuild batch-get-builds --region <region> \
+  --ids "$(aws codebuild list-builds-for-project --project-name GR00T-RL-Stage-S3 \
+           --region <region> --query 'ids[0]' --output text)"
+```
+
+**Because staging auto-runs on deploy and FSx-Lustre lazily imports the objects via the DRA
+on first access, no manual staging step is required for a first deploy.**
+
+_Secondary (dev only):_ the same work is what CodeBuild runs under the hood —
+`docker/buildspec-stage-s3.yml` → `infra/stage-s3-eks.sh --execute --yes`. You can also run
+that script locally to inspect or iterate. It is **fail-closed** (a failed
 clone/checkout/patch aborts) and **dry-run by default** (every `aws s3 sync` runs with
-`--dryrun` until you pass `--execute`).
+`--dryrun` until you pass `--execute`):
 
 ```bash
 cd training/gr00t/rl/infra
@@ -72,8 +94,6 @@ export S3_DATA_BUCKET=<bucket-name> AWS_REGION=<region>   # same region as the b
 # Real (writes to S3): add --execute (then type 'stage-s3-eks' to confirm)
 ./stage-s3-eks.sh --execute
 ```
-
-FSx-Lustre lazily imports these objects on first access via the DRA — no pre-warming needed.
 
 ### 2. Deploy CDK Stack
 
@@ -292,6 +312,9 @@ deletion of `eval_embodied_agent.py`. The `_broadcast` deadlock (below) is fixed
 | Multi-stage eval reports stage-1's number for all stages | The head must be reformed between stages so it re-reads `success_stage`; use eval-checkpoint.sh (handles it). §6.5 gotcha 3 |
 | g6e-dry in the FSx AZ | Run eval/rollout cross-AZ via `EKS_ROLLOUT_SUBNET_IDS`/`EKS_EVAL_LEARNER_SUBNET_IDS`; FSx read cross-AZ. §6.5 |
 | Silent ~3h hang; `ValueError: Unsupported object type` / `invalid load key` after a Gloo broadcast failure (`_broadcast` deadlock) | `stage-s3-eks.sh` applies `patches/RLinf-649e7579-broadcast-raise.patch` (RLinf swallows the broadcast exception and reads uninitialized buffers as pickle); the patch re-raises so training dies loudly and `auto-recover` restarts from the latest checkpoint. Keep RLinf pinned at `649e757` — do NOT bump the pin to fix this |
+| Head pod restarts / can't find `/mnt/fsx/third_party` right after a first deploy | Staging runs in CodeBuild (`GR00T-RL-Stage-S3`, ~15-20 min incl. the ~5.5 GB model) and is fire-and-forget, so `cdk deploy` returns before it finishes; the head may restart until the data lands (KubeRay self-heals). Confirm staging converged: `aws s3 ls s3://<bucket>/_STAGING_COMPLETE` (the marker is written last, only on full success) |
+| Changed the patch / pins / workflows and need to re-stage | A `cdk deploy` update does NOT auto-re-stage. Re-run `aws codebuild start-build --project-name GR00T-RL-Stage-S3 --region <region>`; `aws s3 sync --delete` converges the bucket to the new tree |
+| CodeBuild staging fails with S3 `AccessDenied` | If the data bucket uses a customer-managed KMS key, grant the `GR00T-RL-Stage-S3` role `kms:Encrypt`/`kms:Decrypt`/`kms:GenerateDataKey` on that key (the bucket `grant_read_write` alone does not cover a CMK), or use SSE-S3 |
 
 ## Related Files
 
