@@ -54,6 +54,29 @@ This stages:
 - GR00T N1.5 pre-trained checkpoint
 - Training workflows (rlinf_ext, configs, task definition)
 
+This EFS CodeBuild step is for the **batch-mnp / sagemaker** backends only — the EKS backend
+uses FSx-Lustre backed by S3, so stage to S3 with `infra/stage-s3-eks.sh` (below) instead.
+
+### Stage Training Data (EKS → S3/FSx)
+
+The EKS backend reads its data from FSx-Lustre, which lazily imports from an S3 bucket via a
+Data Repository Association. Populate that bucket with `infra/stage-s3-eks.sh` — it clones the
+pinned third-party repos, **applies the RLinf `_broadcast` patch**, downloads the model, stages
+the workflows, and uploads everything to `$S3_DATA_BUCKET`. Fail-closed and dry-run by default:
+
+```bash
+cd training/gr00t/rl/infra
+export S3_DATA_BUCKET=<your-s3-bucket> AWS_REGION=<region>   # same region as the bucket + FSx
+
+# Dry-run (safe): clones/patches/downloads locally, prints what WOULD upload, writes $0 to S3
+./stage-s3-eks.sh
+# Real (writes to S3): add --execute (then type 'stage-s3-eks' to confirm)
+./stage-s3-eks.sh --execute
+```
+
+You may deploy to any region with p5/p5e + g6e capacity; keep S3 + ECR + VPC + FSx all in that
+ONE region (the FSx DRA requires same-region S3) and probe capacity first with `infra/capacity-probe.sh`.
+
 ### Run Training
 
 **Batch MNP:**

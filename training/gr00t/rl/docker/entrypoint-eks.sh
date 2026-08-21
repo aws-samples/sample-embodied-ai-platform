@@ -32,8 +32,9 @@ FSX_MOUNT="/mnt/fsx"
 # The async arm (Arm B) uses a SEPARATE RLinf checkout at
 # ${FSX_MOUNT}/third_party/RLinf-async (@ fbc72dd6, native async PPO + upstream
 # #1414 _broadcast fix), leaving the frozen sync checkout at
-# ${FSX_MOUNT}/third_party/RLinf (@ 649e7579 + local _broadcast patch) byte-
-# untouched (A9-3). This RLINF_PATH reassignment happens HERE — BEFORE the
+# ${FSX_MOUNT}/third_party/RLinf (@ 649e7579, with the _broadcast patch applied at
+# S3-staging time by infra/stage-s3-eks.sh — see patches/RLinf-649e7579-broadcast-raise.patch)
+# byte-untouched (A9-3). This RLINF_PATH reassignment happens HERE — BEFORE the
 # PYTHONPATH construction below — so that under PPO_MODE=async, python imports
 # (including train_async.py's own package imports) resolve from RLinf-async and
 # NOT the sync checkout. Deferring this to Section 6 would leave PYTHONPATH

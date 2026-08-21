@@ -61,9 +61,26 @@ from eks_kuberay_stack import EKSKubeRayStack
 
 app = cdk.App()
 
+# Region portability: derive the region from the environment with NO baked default.
+# A hardcoded default (previously "us-west-2") silently misdeploys when the operator
+# sets only a partial region env (e.g. AWS_REGION but not CDK_DEFAULT_REGION) while the
+# rest of the bash tooling/docs default elsewhere. Fail closed instead: require one of
+# the region env vars to be exported to the intended target region.
+_region = (
+    os.environ.get("CDK_DEFAULT_REGION")
+    or os.environ.get("AWS_REGION")
+    or os.environ.get("AWS_DEFAULT_REGION")
+)
+if not _region:
+    raise SystemExit(
+        "No AWS region set. Export CDK_DEFAULT_REGION (or AWS_REGION / AWS_DEFAULT_REGION) "
+        "to your target region before deploying, e.g. `export CDK_DEFAULT_REGION=us-east-2`. "
+        "Keep S3 + ECR + VPC + FSx all in that ONE region (the FSx DRA requires same-region S3)."
+    )
+
 env = cdk.Environment(
     account=os.environ.get("CDK_DEFAULT_ACCOUNT"),
-    region=os.environ.get("CDK_DEFAULT_REGION", "us-west-2"),
+    region=_region,
 )
 
 compute_backend = app.node.try_get_context("compute_backend") or "batch-mnp"

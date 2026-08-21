@@ -11,39 +11,76 @@ Deploy and run PPO training for GR00T N1.5 on EKS with KubeRay using heterogeneo
 
 ## Prerequisites
 
-- AWS account with us-east-2 region
+- AWS account with a target region that has p5/p5e + g6e capacity (e.g. us-east-2 — see "Choosing a region" below)
 - vCPU quota: 384+ for G instances (quota code `L-DB2E81BA`)
-- ECR image: `<account>.dkr.ecr.us-east-2.amazonaws.com/gr00t-rl-unified:<tag>`
-- S3 bucket in us-east-2 with staged training data (DRA-linked to FSx)
+- ECR image `<account>.dkr.ecr.<region>.amazonaws.com/gr00t-rl-unified:<tag>`, built and pushed via `training/gr00t/rl/scripts/build_and_push.sh` (reads the ECR repo from the stack outputs, does the ECR login + `docker build`/`docker push`)
+- S3 bucket in the SAME region as FSx with staged training data (DRA-linked to FSx) — populate it with `infra/stage-s3-eks.sh` (see Step 1)
 - VPC with NAT gateway (private subnets need egress)
 - CDK dependencies: `pip install -r training/gr00t/rl/infra/requirements.txt`
 - kubectl installed locally
 
+### Choosing a region
+
+You may deploy to ANY region that has p5/p5e (learner) + g6e (rollout/eval) capacity. Keep
+S3 + ECR + VPC + FSx all in that ONE region — the FSx Data Repository Association (DRA)
+requires the S3 bucket to be same-region. PROBE capacity first with `infra/capacity-probe.sh`
+before deploying. Recommended regions where this was validated / capacity tends to exist:
+`us-east-1`, `us-west-2`, `us-east-2`. Set the region once via env (`AWS_REGION` /
+`CDK_DEFAULT_REGION` / `AWS_DEFAULT_REGION`) and reuse it across every command below —
+`app.py` fails closed if no region env var is set (no hardcoded default).
+
 ## S3 Data Layout
 
-The S3 bucket must contain:
+Populate the bucket with `infra/stage-s3-eks.sh` (Step 1) — you should not have to build
+this layout by hand. The script produces exactly this tree (FSx-Lustre lazily imports it
+via the DRA on first access):
 ```
 s3://<bucket>/
 ├── third_party/
-│   ├── RLinf/          (commit 649e757)
+│   ├── RLinf/          (commit 649e757, _broadcast patch applied by stage-s3-eks.sh)
 │   ├── Isaac-GR00T/    (commit 4af2b62)
-│   └── IsaacLab/
+│   ├── IsaacLab/       (commit 941ebdf4a)
+│   └── IsaacLab-Arena/ (commit dba099565)
 ├── models/
 │   └── GR00T-N1.5-RL-Rheo-AssembleTrocar/
 └── workflows/
     └── rheo/scripts/simulation/rl/rlinf_ext/
 ```
 
-These versions are pinned for compatibility. Use the i4h-workflows repo as source of truth.
+These versions are pinned for compatibility. Do NOT bump the RLinf pin (see Known Issues).
 
 ## Steps
 
-### 1. Deploy CDK Stack
+### 1. Stage Data to S3 (EKS)
+
+`infra/stage-s3-eks.sh` is the supported way to populate `$S3_DATA_BUCKET` for the EKS
+backend. It clones the pinned third-party repos (RLinf `649e757`, Isaac-GR00T `4af2b62`,
+IsaacLab `941ebdf4a`, IsaacLab-Arena `dba099565`), APPLIES the `_broadcast` patch to the
+RLinf checkout (`patches/RLinf-649e7579-broadcast-raise.patch`), downloads the RL model,
+stages the repo-bundled workflows into `workflows/rheo/scripts/`, and uploads everything to
+`s3://$S3_DATA_BUCKET/{third_party,models,workflows}/`. It is **fail-closed** (a failed
+clone/checkout/patch aborts) and **dry-run by default** (every `aws s3 sync` runs with
+`--dryrun` until you pass `--execute`).
 
 ```bash
-cd /home/ubuntu/Documents/fraolotu/i4h-training-infra/training/gr00t/rl/infra
+cd training/gr00t/rl/infra
+export S3_DATA_BUCKET=<bucket-name> AWS_REGION=<region>   # same region as the bucket + FSx
 
-AWS_REGION=us-east-2 AWS_DEFAULT_REGION=us-east-2 CDK_DEFAULT_REGION=us-east-2 \
+# Dry-run (safe): clones/patches/downloads locally, prints what WOULD upload, writes $0 to S3
+./stage-s3-eks.sh
+
+# Real (writes to S3): add --execute (then type 'stage-s3-eks' to confirm)
+./stage-s3-eks.sh --execute
+```
+
+FSx-Lustre lazily imports these objects on first access via the DRA — no pre-warming needed.
+
+### 2. Deploy CDK Stack
+
+```bash
+cd training/gr00t/rl/infra
+
+AWS_REGION=<region> AWS_DEFAULT_REGION=<region> CDK_DEFAULT_REGION=<region> \
   CDK_DEFAULT_ACCOUNT=<account-id> cdk deploy \
   --context compute_backend=eks \
   --context vpc_id=<vpc-id> \
@@ -60,15 +97,15 @@ Optional context overrides:
 
 Creates: EKS cluster, FSx for Lustre (PERSISTENT_2) + DRA, GPU node groups, KubeRay operator, NVIDIA device plugin, FSx CSI driver, RayCluster CR. Takes ~25-30 minutes.
 
-### 2. Configure kubectl Access
+### 3. Configure kubectl Access
 
 ```bash
 # Use the role ARN from stack outputs (KubeconfigCommand)
-aws eks update-kubeconfig --name gr00t-rl-eks --region us-east-2 \
-  --role-arn arn:aws:iam::<account>:role/gr00t-rl-eks-admin-us-east-2
+aws eks update-kubeconfig --name gr00t-rl-eks --region <region> \
+  --role-arn arn:aws:iam::<account>:role/gr00t-rl-eks-admin-<region>
 ```
 
-### 3. Post-Deploy: Create Entrypoint ConfigMap
+### 4. Post-Deploy: Create Entrypoint ConfigMap
 
 The entrypoint is mounted via ConfigMap (not baked into the image):
 
@@ -89,7 +126,7 @@ kubectl delete pods -n training --all
 kubectl delete pods -n training -l ray-role=worker
 ```
 
-### 4. Verify Cluster Health
+### 5. Verify Cluster Health
 
 ```bash
 # All 5 nodes Ready
@@ -102,7 +139,7 @@ kubectl get pods -n training
 kubectl exec <head-pod> -n training -- ls /mnt/fsx/third_party/
 ```
 
-### 5. Monitor Training
+### 6. Monitor Training
 
 ```bash
 # Head pod logs (training progress)
@@ -126,7 +163,7 @@ kubectl exec <head-pod> -n training -- \
   find /mnt/fsx/rl-training/results -name '*.pt'
 ```
 
-### 5.5 Per-Stage Eval (eval-checkpoint.sh) — the NVIDIA-comparable 4-number row
+### 6.5 Per-Stage Eval (eval-checkpoint.sh) — the NVIDIA-comparable 4-number row
 
 `training/gr00t/rl/infra/eval-checkpoint.sh` runs the per-stage `success_stage` sweep
 (N=64, Wilson 95% CI) on a checkpoint and prints per-stage `eval/success_once` vs the
@@ -167,18 +204,18 @@ is g6e-capacity-dry, run cross-AZ: `EKS_ROLLOUT_SUBNET_IDS=<other-AZ-subnet>
 EKS_EVAL_LEARNER_SUBNET_IDS=<other-AZ-subnet>` (FSx stays put, read cross-AZ). Probe first
 with `capacity-probe.sh --subnet <subnet> --instance-type g6e.8xlarge --capacity 9`.
 
-### 6. Teardown
+### 7. Teardown
 
 ```bash
 # Delete RayCluster first (avoids custom resource timeout)
 kubectl delete raycluster gr00t-rl-training -n training
 
 # Then CDK destroy
-AWS_REGION=us-east-2 CDK_DEFAULT_REGION=us-east-2 cdk destroy GR00TRLEKSStack --force
+AWS_REGION=<region> CDK_DEFAULT_REGION=<region> cdk destroy GR00TRLEKSStack --force
 
 # If CDK hangs on custom resources, force via API:
-aws eks delete-cluster --name gr00t-rl-eks --region us-east-2
-aws cloudformation delete-stack --stack-name GR00TRLEKSStack --region us-east-2
+aws eks delete-cluster --name gr00t-rl-eks --region <region>
+aws cloudformation delete-stack --stack-name GR00TRLEKSStack --region <region>
 ```
 
 ## Architecture
@@ -234,6 +271,11 @@ Training parameters are **env-var configurable** on the head pod:
 
 **Critical:** RLinf `bc3d8aa`+ requires `weight_syncer` config. Isaac-GR00T `3df8b38` lacks `data_config`. Always use the versions pinned in the i4h-workflows repo.
 
+**Do NOT bump the RLinf pin off `649e757`.** A bump to `be8d5c2` was verified to break
+training three ways: a now-mandatory `weight_syncer` config, an N1.5 module rename, and the
+deletion of `eval_embodied_agent.py`. The `_broadcast` deadlock (below) is fixed by applying
+`patches/RLinf-649e7579-broadcast-raise.patch` at stage time — NOT by moving the pin.
+
 ## Known Issues
 
 | Issue | Fix |
@@ -245,10 +287,11 @@ Training parameters are **env-var configurable** on the head pod:
 | P5/P5e capacity unavailable | Fall back to g6e instances |
 | S3 bucket must be same region as FSx | DRA requires same-region S3 |
 | CDK lookup uses wrong region | Set `AWS_REGION=us-east-2` explicitly (not just CDK_DEFAULT_REGION) |
-| Eval head crash-loops: `total_num_envs must be divisible...` | N must be divisible by `num_nodes=1+num_rollout_workers`; for N=64 use 7 workers (8 nodes). See §5.5 gotcha 2 |
-| Eval head crash: `EVAL_CKPT file not found: s3://...` | Pass the FSx path, not the s3:// URI (or use eval-checkpoint.sh which auto-translates). §5.5 gotcha 1 |
-| Multi-stage eval reports stage-1's number for all stages | The head must be reformed between stages so it re-reads `success_stage`; use eval-checkpoint.sh (handles it). §5.5 gotcha 3 |
-| g6e-dry in the FSx AZ | Run eval/rollout cross-AZ via `EKS_ROLLOUT_SUBNET_IDS`/`EKS_EVAL_LEARNER_SUBNET_IDS`; FSx read cross-AZ. §5.5 |
+| Eval head crash-loops: `total_num_envs must be divisible...` | N must be divisible by `num_nodes=1+num_rollout_workers`; for N=64 use 7 workers (8 nodes). See §6.5 gotcha 2 |
+| Eval head crash: `EVAL_CKPT file not found: s3://...` | Pass the FSx path, not the s3:// URI (or use eval-checkpoint.sh which auto-translates). §6.5 gotcha 1 |
+| Multi-stage eval reports stage-1's number for all stages | The head must be reformed between stages so it re-reads `success_stage`; use eval-checkpoint.sh (handles it). §6.5 gotcha 3 |
+| g6e-dry in the FSx AZ | Run eval/rollout cross-AZ via `EKS_ROLLOUT_SUBNET_IDS`/`EKS_EVAL_LEARNER_SUBNET_IDS`; FSx read cross-AZ. §6.5 |
+| Silent ~3h hang; `ValueError: Unsupported object type` / `invalid load key` after a Gloo broadcast failure (`_broadcast` deadlock) | `stage-s3-eks.sh` applies `patches/RLinf-649e7579-broadcast-raise.patch` (RLinf swallows the broadcast exception and reads uninitialized buffers as pickle); the patch re-raises so training dies loudly and `auto-recover` restarts from the latest checkpoint. Keep RLinf pinned at `649e757` — do NOT bump the pin to fix this |
 
 ## Related Files
 
