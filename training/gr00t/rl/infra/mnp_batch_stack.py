@@ -248,6 +248,10 @@ class RLBatchMNPStack(Stack):
         docker_dir = os.path.abspath(
             os.path.join(os.path.dirname(__file__), "..", "docker")
         )
+        # rl/ root (contains docker/, workflows/, infra/, ...). The EFS staging
+        # source needs it so the buildspec can reach the custom RL config overlay
+        # under workflows/ (which is NOT inside docker_dir).
+        rl_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
         unified_build = None
 
@@ -757,8 +761,19 @@ class RLBatchMNPStack(Stack):
         stage_source = s3_assets.Asset(
             self,
             "StageEFSSourceAsset",
-            path=docker_dir,
-            exclude=["*.pyc", "__pycache__", "Dockerfile.*"],
+            # rl/ root (not just docker/) so buildspec-stage-efs.yml can overlay the
+            # custom RL config from workflows/. cdk.out/.git/bytecode excluded to keep
+            # the asset small (mirrors GR00TRLArtifactsStack's PipelineSourceAsset).
+            path=rl_dir,
+            exclude=[
+                "*.pyc",
+                "__pycache__",
+                ".git",
+                ".git/**",
+                "infra/cdk.out",
+                "infra/cdk.out/**",
+                "infra/cdk.context.json",
+            ],
         )
 
         efs_stage_sg = ec2.SecurityGroup(
@@ -785,7 +800,7 @@ class RLBatchMNPStack(Stack):
                 privileged=True,  # Required for EFS mount
             ),
             build_spec=codebuild.BuildSpec.from_source_filename(
-                "buildspec-stage-efs.yml"
+                "docker/buildspec-stage-efs.yml"
             ),
             vpc=vpc,
             subnet_selection=ec2.SubnetSelection(

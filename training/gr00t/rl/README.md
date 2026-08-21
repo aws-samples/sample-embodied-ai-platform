@@ -33,11 +33,16 @@ region — the FSx DRA requires same-region S3):
   DRA source FSx-Lustre lazily imports from; `stage-s3-eks.sh` populates it.
 - **CDK bootstrap (once per account/region):**
   `cdk bootstrap aws://$(aws sts get-caller-identity --query Account --output text)/<region>`.
-- **Runtime egress for assets:** the trocar task streams its USD scene/props at runtime from the
-  **public** NVIDIA Omniverse CDN (`omniverse-content-production.s3-us-west-2.amazonaws.com`, no
-  credentials). These "Powered by LightWheel" assets are **CC-BY-NC-4.0 (NonCommercial)** — fine for
-  research/eval; not for commercial redeployment of the assets themselves. No LightWheel account is
-  needed (`lightwheel-sdk` is a public PyPI package baked into the image; the assets load by URL).
+- **Runtime egress for assets** (nodes need outbound HTTPS to all of these; no credentials were
+  required in the validated smoke, but their availability is a real dependency):
+  - `omniverse-content-production.s3-us-west-2.amazonaws.com` — the trocar scene/props USD
+    (`workflows/.../simulation/assets/assets.py` `ASSET_PATH`). These "Powered by LightWheel" assets
+    are **CC-BY-NC-4.0 (NonCommercial)** — fine for research/eval, not for commercial redeployment.
+  - `api.lightwheel.net` + `api-s3-assets.lightwheel.net` — IsaacLab-Arena's *generic* object library
+    (Microwave/CoffeeMachine) calls the LightWheel SDK at import time (reached transitively because the
+    trocar task imports teleop). It returned HTTP 200 anonymously in the smoke, so no LightWheel account
+    is needed, but the hosted API IS contacted. `lightwheel-sdk` (public PyPI, Apache-2.0) is baked into
+    the image.
 
 ### Deploy (EKS — recommended, validated)
 
@@ -57,8 +62,10 @@ export AWS_REGION=<region> AWS_DEFAULT_REGION=<region> CDK_DEFAULT_REGION=<regio
 export CDK_DEFAULT_ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
 
 # 1. Persistent artifacts stack: gr00t-rl-unified ECR repo + the gated GR00T-RL-Pipeline
-#    CodeBuild project. Deploy ONCE (persists across EKS teardowns).
-cdk deploy GR00TRLArtifactsStack --context compute_backend=eks --context s3_data_bucket=<bucket>
+#    CodeBuild project. Deploy ONCE (persists across EKS teardowns). artifacts_only=true
+#    is REQUIRED in this phase — it tells the app to synth ONLY the artifacts stack
+#    (the EKS stack has no verified image yet and fails closed without one).
+cdk deploy GR00TRLArtifactsStack --context compute_backend=eks --context artifacts_only=true --context s3_data_bucket=<bucket>
 
 # 2. Build image + stage data, poll, verify, then deploy EKS with the verified digest.
 ./prepare-artifacts.sh --region <region> --mode all --deploy --deploy-stack GR00TRLEKSStack -- \

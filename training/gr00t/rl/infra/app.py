@@ -114,7 +114,7 @@ compute_backend = app.node.try_get_context("compute_backend") or "batch-mnp"
 # with infra/prepare-artifacts.sh, then deploy the backend stack with the resolved
 # image_uri. Instantiated as its own stack so it OWNS those resources persistently
 # (independent of any single backend deploy).
-if compute_backend in ("eks", "hyperpod-eks"):
+if compute_backend == "eks":
     GR00TRLArtifactsStack(
         app,
         "GR00TRLArtifactsStack",
@@ -137,18 +137,31 @@ if compute_backend in ("batch-mnp", "sagemaker"):
 elif compute_backend == "eks" and not app.node.try_get_context("image_uri"):
     # The EKS stack is a PURE consumer of a pre-built image — it requires an explicit,
     # verified image_uri (digest preferred) and never fabricates a floating :latest.
-    # When no image_uri is in context we SKIP instantiating it, so that phase-1
-    # `cdk deploy GR00TRLArtifactsStack --context compute_backend=eks ...` (build the
-    # image; no digest exists yet) can synth+deploy on its own. To deploy the EKS
-    # backend, use infra/prepare-artifacts.sh (builds+verifies the image, then deploys
-    # with --context image_uri=<resolved @sha256 digest>) or pass image_uri yourself.
-    print(
-        "[app] compute_backend=eks but no image_uri context — skipping GR00TRLEKSStack "
-        "(pure image consumer). Expected when deploying GR00TRLArtifactsStack first. "
-        "Deploy the EKS backend via infra/prepare-artifacts.sh or pass "
-        "--context image_uri=<...@sha256:digest>.",
-        file=sys.stderr,
-    )
+    # With no image_uri we do NOT silently skip: that could be mistaken for a complete
+    # deployment (esp. `cdk deploy --all`). Phase-1 (deploy ONLY the artifacts stack,
+    # before any image digest exists) must OPT IN explicitly with artifacts_only=true;
+    # anything else fails closed with guidance.
+    _artifacts_only = str(
+        app.node.try_get_context("artifacts_only") or ""
+    ).lower() in ("1", "true", "yes")
+    if _artifacts_only:
+        print(
+            "[app] artifacts_only=true — synthesizing GR00TRLArtifactsStack only "
+            "(phase-1: build the image + stage data before the EKS backend exists). "
+            "GR00TRLEKSStack is intentionally skipped.",
+            file=sys.stderr,
+        )
+    else:
+        raise SystemExit(
+            "compute_backend=eks requires ONE of:\n"
+            "  --context image_uri=<acct>.dkr.ecr.<region>.amazonaws.com/"
+            "gr00t-rl-unified@sha256:<digest>   (deploy the EKS backend), OR\n"
+            "  --context artifacts_only=true   (phase-1: deploy GR00TRLArtifactsStack "
+            "only, before the image exists).\n"
+            "Refusing to synth ambiguously (no ':latest' fallback). Normally you run "
+            "infra/prepare-artifacts.sh, which builds+verifies the image and deploys "
+            "the EKS stack with the resolved digest."
+        )
 elif compute_backend == "eks":
     stack = EKSKubeRayStack(
         app,

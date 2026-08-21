@@ -16,7 +16,7 @@ Deploy and run PPO training for GR00T N1.5 on EKS with KubeRay using heterogeneo
 - ECR image `<account>.dkr.ecr.<region>.amazonaws.com/gr00t-rl-unified@sha256:<digest>`, built + pushed by the `GR00T-RL-Pipeline` CodeBuild project (owned by `GR00TRLArtifactsStack`), driven by `infra/prepare-artifacts.sh` (Steps 1-2) — or by the manual `scripts/build_unified_and_push.sh` self-build (bring-your-own image). The workload deploys the wrapper-resolved `@sha256` digest, NOT the mutable `:latest` tag.
 - S3 bucket in the SAME region as FSx with staged training data (DRA-linked to FSx) — staged by the same `GR00T-RL-Pipeline` project's stage-data arm, driven by `infra/prepare-artifacts.sh` (Step 2)
 - VPC with NAT gateway (private subnets need egress) — ideally ≥2 private subnets in different AZs so you can chase g6e capacity
-- **Runtime asset egress:** worker pods stream the trocar USD scene/props from the **public** NVIDIA Omniverse CDN (`omniverse-content-production.s3-us-west-2.amazonaws.com`) at run time — the NAT egress above covers it, no credentials. Those assets are CC-BY-NC-4.0 (NonCommercial). `lightwheel-sdk` (public PyPI, Apache-2.0) is baked into the image; no LightWheel account is required.
+- **Runtime asset egress** (NAT egress above covers all; no credentials required in the validated smoke, but availability is a real dependency): (a) `omniverse-content-production.s3-us-west-2.amazonaws.com` — the trocar scene/props USD (CC-BY-NC-4.0, NonCommercial); (b) `api.lightwheel.net` + `api-s3-assets.lightwheel.net` — Arena's *generic* object library calls the LightWheel SDK at import time (transitive via the trocar task's teleop import), returned HTTP 200 anonymously. `lightwheel-sdk` (public PyPI, Apache-2.0) is baked into the image; no LightWheel account is required.
 - CDK dependencies: `pip install -r training/gr00t/rl/infra/requirements.txt`
 - kubectl + `jq` installed locally (`prepare-artifacts.sh` parses build JSON with `jq`)
 
@@ -86,8 +86,13 @@ EKS teardowns):
 ```bash
 cdk deploy GR00TRLArtifactsStack \
   --context compute_backend=eks \
+  --context artifacts_only=true \
   --context s3_data_bucket=<bucket>
 ```
+
+`artifacts_only=true` is **required** in this phase: it tells `app.py` to synth ONLY the
+artifacts stack. Without it (and without an `image_uri`), the app **fails closed** — the EKS
+stack is a pure image consumer and refuses to synth against a nonexistent/`:latest` image.
 
 `GR00T-RL-Pipeline` is a single project driven by `STAGE_MODE ∈ {build-image, stage-data, all}`:
 `build-image` builds + pushes the unified image; `stage-data` runs `infra/stage-s3-eks.sh`

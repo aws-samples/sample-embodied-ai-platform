@@ -329,7 +329,7 @@ if [[ "$EXECUTE" -eq 1 ]]; then
     ok "verified ${_pfx}"
   done
   # Publish the READY marker LAST. Because `set -e` aborts on any earlier sync
-  # failure, the marker is present ONLY when all six prefixes converged — operators
+  # failure, the marker is present ONLY when all verified prefixes converged — operators
   # (and a future entrypoint gate) can check `aws s3 ls s3://<bucket>/_STAGING_COMPLETE`
   # to distinguish "staging finished" from "staging still running / failed".
   echo "READY $(date -u +%Y-%m-%dT%H:%M:%SZ)" \

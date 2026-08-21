@@ -14,10 +14,18 @@ phases:
 
   build:
     commands:
-      - echo "Staging workflows (bundled in repo)..."
+      # Stage the COMPLETE i4h-workflows rheo/scripts tree from a PINNED commit
+      # (v0.5.0 = fb7727e), then overlay ONLY our custom RL config — same strategy as
+      # the EKS path's infra/stage-s3-eks.sh. A hand-picked subset drops interdependent
+      # sibling packages (teleop_devices, simulation.assets) and breaks env creation.
+      # The CodeBuild source is the rl/ root, so the overlay is at $CODEBUILD_SRC_DIR/workflows/.
+      - echo "Staging workflows (pinned i4h-workflows clone + custom RL config overlay)..."
       - mkdir -p /mnt/efs/workflows/rheo/scripts
-      - cp -r "$CODEBUILD_SRC_DIR/training/gr00t/rl/workflows/simulation" /mnt/efs/workflows/rheo/scripts/
-      - cp -r "$CODEBUILD_SRC_DIR/training/gr00t/rl/workflows/policy" /mnt/efs/workflows/rheo/scripts/
+      - rm -rf /tmp/i4h-workflows
+      - git clone --filter=blob:none https://github.com/isaac-for-healthcare/i4h-workflows.git /tmp/i4h-workflows
+      - git -C /tmp/i4h-workflows checkout fb7727ef12e980022997fccb6cbca5621e4616e4
+      - cp -r /tmp/i4h-workflows/workflows/rheo/scripts/. /mnt/efs/workflows/rheo/scripts/
+      - cp -r "$CODEBUILD_SRC_DIR/workflows/simulation/rl/rlinf_ext/config/." /mnt/efs/workflows/rheo/scripts/simulation/rl/rlinf_ext/config/
       - echo "Staging RLinf..."
       - mkdir -p /mnt/efs/third_party
       - rm -rf /mnt/efs/third_party/RLinf
