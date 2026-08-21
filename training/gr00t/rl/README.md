@@ -1,15 +1,15 @@
 # GR00T RL Post-Training on AWS
 
-Reinforcement learning post-training for NVIDIA GR00T N1.5 on the Assemble Trocar surgical task using PPO (via RLinf) with two compute backend options.
+Reinforcement learning post-training for NVIDIA GR00T N1.5 on the Assemble Trocar surgical task using PPO (via RLinf). **EKS + KubeRay is the recommended, validated backend for real runs**; AWS Batch MNP is a simpler secondary option for quick experiments.
 
 ## Compute Backends
 
 | Backend | Command | Instances | Best For |
 |---------|---------|-----------|----------|
-| **AWS Batch MNP** (homogeneous) | `--context compute_backend=batch-mnp` | 2× g6e.12xlarge (4× L40S each) | Simple setup, lower cost (~$16/hr) |
-| **EKS + KubeRay** (heterogeneous) | `--context compute_backend=eks` | 1× g6e.48xlarge + 4× g6e.4xlarge (configurable) | Better GPU utilization, no RAM OOM |
+| **EKS + KubeRay** (heterogeneous) — *recommended* | `--context compute_backend=eks` | 1× g6e.48xlarge (8× L40S) + 4× g6e.4xlarge (1× L40S each), configurable | Real runs: better GPU utilization, no RAM OOM |
+| **AWS Batch MNP** (homogeneous) | `--context compute_backend=batch-mnp` | 2× g6e.12xlarge (4× L40S each) | Simple setup, lower cost (~$16/hr) — quick experiments only |
 
-Both backends are validated end-to-end: 2 PPO iterations + checkpoint saved.
+**EKS + KubeRay is validated end-to-end: 8 clean PPO iterations across ~37h unattended, with checkpoints saved.** The Batch MNP path RAM-OOMs after ~2 PPO iterations (the head node exhausts system RAM), so use EKS for any real run and reserve Batch for short smoke tests.
 
 ## Quick Start
 
@@ -25,26 +25,29 @@ Both backends are validated end-to-end: 2 PPO iterations + checkpoint saved.
 ```bash
 cd training/gr00t/rl/infra
 
-# Option A: Batch MNP (homogeneous, simpler)
-AWS_DEFAULT_REGION=us-east-2 cdk deploy --context compute_backend=batch-mnp
-
-# Option B: EKS + KubeRay (heterogeneous, more scalable)
-AWS_DEFAULT_REGION=us-east-2 CDK_DEFAULT_REGION=us-east-2 cdk deploy \
+# Option A: EKS + KubeRay (recommended, validated) — FSx-Lustre backed by S3
+AWS_REGION=<region> AWS_DEFAULT_REGION=<region> CDK_DEFAULT_REGION=<region> cdk deploy \
   --context compute_backend=eks \
   --context vpc_id=<your-vpc-id> \
-  --context efs_id=<your-efs-id> \
-  --context efs_sg_id=<efs-mount-target-sg> \
-  --context image_uri=<ecr-image-uri> \
+  --context s3_data_bucket=<your-s3-bucket> \
+  --context image_uri=<your-ecr-image-uri> \
   --context learner_instance_type=g6e.48xlarge \
   --context rollout_instance_type=g6e.4xlarge
+
+# Option B: Batch MNP (homogeneous, simpler — quick experiments only)
+AWS_REGION=<region> AWS_DEFAULT_REGION=<region> cdk deploy --context compute_backend=batch-mnp
 ```
+
+The EKS backend takes `vpc_id`, `s3_data_bucket`, and `image_uri` (required), plus optional
+`learner_instance_type` / `rollout_instance_type`. It does **not** use EFS — storage is FSx for
+Lustre backed by S3 (see Architecture). This matches Step 2 of the `deploy-eks-training` skill.
 
 ### Stage Training Data (EFS)
 
 After deploying, trigger the CodeBuild project to stage code + model on EFS:
 
 ```bash
-aws codebuild start-build --project-name GR00T-RL-Stage-EFS --region us-east-2
+aws codebuild start-build --project-name GR00T-RL-Stage-EFS --region <region>
 ```
 
 This stages:
@@ -73,19 +76,8 @@ aws codebuild start-build --project-name GR00T-RL-Stage-S3 --region <region>
 Because staging auto-runs on deploy and FSx imports lazily via the DRA, no manual step is
 required for a first deploy.
 
-Under the hood CodeBuild runs `docker/buildspec-stage-s3.yml` → `infra/stage-s3-eks.sh
---execute --yes`. You can also run that script locally for dev/inspection — it is fail-closed
-and dry-run by default (every `aws s3 sync` runs with `--dryrun` until you pass `--execute`):
-
-```bash
-cd training/gr00t/rl/infra
-export S3_DATA_BUCKET=<your-s3-bucket> AWS_REGION=<region>   # same region as the bucket + FSx
-
-# Dry-run (safe): clones/patches/downloads locally, prints what WOULD upload, writes $0 to S3
-./stage-s3-eks.sh
-# Real (writes to S3): add --execute (then type 'stage-s3-eks' to confirm)
-./stage-s3-eks.sh --execute
-```
+Under the hood CodeBuild runs `docker/buildspec-stage-s3.yml` → `infra/stage-s3-eks.sh` (that
+script is committed here for the curious / local dev; you never need to run it by hand).
 
 You may deploy to any region with p5/p5e + g6e capacity; keep S3 + ECR + VPC + FSx all in that
 ONE region (the FSx DRA requires same-region S3) and probe capacity first with `infra/capacity-probe.sh`.
@@ -98,13 +90,13 @@ aws batch submit-job \
   --job-name gr00t-rl-training \
   --job-queue GR00T-RL-JobQueue \
   --job-definition <job-definition-arn> \
-  --region us-east-2
+  --region <region>
 ```
 
 **EKS:** Training starts automatically when the RayCluster pods are created by CDK deploy. Monitor with:
 ```bash
 # Use the role ARN from the KubeconfigCommand stack output
-aws eks update-kubeconfig --name gr00t-rl-eks --region us-east-2 \
+aws eks update-kubeconfig --name gr00t-rl-eks --region <region> \
   --role-arn arn:aws:iam::<account>:role/gr00t-rl-eks-admin-<region>
 kubectl get pods -n training
 kubectl logs -n training -l ray.io/node-type=head -f
@@ -121,18 +113,19 @@ aws ssm send-command --instance-ids <instance-id> \
 # GPU utilization (EKS — via kubectl)
 kubectl exec -n training <head-pod> -- nvidia-smi
 
-# TensorBoard (results on EFS at /mnt/efs/rl-training/results/)
-tensorboard --logdir /mnt/efs/rl-training/results/
+# TensorBoard (EKS: results on FSx at /mnt/fsx/rl-training/results/, auto-exported to S3 via the DRA)
+tensorboard --logdir /mnt/fsx/rl-training/results/
+# (Batch MNP path uses /mnt/efs/rl-training/results/ instead)
 ```
 
 ### Teardown
 
 ```bash
 # Batch MNP
-AWS_DEFAULT_REGION=us-east-2 cdk destroy --force
+AWS_DEFAULT_REGION=<region> cdk destroy --force
 
 # EKS (use direct API if CDK hangs on custom resources)
-aws eks delete-cluster --name gr00t-rl-eks --region us-east-2
+aws eks delete-cluster --name gr00t-rl-eks --region <region>
 ```
 
 ## Modes
@@ -147,7 +140,7 @@ The EKS + KubeRay backend supports two runtime modes via a `mode` CDK context pa
 
 ```bash
 cd training/gr00t/rl/infra
-AWS_DEFAULT_REGION=us-east-2 cdk deploy GR00TRLEKSStack \
+AWS_DEFAULT_REGION=<region> cdk deploy GR00TRLEKSStack \
   --context compute_backend=eks \
   --context vpc_id=<your-vpc-id> \
   --context s3_data_bucket=<your-s3-bucket> \
@@ -164,7 +157,7 @@ AWS_DEFAULT_REGION=us-east-2 cdk deploy GR00TRLEKSStack \
 - **Invocation (smoke — matches the shipped smoke defaults):**
 
 ```bash
-AWS_DEFAULT_REGION=us-east-2 cdk deploy GR00TRLEKSStack \
+AWS_DEFAULT_REGION=<region> cdk deploy GR00TRLEKSStack \
   --context compute_backend=eks \
   --context vpc_id=<your-vpc-id> \
   --context s3_data_bucket=<your-s3-bucket> \
@@ -176,7 +169,7 @@ AWS_DEFAULT_REGION=us-east-2 cdk deploy GR00TRLEKSStack \
 - **Invocation (benchmark eval at `total_num_envs=64`):**
 
 ```bash
-AWS_DEFAULT_REGION=us-east-2 cdk deploy GR00TRLEKSStack \
+AWS_DEFAULT_REGION=<region> cdk deploy GR00TRLEKSStack \
   --context compute_backend=eks \
   --context vpc_id=<your-vpc-id> \
   --context s3_data_bucket=<your-s3-bucket> \
@@ -221,9 +214,9 @@ kubectl logs -n training -l ray.io/node-type=head | grep -A2 'success_once'
 
 ```bash
 cd training/gr00t/rl/infra
-export AWS_REGION=us-east-2 AWS_DEFAULT_REGION=us-east-2 CDK_DEFAULT_REGION=us-east-2 \
+export AWS_REGION=<region> AWS_DEFAULT_REGION=<region> CDK_DEFAULT_REGION=<region> \
        CDK_DEFAULT_ACCOUNT=<your-account> VPC_ID=<your-vpc-id> S3_DATA_BUCKET=<your-s3-bucket> \
-       IMAGE_URI=<your-account>.dkr.ecr.us-east-2.amazonaws.com/<your-repo>:<tag>
+       IMAGE_URI=<your-account>.dkr.ecr.<region>.amazonaws.com/<your-repo>:<tag>
 
 # Dry-run (safe): prints the full plan, spends $0
 ./eval-checkpoint.sh --backend eks \
@@ -270,7 +263,8 @@ EKS Cluster (gr00t-rl-eks)
     ├── Ray Workers
     └── Isaac Sim EnvWorker + RolloutWorker (32 envs each)
 
-Storage: EFS via CSI driver at /mnt/efs
+Storage: FSx for Lustre (PERSISTENT_2) via the FSx CSI driver at /mnt/fsx,
+         backed by S3 through a Data Repository Association (DRA)
 Operators: KubeRay, NVIDIA device plugin
 ```
 
@@ -283,8 +277,8 @@ Operators: KubeRay, NVIDIA device plugin
 | Algorithm | PPO (Proximal Policy Optimization) |
 | Model | GR00T N1.5 (750M params: 550M DiT + 201M SelfAttention) |
 | FSDP | Fully Sharded Data Parallel across actor GPUs |
-| micro_batch_size | 128 (configurable via `MICRO_BATCH_SIZE` env var) |
-| gradient_checkpointing | True (must stay True with batch size 128) |
+| micro_batch_size | 64 on L40S-class hardware (L40S-safe); 128 only on H100/p5 (80 GB VRAM). Configurable via `MICRO_BATCH_SIZE` env var |
+| gradient_checkpointing | True (must stay True at these batch sizes) |
 | Rollout epochs | 8 per iteration |
 | Update epochs | 4 per iteration |
 | Save interval | Every 2 iterations |
@@ -292,10 +286,12 @@ Operators: KubeRay, NVIDIA device plugin
 
 ## Training Outputs
 
-Results are saved to EFS:
+On the EKS path, results are saved to FSx for Lustre at `/mnt/fsx/rl-training/results/...`
+(auto-exported to S3 via the DRA). (On the Batch MNP path they live on EFS at
+`/mnt/efs/rl-training/results/...` instead.)
 
 ```
-/mnt/efs/rl-training/results/<config_name>/<timestamp>/
+/mnt/fsx/rl-training/results/<config_name>/<timestamp>/
 ├── tensorboard/events.out.tfevents.*   # Training metrics
 └── gr00t_assemble_trocar/
     └── checkpoints/global_step_N/
@@ -321,13 +317,20 @@ training/gr00t/rl/
 │   ├── Dockerfile.unified       # Container image (Isaac Sim + PyTorch + deps)
 │   ├── entrypoint.sh            # Batch MNP entrypoint
 │   ├── entrypoint-eks.sh        # EKS/KubeRay entrypoint
-│   ├── buildspec-stage-efs.yml  # CodeBuild: stage code + model to EFS
+│   ├── buildspec-stage-efs.yml  # CodeBuild: stage code + model to EFS (Batch)
+│   ├── buildspec-stage-s3.yml   # CodeBuild: stage code + model to S3 (EKS/FSx)
 │   └── requirements-unified.txt # Python dependencies
 ├── infra/
 │   ├── app.py                   # CDK app (routes compute_backend)
 │   ├── mnp_batch_stack.py       # Batch MNP CDK stack
 │   ├── eks_kuberay_stack.py     # EKS + KubeRay CDK stack
+│   ├── stage-s3-eks.sh          # Staging script CodeBuild runs (EKS → S3/FSx)
+│   ├── eval-checkpoint.sh       # One-command multi-stage eval sweep (EKS)
+│   ├── capacity-probe.sh        # Probe GPU capacity in a subnet before deploy
+│   ├── patch-success-stage.sh   # Per-stage success_stage patch (eval sweep helper)
 │   └── requirements.txt         # CDK Python dependencies
+├── patches/
+│   └── RLinf-649e7579-broadcast-raise.patch  # RLinf _broadcast re-raise (applied at stage time)
 ├── scripts/
 │   └── submit_training.sh       # Job submission helper
 └── workflows/
@@ -345,6 +348,7 @@ training/gr00t/rl/
 | FSDP NCCL deadlock | cpu_offload enabled | Never set cpu_offload=True |
 | torch.compile hangs forever | Incompatible with Isaac Sim multi-process | TORCHDYNAMO_DISABLE=1 |
 | Ray kills workers (Batch) | System RAM >95% after 2 iterations | Use EKS backend (768 GB RAM) or set RAY_memory_usage_threshold=0.99 |
-| EFS mount timeout (EKS) | Security group misconfigured | efs_sg_id must be the mount target SG |
+| Pods can't find `/mnt/fsx/third_party` on first deploy (EKS) | Staging (CodeBuild) still running — `cdk deploy` returns before the ~15-20 min `GR00T-RL-Stage-S3` build finishes; FSx imports lazily via the DRA | Wait for staging to converge and confirm the marker: `aws s3 ls s3://<your-s3-bucket>/_STAGING_COMPLETE` (KubeRay self-heals the head until data lands) |
+| Region mismatch / CDK lookup uses wrong region (EKS) | Only a partial region env var set | Set `AWS_REGION` (and `CDK_DEFAULT_REGION`/`AWS_DEFAULT_REGION`) explicitly; keep S3 + ECR + VPC + FSx in the SAME region (the FSx DRA requires same-region S3) |
 | Pods Pending (EKS) | Insufficient GPU quota or node not Ready | Check `kubectl describe node` and service quotas |
 | `ray: command not found` (EKS) | Ray binary not on PATH | PATH env var includes /isaac-sim/kit/python/bin |

@@ -5,7 +5,7 @@ Deploys an EKS cluster with:
   - Rollout node group: Nx g6e.4xlarge (1x L40S each) for Isaac Sim rollout workers
   - KubeRay operator (Helm chart v1.1.0) managing RayCluster lifecycle
   - NVIDIA device plugin (Helm chart) exposing nvidia.com/gpu resources
-  - FSx for Lustre (SCRATCH_2) backed by S3 via Data Repository Association
+  - FSx for Lustre (PERSISTENT_2) backed by S3 via Data Repository Association
   - RayCluster CR with heterogeneous head (8 GPU) + workers (1 GPU each)
 
 Deploy:
