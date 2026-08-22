@@ -32,6 +32,7 @@ from aws_cdk import (
     aws_fsx as fsx,
     aws_s3 as s3,
     aws_iam as iam,
+    aws_logs as logs,
 )
 from aws_cdk.lambda_layer_kubectl_v31 import KubectlV31Layer
 from constructs import Construct
@@ -73,6 +74,7 @@ class EKSKubeRayStack(Stack):
         rollout_subnet_ids: str = None,
         eval_learner_subnet_ids: str = None,
         fsx_subnet_id: str = None,
+        enable_cloudwatch_logs: bool = True,
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -366,6 +368,57 @@ class EKSKubeRayStack(Stack):
             labels={"node-role": "rollout"},
             subnets=ec2.SubnetSelection(subnets=rollout_subnets),
         )
+        # endregion
+
+        # ==============================================================
+        # region 5.5. CloudWatch Container Insights — durable pod/application logs
+        # ==============================================================
+        # On by default; disable with --context enable_cloudwatch_logs=false. Installs the
+        # amazon-cloudwatch-observability EKS add-on (CloudWatch agent + Fluent Bit), which
+        # ships ALL container stdout/stderr to CloudWatch Logs at
+        # /aws/containerinsights/<cluster>/application (+ /host, /dataplane) and enables
+        # Container Insights metrics. AWS's recommended EKS pod-logging path (control-plane
+        # logging captures only api/audit/scheduler, NOT pod stdout, so it would miss the
+        # training/eval logs).
+        #
+        # Fluent Bit creates those log groups at RUNTIME (not via CloudFormation), so they
+        # PERSIST after `cdk destroy` — the training/eval logs (incl. eval/success_once)
+        # survive teardown for post-hoc review, which raw `kubectl logs` do not. LogRetention
+        # bounds them to 30 days WITHOUT CDK owning the group (create-if-absent + set-retention
+        # via a custom resource; no re-deploy collision, not deleted on teardown). The agent
+        # authenticates via the node instance role (CloudWatchAgentServerPolicy below) — the
+        # simplest of the two documented auth options (vs IRSA).
+        if enable_cloudwatch_logs:
+            _cw_node_groups = [eval_learner_ng, rollout_ng]
+            if not is_eval:
+                _cw_node_groups.append(learner_ng)  # train mode always creates it
+            _cw_policy = iam.ManagedPolicy.from_aws_managed_policy_name(
+                "CloudWatchAgentServerPolicy"
+            )
+            for _ng in _cw_node_groups:
+                _ng.role.add_managed_policy(_cw_policy)
+
+            cw_addon = eks.CfnAddon(
+                self,
+                "CloudWatchObservabilityAddon",
+                addon_name="amazon-cloudwatch-observability",
+                cluster_name=cluster.cluster_name,
+                resolve_conflicts="OVERWRITE",
+            )
+            # The agent/Fluent Bit DaemonSet needs nodes present to schedule onto.
+            cw_addon.node.add_dependency(rollout_ng)
+            cw_addon.node.add_dependency(eval_learner_ng)
+
+            # Bound retention on the (runtime-created, non-CFN) Container Insights log
+            # groups. LogRetention creates the group if absent + sets retention via a
+            # custom resource; it does NOT delete the group on teardown, so logs persist.
+            for _suffix in ("application", "host", "dataplane"):
+                logs.LogRetention(
+                    self,
+                    f"CILogRetention{_suffix.capitalize()}",
+                    log_group_name=f"/aws/containerinsights/gr00t-rl-eks/{_suffix}",
+                    retention=logs.RetentionDays.ONE_MONTH,
+                )
         # endregion
 
         # ==============================================================

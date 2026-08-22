@@ -175,8 +175,16 @@ kubectl exec <head-pod> -n training -- ls /mnt/fsx/third_party/
 ### 6. Monitor Training
 
 ```bash
-# Head pod logs (training progress)
+# Head pod logs (training progress) — live, but EPHEMERAL (gone once the pod/cluster is torn down)
 kubectl logs -n training <head-pod> -f
+
+# PERSISTENT logs in CloudWatch (on by default via the amazon-cloudwatch-observability add-on;
+# survives teardown, unlike kubectl logs). Log group /aws/containerinsights/gr00t-rl-eks/application:
+aws logs tail /aws/containerinsights/gr00t-rl-eks/application --region <region> --follow
+aws logs tail /aws/containerinsights/gr00t-rl-eks/application --region <region> \
+  --filter-pattern "success_once" --since 2h        # just the eval metric
+# Disable the add-on at deploy with --context enable_cloudwatch_logs=false (30-day retention when on).
+# This is EKS POD logging — separate from control-plane logging (which wouldn't capture pod stdout).
 
 # Rollout progress (filter Gloo noise)
 kubectl logs <head-pod> -n training | grep "Generating Rollout"

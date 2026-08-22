@@ -175,7 +175,23 @@ kubectl exec -n training <head-pod> -- nvidia-smi
 # TensorBoard (EKS: results on FSx at /mnt/fsx/rl-training/results/, auto-exported to S3 via the DRA)
 tensorboard --logdir /mnt/fsx/rl-training/results/
 # (Batch MNP path uses /mnt/efs/rl-training/results/ instead)
+
+# Centralized, PERSISTENT pod logs in CloudWatch (EKS — on by default).
+# The amazon-cloudwatch-observability add-on ships all container stdout/stderr here; the
+# log group survives cluster teardown (unlike `kubectl logs`), so you can review a run after.
+aws logs tail /aws/containerinsights/gr00t-rl-eks/application --region <region> --follow
+# Filter to just the Ray head (training/eval progress, incl. eval/success_once):
+aws logs tail /aws/containerinsights/gr00t-rl-eks/application --region <region> \
+  --filter-pattern "success_once" --since 2h
 ```
+
+> **Centralized logging (EKS):** the CloudWatch Observability add-on is installed **by
+> default** and streams pod logs to CloudWatch Container Insights (log group
+> `/aws/containerinsights/gr00t-rl-eks/application`, 30-day retention). These persist after
+> `cdk destroy`. It adds a small per-node agent + CloudWatch ingest/storage cost — disable with
+> `--context enable_cloudwatch_logs=false` if you'd rather rely on `kubectl logs` only. (This
+> is EKS **pod** logging; it is separate from EKS *control-plane* logging, which we don't enable
+> as it wouldn't capture the training/eval stdout.)
 
 ### Teardown
 

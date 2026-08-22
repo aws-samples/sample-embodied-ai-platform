@@ -200,6 +200,12 @@ elif compute_backend == "eks":
         rollout_subnet_ids=app.node.try_get_context("rollout_subnet_ids"),
         eval_learner_subnet_ids=app.node.try_get_context("eval_learner_subnet_ids"),
         fsx_subnet_id=app.node.try_get_context("fsx_subnet_id"),
+        # Container Insights pod logs to CloudWatch: ON by default; disable with
+        # --context enable_cloudwatch_logs=false. Any of false/0/no disables.
+        enable_cloudwatch_logs=(
+            str(app.node.try_get_context("enable_cloudwatch_logs")).lower()
+            not in ("false", "0", "no")
+        ),
         env=env,
     )
 else:
