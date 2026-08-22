@@ -18,7 +18,9 @@ Reinforcement learning post-training for NVIDIA GR00T N1.5 on the Assemble Troca
 Starting from a fresh AWS account, in your chosen region (keep S3 + ECR + VPC + FSx all in **one**
 region — the FSx DRA requires same-region S3):
 
-- **CLIs:** `aws` (v2), `cdk` (`npm install -g aws-cdk`), `docker` (only for the manual self-build),
+- **CLIs:** `aws` (v2), `cdk` (**`npm install -g aws-cdk@latest`** — a stale global CDK CLI can be
+  older than the `aws-cdk-lib` that `pip` installs and fail `cdk synth` with a *"Cloud assembly schema
+  version mismatch"*; keep the CLI current), `docker` (only for the manual self-build),
   and `jq` (`prepare-artifacts.sh` parses build JSON with it). Python 3.10+ with the CDK deps:
   `pip install -r infra/requirements.txt`.
 - **GPU quota:** enough **G-instance vCPUs** for your fleet (e.g. a benchmark eval on 8× g6e.8xlarge
@@ -481,5 +483,6 @@ training/gr00t/rl/
 | Ray kills workers (Batch) | System RAM >95% after 2 iterations | Use EKS backend (768 GB RAM) or set RAY_memory_usage_threshold=0.99 |
 | Pods can't find `/mnt/fsx/third_party` on first deploy (EKS) | Data not staged yet — `prepare-artifacts.sh` gates the deploy on the `GR00T-RL-Pipeline` stage-data arm (~15-20 min), so this only bites if you bypassed the wrapper; FSx imports lazily via the DRA | Confirm the marker: `aws s3 ls s3://<your-s3-bucket>/_STAGING_COMPLETE` (KubeRay self-heals the head until data lands) |
 | Region mismatch / CDK lookup uses wrong region (EKS) | Only a partial region env var set | Set `AWS_REGION` (and `CDK_DEFAULT_REGION`/`AWS_DEFAULT_REGION`) explicitly; keep S3 + ECR + VPC + FSx in the SAME region (the FSx DRA requires same-region S3) |
+| `cdk synth`/`deploy` fails: *"Cloud assembly schema version mismatch … You need at least CLI version X"* | The global `cdk` CLI is older than the `aws-cdk-lib` `pip` installed (unbounded `>=`, so pip pulls the newest lib) | Upgrade the CLI: `npm install -g aws-cdk@latest` (AWS ships the CLI and library together, so the latest CLI reads the latest lib). Not a code issue — the stacks synth fine once the versions are compatible |
 | Pods Pending (EKS) | Insufficient GPU quota or node not Ready | Check `kubectl describe node` and service quotas |
 | `ray: command not found` (EKS) | Ray binary not on PATH | PATH env var includes /isaac-sim/kit/python/bin |
