@@ -322,7 +322,7 @@ deletion of `eval_embodied_agent.py`. The `_broadcast` deadlock (below) is fixed
 | Issue | Fix |
 |-------|-----|
 | Head crashes on first boot (DRA lazy-load) | Entrypoint waits for config file; head auto-restarts and works on 2nd boot |
-| Workers stuck after head restart | Delete workers: `kubectl delete pods -n training -l ray-role=worker` |
+| Workers stuck after head restart (orphaned on old Ray GCS id) | **Fixed in the manifest**: the worker container now runs KubeRay's `ray start` **with `--block`** (`eval $KUBERAY_GEN_RAY_START_CMD`), so it self-heals — when the head restarts and re-keys the GCS, the worker's `ray start` exits and KubeRay recreates it against the current head. (Previously the manifest stripped `--block` + `sleep infinity`, which orphaned the worker and required a manual `kubectl delete pods -n training -l ray.io/node-type=worker`. That manual recycle is still a valid fallback if you see `1/N nodes connected` persist.) |
 | CUDA OOM with batch 128 on L40S | Use MICRO_BATCH_SIZE=64 + GRADIENT_CHECKPOINTING=True |
 | `Eagle2_5_VLImageProcessorFast` not found | Transient on first boot; resolves on restart |
 | P5/P5e capacity unavailable | Fall back to g6e instances |

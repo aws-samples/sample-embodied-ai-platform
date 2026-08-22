@@ -752,7 +752,17 @@ class EKSKubeRayStack(Stack):
                                                 "--",
                                             ],
                                             "args": [
-                                                "ulimit -n 65536; RAY_START_CMD=$(echo $KUBERAY_GEN_RAY_START_CMD | sed 's/--block//g'); eval $RAY_START_CMD; sleep infinity"
+                                                # Run KubeRay's generated ray-start command WITH its --block
+                                                # (do NOT strip --block + sleep infinity like the head does).
+                                                # --block keeps `ray start` in the foreground so it EXITS when
+                                                # the head restarts and re-keys the Ray GCS; KubeRay then
+                                                # recreates this worker and it reconnects to the CURRENT head.
+                                                # Stripping --block + `sleep infinity` defeats that self-healing:
+                                                # the worker's Ray gets orphaned on the old GCS id while the
+                                                # container sleeps on, requiring a manual `kubectl delete pod`
+                                                # (the head then loops on its "waiting for N nodes" timeout).
+                                                # The worker has no post-ray-start work, so just block on it.
+                                                "ulimit -n 65536; eval $KUBERAY_GEN_RAY_START_CMD"
                                             ],
                                             "resources": {
                                                 "requests": {
