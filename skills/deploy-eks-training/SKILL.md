@@ -300,7 +300,7 @@ Training parameters are **env-var configurable** on the head pod:
 
 | Env Variable | Default | Notes |
 |-------------|---------|-------|
-| MICRO_BATCH_SIZE | 64 | L40S-safe. Use 128 only on H100 (80GB VRAM). |
+| MICRO_BATCH_SIZE | 32 | L40S-safe value (mbs 64 AND 128 both OOM the 44GB L40S — 2026-06-15 benchmark). 128 (no grad-checkpoint) needs H100/p5 80GB. Sync entrypoint default is already 32. |
 | GRADIENT_CHECKPOINTING | True | Must be True with batch 64+ on L40S. |
 | ENVS_PER_WORKER | 32 | Environments per rollout worker pod |
 | MAX_EPOCHS | 1000 | Set to 5 for quick validation |
@@ -331,7 +331,7 @@ deletion of `eval_embodied_agent.py`. The `_broadcast` deadlock (below) is fixed
 |-------|-----|
 | Head crashes on first boot (DRA lazy-load) | Entrypoint waits for config file; head auto-restarts and works on 2nd boot |
 | Workers stuck after head restart (orphaned on old Ray GCS id) | **Fixed in the manifest**: the worker container now runs KubeRay's `ray start` **with `--block`** (`eval $KUBERAY_GEN_RAY_START_CMD`), so it self-heals — when the head restarts and re-keys the GCS, the worker's `ray start` exits and KubeRay recreates it against the current head. (Previously the manifest stripped `--block` + `sleep infinity`, which orphaned the worker and required a manual `kubectl delete pods -n training -l ray.io/node-type=worker`. That manual recycle is still a valid fallback if you see `1/N nodes connected` persist.) |
-| CUDA OOM with batch 128 on L40S | Use MICRO_BATCH_SIZE=64 + GRADIENT_CHECKPOINTING=True |
+| CUDA OOM (learner) with batch 64 or 128 on L40S | Use MICRO_BATCH_SIZE=32 + GRADIENT_CHECKPOINTING=True (only 32 fits the 44GB L40S; 64/128 need H100/p5) |
 | `Eagle2_5_VLImageProcessorFast` not found | Transient on first boot; resolves on restart |
 | P5/P5e capacity unavailable | Fall back to g6e instances |
 | S3 bucket must be same region as FSx | DRA requires same-region S3 |

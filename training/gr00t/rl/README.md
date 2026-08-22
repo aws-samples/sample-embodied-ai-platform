@@ -400,7 +400,7 @@ Operators: KubeRay, NVIDIA device plugin
 | Algorithm | PPO (Proximal Policy Optimization) |
 | Model | GR00T N1.5 (750M params: 550M DiT + 201M SelfAttention) |
 | FSDP | Fully Sharded Data Parallel across actor GPUs |
-| micro_batch_size | 64 on L40S-class hardware (L40S-safe); 128 only on H100/p5 (80 GB VRAM). Configurable via `MICRO_BATCH_SIZE` env var |
+| micro_batch_size | **32 on L40S-class hardware (L40S-safe — mbs 64 AND 128 both OOM the 44 GB L40S, per the 2026-06-15 benchmark)**; 128 (no gradient checkpointing) only on H100/p5 (80 GB VRAM). Configurable via `MICRO_BATCH_SIZE` env var (entrypoint sync default is already 32) |
 | gradient_checkpointing | True (must stay True at these batch sizes) |
 | Rollout epochs | 8 per iteration |
 | Update epochs | 4 per iteration |
