@@ -179,12 +179,41 @@ tensorboard --logdir /mnt/fsx/rl-training/results/
 
 ### Teardown
 
+**EKS (routine — stops all GPU spend):**
 ```bash
-# Batch MNP
-AWS_DEFAULT_REGION=<region> cdk destroy --force
+export AWS_REGION=<region> AWS_DEFAULT_REGION=<region> CDK_DEFAULT_REGION=<region>
 
-# EKS (use direct API if CDK hangs on custom resources)
+# 1. Delete the RayCluster first so KubeRay drains pods before the cluster goes
+#    (avoids a custom-resource deletion hang):
+kubectl delete raycluster gr00t-rl-training -n training --ignore-not-found
+
+# 2. Destroy the consumer stack (tears down node groups → terminates all g6e,
+#    plus FSx, the DRA, and the EKS cluster). This is the correct path — do NOT
+#    `aws eks delete-cluster` directly, which orphans the CloudFormation stack.
+cdk destroy GR00TRLEKSStack --context compute_backend=eks \
+  --context image_uri=<the digest you deployed with> --force
+
+# 3. If CDK hangs on the kubectl custom resources, force via the API, then retry:
 aws eks delete-cluster --name gr00t-rl-eks --region <region>
+aws cloudformation delete-stack --stack-name GR00TRLEKSStack --region <region>
+
+# 4. VERIFY zero GPU spend (should print nothing):
+aws ec2 describe-instances --region <region> \
+  --filters "Name=instance-state-name,Values=running,pending" \
+  --query 'Reservations[].Instances[?starts_with(InstanceType,`g6e`)].[InstanceId,InstanceType]' \
+  --output text
+```
+
+**Batch MNP:**
+```bash
+AWS_DEFAULT_REGION=<region> cdk destroy GR00TRLBatchStack --force
+```
+
+**Full cleanup (only if you want to remove EVERYTHING, including the retained artifacts):**
+```bash
+cdk destroy GR00TRLArtifactsStack --context compute_backend=eks --force
+aws ecr delete-repository --repository-name gr00t-rl-unified --force --region <region>
+aws s3 rb s3://<your-s3-bucket> --force --region <region>   # deletes all staged data
 ```
 
 > **Do NOT destroy `GR00TRLArtifactsStack` as part of routine teardown.** It is designed to persist
