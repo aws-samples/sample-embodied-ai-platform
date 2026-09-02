@@ -23,9 +23,10 @@ Reinforcement learning post-training for NVIDIA GR00T N1.5 on the Assemble Troca
 ### Prerequisites
 
 This assumes an **existing VPC with NAT egress** (see the VPC bullet below) and the **listed GPU
-quotas** already granted — it is not a from-scratch account bootstrap (creating the VPC/subnets/NAT
-and the IAM permissions to deploy CDK is out of scope here). Keep S3 + ECR + VPC + FSx all in **one**
-region — the FSx DRA requires same-region S3:
+quotas** already granted. If you are on a **fresh account with no VPC**, there is an opt-in bootstrap
+that creates an EKS-ready VPC for you (see *"Option: create the VPC (fresh account)"* below); IAM
+permissions to deploy CDK remain your responsibility (out of scope here). Keep S3 + ECR + VPC + FSx
+all in **one** region — the FSx DRA requires same-region S3:
 
 - **CLIs:** `aws` (v2), `cdk` (**`npm install -g aws-cdk@latest`** — a stale global CDK CLI can be
   older than the `aws-cdk-lib` that `pip` installs and fail `cdk synth` with a *"Cloud assembly schema
@@ -40,6 +41,22 @@ region — the FSx DRA requires same-region S3:
   (nodes must reach the EKS API, ECR, PyPI/GitHub, and the public Omniverse asset CDN — see the
   asset note below). Pick AZ(s) that actually have g6e capacity; **probe first** with
   `infra/capacity-probe.sh --subnet <subnet-id> --instance-type g6e.8xlarge --capacity <n>`.
+- **Option: create the VPC (fresh account).** If you have no VPC to point `vpc_id` at, deploy the
+  standalone **`GR00TRLNetworkStack`** once — it creates an EKS-ready VPC (≥2 AZs, private +
+  public subnets, NAT egress, the `kubernetes.io/role/*` subnet tags) and outputs its IDs:
+  ```bash
+  cdk deploy GR00TRLNetworkStack --context compute_backend=network \
+    --context s3_data_bucket=<your-s3-bucket>   # s3 arg only satisfies the app selector; no bucket is touched
+  # optional: --context vpc_cidr=10.73.0.0/16 (default)
+  ```
+  Read the stack outputs (`VpcId`, `PrivateSubnetIds`, and the per-AZ `PrivateSubnetId0/Az0`,
+  `PrivateSubnetId1/Az1`), then pass `--context vpc_id=<VpcId>` into the EKS deploy below (and, if
+  you want to pin capacity by AZ, feed a `PrivateSubnetIdN` to `fsx_subnet_id` /
+  `rollout_subnet_ids` / `eval_learner_subnet_ids`). Caveats: this stack **creates a NAT gateway —
+  a running hourly + data-processing charge** you opt into; and the VPC is created with
+  **`RemovalPolicy.RETAIN`**, so tearing down the EKS stack never deletes it — **delete the VPC by
+  hand** (or `cdk destroy GR00TRLNetworkStack`, then remove the retained VPC) when you are fully
+  done. `vpc_id` (bring your own VPC) remains the primary/enterprise path.
 - **S3 data bucket (same region):** `aws s3 mb s3://<your-bucket> --region <region>`. It's the
   DRA source FSx-Lustre lazily imports from; `stage-s3-eks.sh` populates it.
 - **CDK bootstrap (once per account/region):**

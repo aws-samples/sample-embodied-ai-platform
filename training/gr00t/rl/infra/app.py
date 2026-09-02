@@ -63,6 +63,7 @@ import aws_cdk as cdk
 from mnp_batch_stack import RLBatchMNPStack
 from eks_kuberay_stack import EKSKubeRayStack
 from artifacts_stack import GR00TRLArtifactsStack
+from network_stack import GR00TRLNetworkStack
 
 app = cdk.App()
 
@@ -125,7 +126,26 @@ if compute_backend == "eks":
         env=env,
     )
 
-if compute_backend in ("batch-mnp", "sagemaker"):
+# Opt-in cold-start network bootstrap (Phase 15). A SEPARATE, PERSISTENT stack that
+# creates an EKS-ready VPC (>=2 AZs, private+public subnets, NAT egress, EKS subnet
+# tags) and OUTPUTS its VpcId + subnet IDs. Deploy it ONCE on a fresh account with no
+# VPC, then pass --context vpc_id=<VpcId> into the normal EKS deploy. It is NOT the
+# default and does NOT touch the vpc_id path. Synthesizes on its own — needs neither
+# image_uri nor vpc_id. Gate: compute_backend=network OR create_network=true.
+_create_network = str(
+    app.node.try_get_context("create_network") or ""
+).lower() in ("1", "true", "yes")
+
+if compute_backend == "network" or _create_network:
+    stack = GR00TRLNetworkStack(
+        app,
+        "GR00TRLNetworkStack",
+        vpc_cidr=app.node.try_get_context("vpc_cidr") or "10.73.0.0/16",
+        max_azs=int(app.node.try_get_context("network_max_azs") or 2),
+        nat_gateways=int(app.node.try_get_context("network_nat_gateways") or 1),
+        env=env,
+    )
+elif compute_backend in ("batch-mnp", "sagemaker"):
     stack = RLBatchMNPStack(
         app,
         "GR00TRLBatchStack",
