@@ -65,6 +65,7 @@ class EKSKubeRayStack(Stack):
         model_path: str = None,
         val_check_interval: str = None,
         envs_per_worker: str = None,
+        max_epochs: str = None,
         eval_total_envs: str = None,
         eval_actor_gbs: str = None,
         task_description: str = None,
@@ -619,12 +620,16 @@ class EKSKubeRayStack(Stack):
             # lowering it shrinks the co-located rollout L40S GPU footprint (the
             # Eagle/Qwen3 lm_head logits AND the Isaac Sim allocation both scale
             # with envs/GPU; 32/GPU OOM'd a 46 GiB L40S — see Phase 12 RUN-LOG).
+            # When max_epochs is set, it bounds the run to N global_steps
+            # (overrides the entrypoint default of 1000 -> runner.max_epochs=N),
+            # giving a cost-bounded, deterministic stop for short/plumbing runs.
             # All unset => extra_env is empty and the train head env is
             # byte-identical to historical behavior.
             "extra_env": [
                 *([{"name": "MODEL_PATH", "value": model_path}] if model_path else []),
                 *([{"name": "VAL_CHECK_INTERVAL", "value": str(val_check_interval)}] if val_check_interval else []),
                 *([{"name": "ENVS_PER_WORKER", "value": str(envs_per_worker)}] if envs_per_worker else []),
+                *([{"name": "MAX_EPOCHS", "value": str(max_epochs)}] if max_epochs else []),
             ],
             "worker_replicas": num_rollout_workers,
         }

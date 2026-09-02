@@ -290,20 +290,22 @@ Storage: FSx for Lustre (PERSISTENT_2) ←→ S3 via DRA
 | Image pull (first time) | ~5-10 min |
 | Isaac Sim init + scene creation | ~5 min |
 | Rollout (8 epochs, 128 envs) | ~60 min |
-| Training step (4 update epochs, batch 64) | ~2.5-3 hrs |
+| Training step (4 update epochs, mbs 32) | ~2.5-3 hrs |
 | **Total per PPO iteration** | **~4 hrs** |
 | Checkpoint save | Every 2 iterations |
 
 ## Key Config
 
-Training parameters are **env-var configurable** on the head pod:
+Training parameters are head-pod env vars. The ones marked **`--context`** are exposed
+as CDK context params (set at deploy, e.g. `--context max_epochs=5`); the rest are the
+entrypoint's built-in defaults (change them by editing the entrypoint/manifest).
 
 | Env Variable | Default | Notes |
 |-------------|---------|-------|
 | MICRO_BATCH_SIZE | 32 | L40S-safe value (mbs 64 AND 128 both OOM the 44GB L40S — 2026-06-15 benchmark). 128 (no grad-checkpoint) needs H100/p5 80GB. Sync entrypoint default is already 32. |
 | GRADIENT_CHECKPOINTING | True | Must be True with batch 64+ on L40S. |
-| ENVS_PER_WORKER | 32 | Environments per rollout worker pod |
-| MAX_EPOCHS | 1000 | Set to 5 for quick validation |
+| ENVS_PER_WORKER | 32 | **`--context envs_per_worker`**. Environments per rollout worker pod (`total_num_envs = num_rollout_workers × this`). |
+| MAX_EPOCHS | 1000 | **`--context max_epochs`**. Bounds the run to N global_steps — set low (e.g. 2-5) for a cost-bounded plumbing/validation run. Pair with SAVE_INTERVAL so a short run still writes an eval-able checkpoint. |
 | SAVE_INTERVAL | 2 | Checkpoint every N iterations |
 | CONFIG_NAME | isaaclab_ppo_gr00t_assemble_trocar | Hydra config name |
 | MODEL_PATH | /mnt/fsx/models/GR00T-N1.5-RL-Rheo-AssembleTrocar | Pre-trained model path |

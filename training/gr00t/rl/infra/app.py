@@ -42,6 +42,7 @@ Context parameters:
   learner_instance_type - EC2 instance type for learner node group (default: g6e.48xlarge)
   rollout_instance_type - EC2 instance type for rollout node group (default: g6e.4xlarge)
   compute_backend       - "batch-mnp" (default), "sagemaker", or "eks"
+  max_epochs            - EKS train only. Bound the run to N global_steps (default: entrypoint's 1000). Pair with save_interval for a cost-bounded run that still writes an eval-able checkpoint.
   "mode"                - "train" (default) or "eval" — routes the EKS backend to training or standalone eval
   "eval_ckpt"           - Full path to actor checkpoint (.pt) for mode=eval; ignored for mode=train
   "model_path"          - Full FSx-visible path (mount root /mnt/fsx) to the model dir. When omitted, the entrypoint's default (RL model) is used. Enables SFT/RL model swap without editing the entrypoint.
@@ -191,6 +192,10 @@ elif compute_backend == "eks":
         # num_rollout_workers * 32). Lower it to shrink the co-located rollout
         # L40S GPU footprint (32/GPU OOMs the 46 GiB L40S at the Eagle lm_head).
         envs_per_worker=app.node.try_get_context("envs_per_worker"),
+        # None => entrypoint default MAX_EPOCHS=1000. Set to N to bound a train
+        # run to N global_steps (cost-bounded / deterministic stop) — pairs with
+        # save_interval so a short run still writes an eval-able checkpoint.
+        max_epochs=app.node.try_get_context("max_epochs"),
         eval_total_envs=app.node.try_get_context("eval_total_envs"),
         eval_actor_gbs=app.node.try_get_context("eval_actor_gbs"),
         task_description=app.node.try_get_context("task_description"),

@@ -272,6 +272,7 @@ AWS_DEFAULT_REGION=<region> cdk deploy GR00TRLEKSStack \
 ```
 
 - **Output:** checkpoints at `${LOG_DIR}/checkpoints/global_step_N/`, TensorBoard at `${LOG_DIR}/tensorboard/` under FSx.
+- **Cost-bounded / plumbing run:** add `--context max_epochs=N` to stop after N global_steps (default is the entrypoint's 1000). Because `save_interval=2` writes a checkpoint every 2 steps, e.g. `--context max_epochs=2` produces an eval-able `global_step_2/` checkpoint and stops — useful to validate the train path end-to-end before committing to a full run. Shrink `--context num_rollout_workers` / `--context envs_per_worker` to lower per-step cost (per-step time scales with `total_num_envs × rollout_epoch`).
 
 ### MODE=eval
 
