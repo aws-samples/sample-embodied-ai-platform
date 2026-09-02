@@ -45,18 +45,26 @@ all in **one** region — the FSx DRA requires same-region S3:
   standalone **`GR00TRLNetworkStack`** once — it creates an EKS-ready VPC (≥2 AZs, private +
   public subnets, NAT egress, the `kubernetes.io/role/*` subnet tags) and outputs its IDs:
   ```bash
-  cdk deploy GR00TRLNetworkStack --context compute_backend=network \
-    --context s3_data_bucket=<your-s3-bucket>   # s3 arg only satisfies the app selector; no bucket is touched
+  cdk deploy GR00TRLNetworkStack --context compute_backend=network
   # optional: --context vpc_cidr=10.73.0.0/16 (default)
+  #           --context network_azs=us-west-2a,us-west-2c   # pin specific AZs (see below)
+  #           --context network_nat_gateways=2              # one NAT per AZ (default 1)
   ```
-  Read the stack outputs (`VpcId`, `PrivateSubnetIds`, and the per-AZ `PrivateSubnetId0/Az0`,
+  No `s3_data_bucket` (or `image_uri`) is needed — this stack synthesizes standalone. Read the
+  stack outputs (`VpcId`, `PrivateSubnetIds`, and the per-AZ `PrivateSubnetId0/Az0`,
   `PrivateSubnetId1/Az1`), then pass `--context vpc_id=<VpcId>` into the EKS deploy below (and, if
   you want to pin capacity by AZ, feed a `PrivateSubnetIdN` to `fsx_subnet_id` /
-  `rollout_subnet_ids` / `eval_learner_subnet_ids`). Caveats: this stack **creates a NAT gateway —
-  a running hourly + data-processing charge** you opt into; and the VPC is created with
-  **`RemovalPolicy.RETAIN`**, so tearing down the EKS stack never deletes it — **delete the VPC by
-  hand** (or `cdk destroy GR00TRLNetworkStack`, then remove the retained VPC) when you are fully
-  done. `vpc_id` (bring your own VPC) remains the primary/enterprise path.
+  `rollout_subnet_ids` / `eval_learner_subnet_ids`). The default auto-picks the first 2 AZs; the
+  auto-pick can land on AZs that EKS forbids or where FSx-Lustre / g6e aren't available, so
+  `--context network_azs=<az>,<az>` lets you pin AZs with **EKS eligibility + FSx support + g6e
+  capacity** (probe first). Caveats: this stack **creates a NAT gateway — a running hourly +
+  data-processing charge** you opt into (default 1 NAT: both AZs egress through it, incurring
+  cross-AZ charges + a single-AZ egress dependency — set `network_nat_gateways=2` for one-NAT-per-AZ
+  resilience); and it sets **`termination_protection=True`**, so tearing down the EKS stack never
+  touches it (independent stacks). When fully done, disable protection
+  (`aws cloudformation update-termination-protection --stack-name GR00TRLNetworkStack
+  --no-enable-termination-protection`) then `cdk destroy GR00TRLNetworkStack` to remove the whole
+  topology cleanly. `vpc_id` (bring your own VPC) remains the primary/enterprise path.
 - **S3 data bucket (same region):** `aws s3 mb s3://<your-bucket> --region <region>`. It's the
   DRA source FSx-Lustre lazily imports from; `stage-s3-eks.sh` populates it.
 - **CDK bootstrap (once per account/region):**
@@ -542,6 +550,7 @@ training/gr00t/rl/
 │   ├── app.py                   # CDK app (routes compute_backend)
 │   ├── mnp_batch_stack.py       # Batch MNP CDK stack
 │   ├── eks_kuberay_stack.py     # EKS + KubeRay CDK stack
+│   ├── network_stack.py         # GR00TRLNetworkStack: optional cold-start EKS-ready VPC
 │   ├── artifacts_stack.py       # GR00TRLArtifactsStack: persistent ECR + GR00T-RL-Pipeline
 │   ├── prepare-artifacts.sh     # Gated build+stage wrapper (kicks pipeline, verifies, deploys)
 │   ├── stage-s3-eks.sh          # Staging engine the pipeline's stage-data arm runs (EKS → S3/FSx)

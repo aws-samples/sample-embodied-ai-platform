@@ -30,6 +30,13 @@ Deploy (EKS + KubeRay - eval of a base/SFT model on FSx):
     --context mode=eval \\
     --context model_path=/mnt/fsx/models/<your-model-dir>
 
+Deploy (cold-start network bootstrap — fresh account with no VPC):
+  cdk deploy GR00TRLNetworkStack --context compute_backend=network
+    # optional: --context vpc_cidr=10.73.0.0/16
+    #           --context network_azs=us-west-2a,us-west-2c
+    #           --context network_nat_gateways=2
+  # read the VpcId output, then deploy the EKS backend with --context vpc_id=<VpcId>
+
 Context parameters:
   vpc_id                - Existing VPC ID (creates new if omitted for batch-mnp)
   efs_id                - Existing EFS file system ID (batch-mnp/sagemaker only)
@@ -41,7 +48,16 @@ Context parameters:
   num_rollout_workers   - Number of rollout worker pods for eks (default: 4)
   learner_instance_type - EC2 instance type for learner node group (default: g6e.48xlarge)
   rollout_instance_type - EC2 instance type for rollout node group (default: g6e.8xlarge — the rollout worker pod requests 24 vCPU / 200 GiB, which does NOT fit g6e.4xlarge's 16 vCPU / 128 GiB)
-  compute_backend       - "batch-mnp" (default), "sagemaker", or "eks"
+  compute_backend       - "batch-mnp" (default), "sagemaker", "eks", or "network"
+  create_network        - Truthy (1/true/yes) to select the cold-start network bootstrap
+                          (equivalent to compute_backend=network). Mutually exclusive with an
+                          explicit non-network compute_backend. Deploys ONLY GR00TRLNetworkStack.
+  vpc_cidr              - CIDR for the bootstrap VPC (network only, default: 10.73.0.0/16)
+  network_azs           - Comma-separated AZ names to pin the bootstrap VPC to (network only,
+                          e.g. us-west-2a,us-west-2c). Unset => auto-pick the first 2 AZs.
+                          Pick AZs with EKS eligibility + FSx-Lustre support + g6e capacity.
+  network_nat_gateways  - NAT gateway count for the bootstrap VPC (network only, default: 1;
+                          set 2 for one-NAT-per-AZ resilience)
   max_epochs            - EKS train only. Bound the run to N global_steps (default: entrypoint's 1000). Pair with save_interval for a cost-bounded run that still writes an eval-able checkpoint.
   "mode"                - "train" (default) or "eval" — routes the EKS backend to training or standalone eval
   "eval_ckpt"           - Full path to actor checkpoint (.pt) for mode=eval; ignored for mode=train
@@ -109,7 +125,54 @@ env = cdk.Environment(
     region=_region,
 )
 
-compute_backend = app.node.try_get_context("compute_backend") or "batch-mnp"
+_raw_backend = app.node.try_get_context("compute_backend")
+compute_backend = _raw_backend or "batch-mnp"
+
+# ===================================================================================
+# NETWORK SELECTOR (Phase 15) — resolved FIRST, before ANY backend/artifacts routing.
+# ===================================================================================
+# Opt-in cold-start network bootstrap: a SEPARATE, PERSISTENT stack that creates an
+# EKS-ready VPC (>=2 AZs, private+public subnets, NAT egress, EKS subnet tags) and
+# OUTPUTS its VpcId + subnet IDs. Deploy it ONCE on a fresh account with no VPC, then
+# pass --context vpc_id=<VpcId> into the normal EKS deploy. It is NOT the default and
+# does NOT touch the vpc_id path. Synthesizes on its own — needs neither image_uri nor
+# vpc_id (and no s3_data_bucket). Gate: compute_backend=network OR create_network=true.
+#
+# This gate is EXCLUSIVE and resolved before the artifacts stack (below) and any
+# backend routing: when the network selector is on we synth ONLY GR00TRLNetworkStack
+# and stop, so the artifacts/EKS stacks are never instantiated alongside it.
+_create_network = str(
+    app.node.try_get_context("create_network") or ""
+).lower() in ("1", "true", "yes")
+
+if _create_network or compute_backend == "network":
+    # Conflict guard: create_network + an EXPLICIT non-network backend is ambiguous.
+    # (A bare default compute_backend is NOT explicit — the network selector wins.)
+    if _create_network and _raw_backend and _raw_backend != "network":
+        raise SystemExit(
+            "Conflicting selectors: create_network=true is mutually exclusive with "
+            f"compute_backend={_raw_backend!r}. The network bootstrap is a standalone, "
+            "persistent VPC stack — deploy it ALONE (use compute_backend=network, or drop "
+            "the compute_backend flag), then run the backend deploy separately with "
+            "--context vpc_id=<VpcId>. Pick ONE."
+        )
+    _network_azs = app.node.try_get_context("network_azs")
+    _azs = (
+        [a.strip() for a in _network_azs.split(",") if a.strip()]
+        if _network_azs
+        else None
+    )
+    GR00TRLNetworkStack(
+        app,
+        "GR00TRLNetworkStack",
+        vpc_cidr=app.node.try_get_context("vpc_cidr") or "10.73.0.0/16",
+        max_azs=int(app.node.try_get_context("network_max_azs") or 2),
+        availability_zones=_azs,
+        nat_gateways=int(app.node.try_get_context("network_nat_gateways") or 1),
+        env=env,
+    )
+    app.synth()
+    raise SystemExit(0)
 
 # Shared artifacts stack (persistent ECR repo `gr00t-rl-unified` + the mode-switched
 # GR00T-RL-Pipeline CodeBuild project). Used by the EKS-family backends, which are
@@ -126,26 +189,7 @@ if compute_backend == "eks":
         env=env,
     )
 
-# Opt-in cold-start network bootstrap (Phase 15). A SEPARATE, PERSISTENT stack that
-# creates an EKS-ready VPC (>=2 AZs, private+public subnets, NAT egress, EKS subnet
-# tags) and OUTPUTS its VpcId + subnet IDs. Deploy it ONCE on a fresh account with no
-# VPC, then pass --context vpc_id=<VpcId> into the normal EKS deploy. It is NOT the
-# default and does NOT touch the vpc_id path. Synthesizes on its own — needs neither
-# image_uri nor vpc_id. Gate: compute_backend=network OR create_network=true.
-_create_network = str(
-    app.node.try_get_context("create_network") or ""
-).lower() in ("1", "true", "yes")
-
-if compute_backend == "network" or _create_network:
-    stack = GR00TRLNetworkStack(
-        app,
-        "GR00TRLNetworkStack",
-        vpc_cidr=app.node.try_get_context("vpc_cidr") or "10.73.0.0/16",
-        max_azs=int(app.node.try_get_context("network_max_azs") or 2),
-        nat_gateways=int(app.node.try_get_context("network_nat_gateways") or 1),
-        env=env,
-    )
-elif compute_backend in ("batch-mnp", "sagemaker"):
+if compute_backend in ("batch-mnp", "sagemaker"):
     stack = RLBatchMNPStack(
         app,
         "GR00TRLBatchStack",
@@ -240,7 +284,7 @@ elif compute_backend == "eks":
 else:
     raise ValueError(
         f"Unknown compute_backend: {compute_backend}. "
-        "Supported: 'batch-mnp', 'sagemaker', 'eks'"
+        "Supported: 'batch-mnp', 'sagemaker', 'eks', 'network'"
     )
 
 app.synth()
