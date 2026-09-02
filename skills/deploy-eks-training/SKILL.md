@@ -11,8 +11,8 @@ Deploy and run PPO training for GR00T N1.5 on EKS with KubeRay using heterogeneo
 
 ## Prerequisites
 
-- AWS account with a target region that has p5/p5e + g6e capacity (e.g. us-east-2 — see "Choosing a region" below)
-- vCPU quota: 384+ for G instances (quota code `L-DB2E81BA`)
+- AWS account with a target region that has **g6e capacity** (e.g. us-east-2 — see "Choosing a region" below). p5/p5e is **OPTIONAL**: the learner defaults to an on-demand `g6e.48xlarge` (8× L40S) and only needs a Capacity Block / p5 if you pass `--context capacity_reservation_id=<cr-id>`.
+- vCPU quota: enough "Running On-Demand G and VT instances" (quota code `L-DB2E81BA`) for your fleet — e.g. a benchmark eval on 8× g6e.8xlarge = 256 vCPUs; a training learner (g6e.48xlarge = 192 vCPU) + rollout fleet is larger. Request the increase before deploying.
 - ECR image `<account>.dkr.ecr.<region>.amazonaws.com/gr00t-rl-unified@sha256:<digest>`, built + pushed by the `GR00T-RL-Pipeline` CodeBuild project (owned by `GR00TRLArtifactsStack`), driven by `infra/prepare-artifacts.sh` (Steps 1-2) — or by the manual `scripts/build_unified_and_push.sh` self-build (bring-your-own image). The workload deploys the wrapper-resolved `@sha256` digest, NOT the mutable `:latest` tag.
 - S3 bucket in the SAME region as FSx with staged training data (DRA-linked to FSx) — staged by the same `GR00T-RL-Pipeline` project's stage-data arm, driven by `infra/prepare-artifacts.sh` (Step 2)
 - VPC with NAT gateway (private subnets need egress) — ideally ≥2 private subnets in different AZs so you can chase g6e capacity
@@ -125,17 +125,61 @@ Omit `--deploy` to stop after verify and just print the exact deploy line.
 
 Optional EKS `--context` overrides (append after `--`):
 - `--context learner_instance_type=g6e.48xlarge` (default)
-- `--context rollout_instance_type=g6e.4xlarge` (default)
+- `--context rollout_instance_type=g6e.8xlarge` (default — the rollout worker pod requests 24 vCPU / 200 GiB, which does NOT fit g6e.4xlarge's 16 vCPU / 128 GiB, so pods stay `Pending`; g6e.8xlarge = 32 vCPU / 256 GiB)
 - `--context fsx_capacity_gib=1200` (default, minimum for PERSISTENT_2)
 - `--context num_rollout_workers=4` (default)
+- `--context eval_total_envs=N` (eval only — overrides the yaml default of 64; MUST be divisible by `num_nodes = 1 + num_rollout_workers`)
 
 The EKS deploy creates: EKS cluster, FSx for Lustre (PERSISTENT_2) + DRA, GPU node groups,
 KubeRay operator, NVIDIA device plugin, FSx CSI driver, RayCluster CR. Takes ~25-30 minutes.
 
-**Manual alternative (bring-your-own image):** `scripts/build_unified_and_push.sh --region <region>`
-does a local `docker build`/`push` to the same `gr00t-rl-unified` repo and prints the
+**Manual alternative (bring-your-own image):** run from `training/gr00t/rl` (NOT `infra/` — the
+script's `docker build` context is `docker/` relative to that dir):
+```bash
+cd training/gr00t/rl        # if you were in infra/, `cd ..`
+scripts/build_unified_and_push.sh --region <region>
+```
+It does a local `docker build`/`push` to the same `gr00t-rl-unified` repo and prints the
 `--context image_uri=<repo>@sha256:<digest>` line to hand to `cdk deploy` (or to
 `prepare-artifacts.sh --mode data --image-uri <...>`).
+
+### 2.5 Canonical end-to-end run (validated): smoke-eval → train → eval → teardown
+
+The cheapest way to prove the whole path before a real run. Each step re-deploys the **same**
+`GR00TRLEKSStack` with different context (mode-switch in place); the image + data were built/staged
+in Steps 1-2. Configure kubectl (Step 3) first so you can watch logs and locate the checkpoint.
+Set `IMG=<account>.dkr.ecr.<region>.amazonaws.com/gr00t-rl-unified@sha256:<digest>`.
+
+```bash
+cd training/gr00t/rl/infra
+
+# (a) SMOKE-EVAL the base model — 2-pod fleet, 8 envs (8 episodes; eval_rollout_epoch is hardcoded 1). ~$9/hr.
+cdk deploy GR00TRLEKSStack --context compute_backend=eks \
+  --context vpc_id=<vpc> --context s3_data_bucket=<bucket> --context image_uri=$IMG \
+  --context mode=eval --context rollout_instance_type=g6e.8xlarge \
+  --context num_rollout_workers=1 --context eval_total_envs=8 --force
+
+# (b) TRAIN a cost-bounded 2-step run. save_interval=2 → a checkpoint at global_step_2, then stop.
+#     On-demand g6e.48xlarge learner (no Capacity Block needed).
+cdk deploy GR00TRLEKSStack --context compute_backend=eks \
+  --context vpc_id=<vpc> --context s3_data_bucket=<bucket> --context image_uri=$IMG \
+  --context mode=train --context max_epochs=2 --context envs_per_worker=8 \
+  --context rollout_instance_type=g6e.8xlarge --force
+kubectl logs -n training -l ray.io/node-type=head -f    # watch for global_step_2 + checkpoint save
+
+# (c) LOCATE the checkpoint (the actor .pt FILE, not the dir):
+kubectl exec -n training <head-pod> -- \
+  find /mnt/fsx/rl-training/results -path '*/global_step_2/actor/model_state_dict/full_weights.pt'
+
+# (d) EVAL that checkpoint — pass the FULL FSx .pt path from (c):
+cdk deploy GR00TRLEKSStack --context compute_backend=eks \
+  --context vpc_id=<vpc> --context s3_data_bucket=<bucket> --context image_uri=$IMG \
+  --context mode=eval --context rollout_instance_type=g6e.8xlarge \
+  --context num_rollout_workers=1 --context eval_total_envs=8 \
+  --context eval_ckpt=<the full_weights.pt path from step c> --force
+
+# (e) TEARDOWN — see Step 7 for the full sequence.
+```
 
 ### 3. Configure kubectl Access
 
@@ -162,10 +206,12 @@ kubectl delete pods -n training -l ray-role=worker   # KubeRay recreates them ag
 ### 5. Verify Cluster Health
 
 ```bash
-# All 5 nodes Ready
+# Nodes Ready. Expect `1 + num_rollout_workers` GPU nodes: the smoke config
+# (num_rollout_workers=1) is 2 nodes; train default (num_rollout_workers=4) is
+# 1 learner + 4 rollout = 5 nodes.
 kubectl get nodes
 
-# RayCluster + all training pods Running
+# RayCluster + all training pods Running (head + `num_rollout_workers` worker pods)
 kubectl get pods -n training
 
 # Verify FSx mount
@@ -249,12 +295,18 @@ with `capacity-probe.sh --subnet <subnet> --instance-type g6e.8xlarge --capacity
 
 ```bash
 # Delete RayCluster first (avoids custom resource timeout)
-kubectl delete raycluster gr00t-rl-training -n training
+kubectl delete raycluster gr00t-rl-training -n training --ignore-not-found
 
-# Then CDK destroy
-AWS_REGION=<region> CDK_DEFAULT_REGION=<region> cdk destroy GR00TRLEKSStack --force
+# Then CDK destroy. `cdk destroy` SYNTHS the app first, so the EKS backend's required
+# contexts must be present (compute_backend, vpc_id, s3_data_bucket, and an image_uri —
+# the app fails closed without one; there is no :latest fallback).
+AWS_REGION=<region> CDK_DEFAULT_REGION=<region> cdk destroy GR00TRLEKSStack \
+  --context compute_backend=eks --context vpc_id=<vpc> \
+  --context s3_data_bucket=<bucket> --context image_uri=<the digest you deployed with> --force
 
-# If CDK hangs on custom resources, force via API:
+# LAST RESORT ONLY — if `cdk destroy` hangs on the kubectl custom resources. The raw
+# `delete-cluster` alone ORPHANS the CloudFormation stack, so you MUST follow it with
+# `delete-stack` to clean up (do not stop after the first line):
 aws eks delete-cluster --name gr00t-rl-eks --region <region>
 aws cloudformation delete-stack --stack-name GR00TRLEKSStack --region <region>
 ```
@@ -274,7 +326,7 @@ EKS Cluster (gr00t-rl-eks)
 │   ├── Ray Head
 │   ├── FSDP Actor (8 GPU shards)
 │   └── entrypoint-eks.sh → train_embodied_agent.py
-├── Worker Pod ×4 (g6e.4xlarge, 1× L40S each)
+├── Worker Pod ×4 (g6e.8xlarge, 1× L40S each)
 │   ├── Ray Worker
 │   └── Isaac Sim EnvWorker + RolloutWorker (32 envs)
 │
@@ -316,7 +368,9 @@ entrypoint's built-in defaults (change them by editing the entrypoint/manifest).
 |-----------|---------------|-------|
 | RLinf | `649e757` | Does NOT require weight_syncer |
 | Isaac-GR00T | `4af2b62` | Has `gr00t.experiment.data_config` |
-| IsaacLab | Latest from i4h-workflows | |
+| IsaacLab | `941ebdf4a` (`941ebdf4ad1fbf89018777012bdfa4b5944c758f`) | Pinned in `infra/stage-s3-eks.sh` and `docker/Dockerfile.unified` — NOT a floating "latest" |
+| IsaacLab-Arena | `dba099565` | Pinned in `infra/stage-s3-eks.sh` and `docker/Dockerfile.unified` |
+| i4h-workflows | `fb7727e` (tag v0.5.0) | Full `rheo/scripts` tree cloned at stage time |
 | Ray | 2.47.0 | RayCluster `rayVersion` (RLinf minimum; matches the image's `ray[default]==2.47.0`) |
 | lightwheel-sdk | 1.0.3 | Public PyPI (Apache-2.0); baked into the image so IsaacLab-Arena's `object_library` import resolves. Trocar USD assets load from the public Omniverse CDN (CC-BY-NC-4.0), not the SDK's authenticated API |
 

@@ -6,8 +6,15 @@ Reinforcement learning post-training for NVIDIA GR00T N1.5 on the Assemble Troca
 
 | Backend | Command | Instances | Best For |
 |---------|---------|-----------|----------|
-| **EKS + KubeRay** (heterogeneous) — *recommended* | `--context compute_backend=eks` | 1× g6e.48xlarge (8× L40S) + 4× g6e.4xlarge (1× L40S each), configurable | Real runs: better GPU utilization, no RAM OOM |
-| **AWS Batch MNP** (homogeneous) | `--context compute_backend=batch-mnp` | 2× g6e.12xlarge (4× L40S each) | Simple setup, lower cost (~$16/hr) — quick experiments only |
+| **EKS + KubeRay** (heterogeneous) — *recommended* | `--context compute_backend=eks` | 1× g6e.48xlarge (8× L40S) + 4× g6e.8xlarge (1× L40S each), configurable | Real runs: better GPU utilization, no RAM OOM |
+| **AWS Batch MNP** (homogeneous) | `--context compute_backend=batch-mnp` | 5× g6e.12xlarge (1 learner + 4 rollout, 4× L40S each; default `num_rollout_nodes=4`) | Simple setup — quick experiments only (~$52/hr on-demand) |
+
+> **Why g6e.8xlarge (not g6e.4xlarge) for EKS rollout:** each rollout worker pod requests
+> 24 vCPU / 200 GiB, which does **not** fit `g6e.4xlarge` (16 vCPU / 128 GiB → pods stay
+> `Pending`). `g6e.8xlarge` (32 vCPU / 256 GiB) is the smallest single-L40S g6e that schedules it.
+> Cost figures are approximate us-east-1 on-demand (g6e.8xlarge ≈ $4.53/hr, g6e.48xlarge ≈ $30.13/hr,
+> g6e.12xlarge ≈ $10.49/hr) — **scale the fleet to 0 / tear it down immediately after each run**
+> (see Teardown).
 
 **EKS + KubeRay is validated end-to-end: 8 clean PPO iterations across ~37h unattended, with checkpoints saved.** The Batch MNP path RAM-OOMs after ~2 PPO iterations (the head node exhausts system RAM), so use EKS for any real run and reserve Batch for short smoke tests.
 
@@ -15,8 +22,10 @@ Reinforcement learning post-training for NVIDIA GR00T N1.5 on the Assemble Troca
 
 ### Prerequisites
 
-Starting from a fresh AWS account, in your chosen region (keep S3 + ECR + VPC + FSx all in **one**
-region — the FSx DRA requires same-region S3):
+This assumes an **existing VPC with NAT egress** (see the VPC bullet below) and the **listed GPU
+quotas** already granted — it is not a from-scratch account bootstrap (creating the VPC/subnets/NAT
+and the IAM permissions to deploy CDK is out of scope here). Keep S3 + ECR + VPC + FSx all in **one**
+region — the FSx DRA requires same-region S3:
 
 - **CLIs:** `aws` (v2), `cdk` (**`npm install -g aws-cdk@latest`** — a stale global CDK CLI can be
   older than the `aws-cdk-lib` that `pip` installs and fail `cdk synth` with a *"Cloud assembly schema
@@ -88,14 +97,63 @@ stop after verify and just print the exact deploy line. The EKS backend does **n
 storage is FSx for Lustre backed by S3 (see Architecture). This matches the `deploy-eks-training`
 skill.
 
-**Manual alternative (bring-your-own image):** `scripts/build_unified_and_push.sh --region <region>`
-does a local `docker build`/`push` to the same `gr00t-rl-unified` repo and prints the
+**Manual alternative (bring-your-own image):** run from the `training/gr00t/rl` directory (NOT
+`infra/` — the script's `docker build` context is `docker/` relative to that dir):
+```bash
+cd training/gr00t/rl        # if you were in infra/, `cd ..`
+scripts/build_unified_and_push.sh --region <region>
+```
+It does a local `docker build`/`push` to the same `gr00t-rl-unified` repo and prints the
 `--context image_uri=<repo>@sha256:<digest>` line to hand to `cdk deploy` (or to
 `prepare-artifacts.sh --mode data --image-uri <...>`).
 
 ```bash
 # Batch MNP (homogeneous, simpler — quick experiments only)
 AWS_REGION=<region> AWS_DEFAULT_REGION=<region> cdk deploy --context compute_backend=batch-mnp
+```
+
+### Canonical end-to-end run (validated): smoke-eval → train → eval → teardown
+
+The cheapest way to prove the whole path works before committing to a real run. Each step
+re-deploys the **same** `GR00TRLEKSStack` with different context (mode-switch in place); the
+image + data were built/staged in Quick Start phases 1-2. Set `IMG=<account>.dkr.ecr.<region>.amazonaws.com/gr00t-rl-unified@sha256:<digest>`
+(the digest `prepare-artifacts.sh` resolved) and reuse the region env from step 0.
+
+```bash
+cd training/gr00t/rl/infra
+
+# (a) SMOKE-EVAL the base model — 2-pod fleet, 8 envs (8 episodes). Cheapest sanity check
+#     of the eval path (~2× g6e.8xlarge ≈ $9/hr). No eval_ckpt => base-model eval.
+cdk deploy GR00TRLEKSStack --context compute_backend=eks \
+  --context vpc_id=<vpc> --context s3_data_bucket=<bucket> --context image_uri=$IMG \
+  --context mode=eval --context rollout_instance_type=g6e.8xlarge \
+  --context num_rollout_workers=1 --context eval_total_envs=8 --force
+
+# (b) TRAIN a cost-bounded 2-step run. save_interval=2 → a checkpoint at global_step_2, then stop.
+#     envs_per_worker=8 shrinks per-step cost; on-demand g6e.48xlarge learner (no Capacity Block).
+cdk deploy GR00TRLEKSStack --context compute_backend=eks \
+  --context vpc_id=<vpc> --context s3_data_bucket=<bucket> --context image_uri=$IMG \
+  --context mode=train --context max_epochs=2 --context envs_per_worker=8 \
+  --context rollout_instance_type=g6e.8xlarge --force
+# watch for "global_step_2" + the checkpoint save in the head logs:
+kubectl logs -n training -l ray.io/node-type=head -f
+
+# (c) LOCATE the checkpoint the train run wrote (the actor .pt FILE, not the dir):
+kubectl exec -n training <head-pod> -- \
+  find /mnt/fsx/rl-training/results -path '*/global_step_2/actor/model_state_dict/full_weights.pt'
+#   => /mnt/fsx/rl-training/results/<config>_eks_train/<timestamp>/.../global_step_2/actor/model_state_dict/full_weights.pt
+
+# (d) EVAL that checkpoint — pass the FULL FSx .pt path from (c):
+cdk deploy GR00TRLEKSStack --context compute_backend=eks \
+  --context vpc_id=<vpc> --context s3_data_bucket=<bucket> --context image_uri=$IMG \
+  --context mode=eval --context rollout_instance_type=g6e.8xlarge \
+  --context num_rollout_workers=1 --context eval_total_envs=8 \
+  --context eval_ckpt=<the full_weights.pt path from step c> --force
+
+# (e) TEARDOWN — stop all GPU spend (see the Teardown section for the full sequence):
+kubectl delete raycluster gr00t-rl-training -n training --ignore-not-found
+cdk destroy GR00TRLEKSStack --context compute_backend=eks \
+  --context vpc_id=<vpc> --context s3_data_bucket=<bucket> --context image_uri=$IMG --force
 ```
 
 ### Stage Training Data (EFS)
@@ -174,9 +232,14 @@ aws ssm send-command --instance-ids <instance-id> \
 # GPU utilization (EKS — via kubectl)
 kubectl exec -n training <head-pod> -- nvidia-smi
 
-# TensorBoard (EKS: results on FSx at /mnt/fsx/rl-training/results/, auto-exported to S3 via the DRA)
-tensorboard --logdir /mnt/fsx/rl-training/results/
-# (Batch MNP path uses /mnt/efs/rl-training/results/ instead)
+# TensorBoard (EKS). FSx (/mnt/fsx) is mounted ONLY inside the Ray pods — NOT on your laptop —
+# so `tensorboard --logdir /mnt/fsx/...` will not work locally. Instead pull the run's TB dir
+# from the DRA-exported S3 copy and serve it locally:
+aws s3 sync s3://<your-s3-bucket>/rl-training/results/<run>/tensorboard ./tb && tensorboard --logdir ./tb
+# Or serve it in-pod and port-forward:
+#   kubectl exec -n training <head-pod> -- tensorboard --logdir /mnt/fsx/rl-training/results/ --host 0.0.0.0 --port 6006 &
+#   kubectl port-forward -n training <head-pod> 6006:6006
+# (Batch MNP path stores results on EFS at /mnt/efs/rl-training/results/ instead)
 
 # Centralized, PERSISTENT pod logs in CloudWatch (EKS — on by default).
 # The amazon-cloudwatch-observability add-on ships all container stdout/stderr here; the
@@ -206,12 +269,17 @@ export AWS_REGION=<region> AWS_DEFAULT_REGION=<region> CDK_DEFAULT_REGION=<regio
 kubectl delete raycluster gr00t-rl-training -n training --ignore-not-found
 
 # 2. Destroy the consumer stack (tears down node groups → terminates all g6e,
-#    plus FSx, the DRA, and the EKS cluster). This is the correct path — do NOT
-#    `aws eks delete-cluster` directly, which orphans the CloudFormation stack.
+#    plus FSx, the DRA, and the EKS cluster). This is the correct path.
+#    NOTE: `cdk destroy` still SYNTHS the app first, so the EKS backend's required
+#    contexts must be present (compute_backend, vpc_id, s3_data_bucket, and an
+#    image_uri — the app fails closed without one; there is no :latest fallback).
 cdk destroy GR00TRLEKSStack --context compute_backend=eks \
+  --context vpc_id=<your-vpc-id> --context s3_data_bucket=<your-s3-bucket> \
   --context image_uri=<the digest you deployed with> --force
 
-# 3. If CDK hangs on the kubectl custom resources, force via the API, then retry:
+# 3. LAST RESORT ONLY — if `cdk destroy` hangs on the kubectl custom resources.
+#    The raw `delete-cluster` on its own would ORPHAN the CloudFormation stack, so
+#    you MUST follow it with `delete-stack` to clean up (do not stop after line 1):
 aws eks delete-cluster --name gr00t-rl-eks --region <region>
 aws cloudformation delete-stack --stack-name GR00TRLEKSStack --region <region>
 
@@ -224,12 +292,16 @@ aws ec2 describe-instances --region <region> \
 
 **Batch MNP:**
 ```bash
-AWS_DEFAULT_REGION=<region> cdk destroy GR00TRLBatchStack --force
+AWS_DEFAULT_REGION=<region> cdk destroy GR00TRLBatchStack --context compute_backend=batch-mnp --force
 ```
 
 **Full cleanup (only if you want to remove EVERYTHING, including the retained artifacts):**
 ```bash
-cdk destroy GR00TRLArtifactsStack --context compute_backend=eks --force
+# The artifacts stack synths only when the app is told to (compute_backend=eks) AND is allowed to
+# skip the EKS backend — pass artifacts_only=true + s3_data_bucket, or the app fails closed
+# (no image_uri → no :latest fallback).
+cdk destroy GR00TRLArtifactsStack --context compute_backend=eks \
+  --context artifacts_only=true --context s3_data_bucket=<your-s3-bucket> --force
 aws ecr delete-repository --repository-name gr00t-rl-unified --force --region <region>
 aws s3 rb s3://<your-s3-bucket> --force --region <region>   # deletes all staged data
 ```
@@ -258,7 +330,7 @@ The EKS + KubeRay backend supports two runtime modes via a `mode` CDK context pa
 ### MODE=train (default)
 
 - **Purpose:** PPO training on the Assemble Trocar task.
-- **Topology:** 1 head pod on `<learner-instance>` (8× L40S or 8× H100) + N worker pods on `<rollout-instance>` (1× L40S each). Requires a Capacity Block for the learner if using p5.
+- **Topology:** 1 head pod on `<learner-instance>` (8× L40S or 8× H100) + N worker pods on `<rollout-instance>` (1× L40S each). **A Capacity Block / p5 is OPTIONAL:** by default (no `capacity_reservation_id`) the learner node group is an **on-demand `g6e.48xlarge`** (8× L40S) — no reservation required. Supply `--context capacity_reservation_id=<cr-id>` only if you want to run the learner on reserved p5 (H100) capacity.
 - **Invocation:**
 
 ```bash
@@ -267,8 +339,8 @@ AWS_DEFAULT_REGION=<region> cdk deploy GR00TRLEKSStack \
   --context compute_backend=eks \
   --context vpc_id=<your-vpc-id> \
   --context s3_data_bucket=<your-s3-bucket> \
-  --context image_uri=<account>.dkr.ecr.<region>.amazonaws.com/gr00t-rl-unified@sha256:<digest> \
-  --context capacity_reservation_id=<your-cr-id>
+  --context image_uri=<account>.dkr.ecr.<region>.amazonaws.com/gr00t-rl-unified@sha256:<digest>
+  # optional: --context capacity_reservation_id=<cr-id>   (run the learner on reserved p5/H100 capacity)
 ```
 
 - **Output:** checkpoints at `${LOG_DIR}/checkpoints/global_step_N/`, TensorBoard at `${LOG_DIR}/tensorboard/` under FSx.
@@ -276,9 +348,9 @@ AWS_DEFAULT_REGION=<region> cdk deploy GR00TRLEKSStack \
 
 ### MODE=eval
 
-- **Purpose:** standalone evaluation of a saved RL checkpoint. Produces MP4 rollout videos. No learner GPU required.
+- **Purpose:** standalone evaluation of a saved RL checkpoint; reports `eval/success_once`. No learner GPU required. **MP4 rollout videos are OFF by default** (see the video note under Output).
 - **Topology:** 1 head pod + N worker pods, all on `<rollout-instance>` (1× L40S each). Fleet size scales with the `num_rollout_workers` CDK context param — default is 1 (2 pods total, smoke config); benchmark eval at the yaml-default `total_num_envs=64` needs enough GPUs to stay inside a proven envelope on L40S-class hardware. Setting `num_rollout_workers=7` gives an 8-pod fleet at 8 envs/GPU across all 8 GPUs.
-- **Invocation (smoke — matches the shipped smoke defaults):**
+- **Invocation (smoke — 2-pod fleet, 8 envs):**
 
 ```bash
 AWS_DEFAULT_REGION=<region> cdk deploy GR00TRLEKSStack \
@@ -287,8 +359,15 @@ AWS_DEFAULT_REGION=<region> cdk deploy GR00TRLEKSStack \
   --context s3_data_bucket=<your-s3-bucket> \
   --context image_uri=<account>.dkr.ecr.<region>.amazonaws.com/gr00t-rl-unified@sha256:<digest> \
   --context mode=eval \
+  --context rollout_instance_type=g6e.8xlarge \
+  --context num_rollout_workers=1 \
+  --context eval_total_envs=8 \
   --context eval_ckpt=/mnt/fsx/<your-run-path>/checkpoints/global_step_N/actor/model_state_dict/full_weights.pt
 ```
+
+  `eval_total_envs` (`--context eval_total_envs=N`) MUST be divisible by `num_nodes = 1 + num_rollout_workers`
+  (eval places one env process per node). The smoke above is a valid topology: 8 envs ÷ 2 nodes = 4.
+  Omit `eval_total_envs` to fall through to the yaml default (64).
 
 - **Invocation (benchmark eval at `total_num_envs=64`):**
 
@@ -299,15 +378,19 @@ AWS_DEFAULT_REGION=<region> cdk deploy GR00TRLEKSStack \
   --context s3_data_bucket=<your-s3-bucket> \
   --context image_uri=<account>.dkr.ecr.<region>.amazonaws.com/gr00t-rl-unified@sha256:<digest> \
   --context mode=eval \
+  --context rollout_instance_type=g6e.8xlarge \
   --context num_rollout_workers=7 \
   --context eval_ckpt=/mnt/fsx/<your-run-path>/checkpoints/global_step_N/actor/model_state_dict/full_weights.pt
 ```
 
+  Here `total_num_envs` falls through to the yaml default (64), and 64 ÷ (1 + 7) = 8 envs/node — a valid
+  divisible topology across all 8 GPUs.
+
 Omit `--context eval_ckpt=...` when the model at `MODEL_PATH` is itself the RL-trained snapshot (no `.pt` overlay needed).
 
 - **Prerequisites:** the rollout nodegroup can scale to `1 + num_rollout_workers` nodes total (head runs on the eval-learner NG, workers on the rollout NG). The training learner nodegroup can be at `desired=0` (no Capacity Block required).
-- **Runtime:** benchmark eval (`num_rollout_workers=7`, `total_num_envs=64`, `eval_rollout_epoch=1`) runs ~15-20 min end-to-end per stage. Smoke eval (`num_rollout_workers=1`, `total_num_envs=8`, `eval_rollout_epoch=8`) also 64 episodes but on fewer GPUs, ~30-40 min.
-- **Output:** MP4 videos at `${LOG_DIR}/video/eval/` on FSx (auto-exported to `s3://<your-s3-bucket>/rl-training/results/…` via the FSx Data Repository Association).
+- **Runtime:** `eval_rollout_epoch` is hardcoded to **1** in `entrypoint-eks.sh`, so an eval runs exactly `total_num_envs` episodes. Benchmark eval (`num_rollout_workers=7`, `total_num_envs=64`) = 64 episodes, ~15-20 min end-to-end per stage. Smoke eval (`num_rollout_workers=1`, `total_num_envs=8`) = **8 episodes** (not 64), a quick plumbing check, ~15-25 min including cluster spin-up.
+- **Output:** `eval/success_once` in the head-pod logs (always). **MP4 videos are OFF by default:** the entrypoint passes `env.eval.video_cfg.save_video=${SAVE_VIDEO:-False}`, and `SAVE_VIDEO` is a **raw container env var** — it is **not** exposed as a CDK `--context` param. To capture videos you must set `SAVE_VIDEO=true` in the head pod's env (edit the entrypoint/manifest and redeploy). When enabled, MP4s land at `${LOG_DIR}/video/eval/` on FSx (auto-exported to `s3://<your-s3-bucket>/rl-training/results/…` via the FSx Data Repository Association).
 - **Retrieve videos:**
 
 ```bash
@@ -368,9 +451,9 @@ export AWS_REGION=<region> AWS_DEFAULT_REGION=<region> CDK_DEFAULT_REGION=<regio
 ### Batch MNP (Homogeneous)
 
 ```
-AWS Batch MNP Job (2× g6e.12xlarge)
-├── Node 0 (Learner): Ray Head + FSDP Actor (GPUs 0-3)
-└── Node 1 (Rollout): Ray Worker + Isaac Sim Envs (GPUs 4-7)
+AWS Batch MNP Job (g6e.12xlarge, 4× L40S each; default 1 learner + 4 rollout = 5 nodes)
+├── Node 0 (Learner):  Ray Head + FSDP Actor (GPUs 0-3)
+└── Node 1..N (Rollout): Ray Worker + Isaac Sim Envs (GPUs 0-3)   # N = num_rollout_nodes (default 4)
 
 Storage: EFS mounted natively at /mnt/efs
 Network: NCCL over TCP (no EFA)
@@ -383,7 +466,7 @@ EKS Cluster (gr00t-rl-eks)
 ├── Head Pod (g6e.48xlarge, 8× L40S)
 │   ├── Ray Head + FSDP Actor (all 8 GPUs)
 │   └── entrypoint-eks.sh → train_embodied_agent.py
-└── Worker Pods ×4 (g6e.4xlarge, 1× L40S each)
+└── Worker Pods ×4 (g6e.8xlarge, 1× L40S each)
     ├── Ray Workers
     └── Isaac Sim EnvWorker + RolloutWorker (32 envs each)
 
@@ -399,7 +482,7 @@ Operators: KubeRay, NVIDIA device plugin
 | Parameter | Value |
 |-----------|-------|
 | Algorithm | PPO (Proximal Policy Optimization) |
-| Model | GR00T N1.5 (750M params: 550M DiT + 201M SelfAttention) |
+| Model | GR00T N1.5 (3B params, per the NVIDIA model card) |
 | FSDP | Fully Sharded Data Parallel across actor GPUs |
 | micro_batch_size | **32 on L40S-class hardware (L40S-safe — mbs 64 AND 128 both OOM the 44 GB L40S, per the 2026-06-15 benchmark)**; 128 (no gradient checkpointing) only on H100/p5 (80 GB VRAM). Configurable via `MICRO_BATCH_SIZE` env var (entrypoint sync default is already 32) |
 | gradient_checkpointing | True (must stay True at these batch sizes) |
@@ -415,11 +498,12 @@ On the EKS path, results are saved to FSx for Lustre at `/mnt/fsx/rl-training/re
 `/mnt/efs/rl-training/results/...` instead.)
 
 ```
-/mnt/fsx/rl-training/results/<config_name>/<timestamp>/
+# LOG_DIR carries provenance in the path: <config>_<backend>_<mode>/<timestamp>
+/mnt/fsx/rl-training/results/<config>_eks_train/<timestamp>/
 ├── tensorboard/events.out.tfevents.*   # Training metrics
 └── gr00t_assemble_trocar/
     └── checkpoints/global_step_N/
-        └── actor/model_state_dict/full_weights.pt  # Model checkpoint (~5.5 GB)
+        └── actor/model_state_dict/full_weights.pt  # actor checkpoint (~5.5 GB) — this is the eval_ckpt .pt FILE
 ```
 
 ## Key Environment Variables

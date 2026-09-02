@@ -2,7 +2,7 @@
 
 Deploys an EKS cluster with:
   - Learner node group: 1x g6e.48xlarge (8x L40S, 768 GB RAM) for FSDP training
-  - Rollout node group: Nx g6e.4xlarge (1x L40S each) for Isaac Sim rollout workers
+  - Rollout node group: Nx g6e.8xlarge (1x L40S each) for Isaac Sim rollout workers
   - KubeRay operator (Helm chart v1.1.0) managing RayCluster lifecycle
   - NVIDIA device plugin (Helm chart) exposing nvidia.com/gpu resources
   - FSx for Lustre (PERSISTENT_2) backed by S3 via Data Repository Association
@@ -43,7 +43,7 @@ class EKSKubeRayStack(Stack):
 
     Architecture:
       - Head pod (g6e.48xlarge): Ray head + FSDP learner actors on 8 GPUs
-      - Worker pods (g6e.4xlarge x N): Ray workers + Isaac Sim rollout on 1 GPU each
+      - Worker pods (g6e.8xlarge x N): Ray workers + Isaac Sim rollout on 1 GPU each
       - KubeRay operator manages Ray cluster formation (no manual ray start)
       - FSx for Lustre shared storage for code, models, checkpoints, TensorBoard logs
     """
@@ -58,7 +58,7 @@ class EKSKubeRayStack(Stack):
         num_rollout_workers: int = 4,
         fsx_capacity_gib: int = 1200,
         learner_instance_type: str = "g6e.48xlarge",
-        rollout_instance_type: str = "g6e.4xlarge",
+        rollout_instance_type: str = "g6e.8xlarge",
         capacity_reservation_id: str = None,
         mode: str = "train",
         eval_ckpt: str = None,
@@ -81,7 +81,7 @@ class EKSKubeRayStack(Stack):
         super().__init__(scope, construct_id, **kwargs)
 
         # Validate mode at synth time — the entrypoint's fail-fast handles the
-        # mode=eval / eval_ckpt coupling at pod startup (07-CONTEXT.md decision 3),
+        # mode=eval / eval_ckpt coupling at pod startup,
         # so we only guard against typos in the mode string here.
         if mode not in ("train", "eval"):
             raise ValueError(f"Unknown mode: {mode}. Expected 'train' or 'eval'.")
@@ -342,7 +342,7 @@ class EKSKubeRayStack(Stack):
             subnets=ec2.SubnetSelection(subnets=eval_learner_subnets),
         )
 
-        # Rollout NG subnet selection (Phase 12 capacity-resilient knob).
+        # Rollout NG subnet selection (capacity-resilient knob).
         # Default-off: when rollout_subnet_ids is unset, this list is exactly
         # [fsx_subnet] so the synthesized template is byte-identical to the
         # single-AZ default. When set (comma-separated private subnet IDs passed
@@ -619,7 +619,7 @@ class EKSKubeRayStack(Stack):
             # env.train.total_num_envs = num_rollout_workers * ENVS_PER_WORKER —
             # lowering it shrinks the co-located rollout L40S GPU footprint (the
             # Eagle/Qwen3 lm_head logits AND the Isaac Sim allocation both scale
-            # with envs/GPU; 32/GPU OOM'd a 46 GiB L40S — see Phase 12 RUN-LOG).
+            # with envs/GPU; 32 envs/GPU OOM'd a 46 GiB L40S in testing).
             # When max_epochs is set, it bounds the run to N global_steps
             # (overrides the entrypoint default of 1000 -> runner.max_epochs=N),
             # giving a cost-bounded, deterministic stop for short/plumbing runs.
@@ -647,9 +647,9 @@ class EKSKubeRayStack(Stack):
                 "nvidia.com/gpu": "1",
             },
             # Eval-mode worker count follows the top-level `num_rollout_workers`
-            # context param. Phase 7's default was 1 (2-pod head+worker fleet);
-            # Phase 07.1 Step A bumps this to 3 (4-pod fleet at 16 envs/GPU for
-            # NVIDIA's `total_num_envs=64` benchmark topology). The entrypoint's
+            # context param. Default 1 is a 2-pod head+worker smoke fleet; for the
+            # benchmark `total_num_envs=64` topology set num_rollout_workers=7 so
+            # 64 ÷ (1 + 7) = 8 envs/GPU across an 8-node fleet. The entrypoint's
             # Ray-wait loop keys off NUM_ROLLOUT_WORKERS to expect the right count.
             "num_rollout_workers_env_value": str(num_rollout_workers),
             "extra_env": [
@@ -851,7 +851,7 @@ class EKSKubeRayStack(Stack):
                                                     # Rollout L40S (46 GiB) hosts co-located Isaac Sim
                                                     # (~22 GiB) + GR00T Eagle/Qwen3 policy inference on
                                                     # one GPU. The first predict_action_batch OOM'd at
-                                                    # the Eagle-VLM lm_head (Phase 12 Wave 2). The
+                                                    # the Eagle-VLM lm_head in testing. The
                                                     # expandable-segments allocator reduces fragmentation
                                                     # so the transient logits allocation can fit.
                                                     "name": "PYTORCH_CUDA_ALLOC_CONF",

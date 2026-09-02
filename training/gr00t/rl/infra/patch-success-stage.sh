@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Phase 7.1 Step A helper — mutates success_stage on the FSx-mounted task cfg
+# Eval-sweep helper — mutates success_stage on the FSx-mounted task cfg
 # in-place, with backup and restore. Runs INSIDE a k8s pod that has FSx mounted.
 #
 # Usage (from control host, via kubectl exec on a running pod):

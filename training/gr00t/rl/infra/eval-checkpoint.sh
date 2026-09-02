@@ -139,7 +139,7 @@ EKS_CLUSTER_NAME="${EKS_CLUSTER_NAME:-gr00t-rl-eks}"
 EKS_EVAL_LEARNER_NG="${EKS_EVAL_LEARNER_NG:-}"
 EKS_ROLLOUT_NG="${EKS_ROLLOUT_NG:-}"
 
-# EKS eval TOPOLOGY (the silent-nodegroup-churn fix — Phase 12).
+# EKS eval TOPOLOGY (the silent-nodegroup-churn fix).
 # The eval `cdk deploy` (launch_eval_eks) MUST pin the rollout/eval-learner
 # instance type and worker count. If omitted, CDK falls through to app.py DEFAULTS
 # (rollout_instance_type=g6e.4xlarge, num_rollout_workers=4) and CloudFormation
@@ -172,13 +172,13 @@ EKS_LEARNER_INSTANCE_TYPE="${EKS_LEARNER_INSTANCE_TYPE:-p5.48xlarge}"
 EKS_FSX_CAPACITY_GIB="${EKS_FSX_CAPACITY_GIB:-1200}"
 EKS_KUBERAY_VERSION="${EKS_KUBERAY_VERSION:-1.1.0}"
 EKS_ROLLOUT_SUBNET_IDS="${EKS_ROLLOUT_SUBNET_IDS:-}"
-# Capacity-resilient EVAL knob (Phase 13): when the FSx AZ (us-east-2a) is g6e-dry,
+# Capacity-resilient EVAL knob: when the FSx AZ is g6e-dry,
 # set BOTH EKS_EVAL_LEARNER_SUBNET_IDS and EKS_ROLLOUT_SUBNET_IDS to a same other-AZ
 # private subnet (e.g. us-east-2b) so the eval head + rollout workers co-locate there;
 # FSx stays in 2a and is read cross-AZ. Unset == app.py default == the FSx-AZ subnet.
 EKS_EVAL_LEARNER_SUBNET_IDS="${EKS_EVAL_LEARNER_SUBNET_IDS:-}"
 
-# The reused FSx success_stage patch, referenced-not-copied (D-15). SCRIPT_DIR anchors
+# The reused FSx success_stage patch, referenced-not-copied. SCRIPT_DIR anchors
 # the infra dir (used as the cwd for `cdk deploy`).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # patch-success-stage.sh lives on the FSx mount inside the fsx-helper pod (sha256-verified
@@ -190,7 +190,7 @@ PATCH_SCRIPT="${PATCH_SCRIPT:-${FSX_MOUNT}/scratch/step-a/patch-success-stage.sh
 # =============================================================================
 CKPT=""                         # --ckpt  : s3:// URI or FSx path to an actor .pt  (=> EVAL_CKPT)
 MODEL_PATH_ARG=""               # --model-path : FSx model dir for a base/SFT eval  (=> MODEL_PATH)
-N="64"                          # --n     : envs per stage (NVIDIA WeChat-confirmed N=64)
+N="64"                          # --n     : envs per stage (benchmark uses N=64)
 REF_ROW="100,93.75,85.9,78.1"   # --ref : same-apparatus ref = NVIDIA's RL ckpt on this N=64 path (posted headline: 100/92/85/82, 100 scenes)
 STAGES="1 2 3 4"                # --stages: which success_stage values to sweep
 # MAX_RUNTIME: hard deadline PER STAGE sweep (seconds). Default 3h. If an eval overruns
@@ -618,7 +618,7 @@ ensure_backup() {
 }
 
 # patch_stage(): mutate success_stage=<n> on the FSx task cfg via the reused
-# patch-success-stage.sh (D-15 reference-not-copy), on the resolved FSx pod. The FRESH
+# patch-success-stage.sh (reference-not-copy), on the resolved FSx pod. The FRESH
 # head re-reads this at env-build time after the per-stage reform. Ensures backup first.
 patch_stage() {
   local stage="$1"

@@ -34,7 +34,7 @@
 #   # or via env:
 #   SUBNET_ID=<sid> REGION=us-east-2 CAPACITY=2 ./capacity-probe.sh
 #
-#   Example (Wave 2, under the paid gate — probe the FSx AZ private subnet):
+#   Example (probe the FSx AZ private subnet before a paid run):
 #     ./capacity-probe.sh --subnet <the-us-east-2a-private-subnet-id>
 #
 # Required IAM on the deploy principal (existing admin role; no new grants):
