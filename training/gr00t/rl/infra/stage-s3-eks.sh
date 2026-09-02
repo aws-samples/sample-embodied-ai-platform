@@ -58,7 +58,7 @@ ISAACLAB_ARENA_URL="https://github.com/isaac-sim/IsaacLab-Arena.git"
 # Workflows come from the COMPLETE i4h-workflows rheo/scripts tree (simulation, policy,
 # teleop_devices, utils, config — interdependent on PYTHONPATH; a hand-picked subset breaks
 # env creation, e.g. ModuleNotFoundError: teleop_devices). We clone it and overlay only our
-# custom RL config. Matches the internal EFS buildspec (which also pins i4h-workflows).
+# custom RL config. Pins i4h-workflows to a known-good commit for reproducibility.
 I4H_WORKFLOWS_URL="https://github.com/isaac-for-healthcare/i4h-workflows.git"
 # Pin to the exact commit the v0.5.0 tag points at (fb7727e) — NOT the movable tag —
 # so a re-stage is byte-repeatable even if the tag is later re-pointed to a new commit.

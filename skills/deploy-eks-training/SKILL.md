@@ -160,18 +160,21 @@ Set `IMG=<account>.dkr.ecr.<region>.amazonaws.com/gr00t-rl-unified@sha256:<diges
 ```bash
 cd training/gr00t/rl/infra
 
+# Common contexts for EVERY deploy + the teardown — INCLUDING the subnet pins, so a
+# redeploy never relocates FSx or churns node groups. Use the SAME subnets as Step 2.
+CTX=(--context compute_backend=eks
+     --context vpc_id=<vpc> --context s3_data_bucket=<bucket> --context image_uri=$IMG
+     --context rollout_instance_type=g6e.8xlarge
+     --context fsx_subnet_id=<subnet> --context rollout_subnet_ids=<subnet> --context eval_learner_subnet_ids=<subnet>)
+
 # (a) SMOKE-EVAL the base model — 2-pod fleet, 8 envs (8 episodes; eval_rollout_epoch is hardcoded 1). ~$9/hr.
-cdk deploy GR00TRLEKSStack --context compute_backend=eks \
-  --context vpc_id=<vpc> --context s3_data_bucket=<bucket> --context image_uri=$IMG \
-  --context mode=eval --context rollout_instance_type=g6e.8xlarge \
-  --context num_rollout_workers=1 --context eval_total_envs=8 --force
+cdk deploy GR00TRLEKSStack "${CTX[@]}" \
+  --context mode=eval --context num_rollout_workers=1 --context eval_total_envs=8 --force
 
 # (b) TRAIN a cost-bounded 2-step run. save_interval=2 → a checkpoint at global_step_2, then stop.
 #     On-demand g6e.48xlarge learner (no Capacity Block needed).
-cdk deploy GR00TRLEKSStack --context compute_backend=eks \
-  --context vpc_id=<vpc> --context s3_data_bucket=<bucket> --context image_uri=$IMG \
-  --context mode=train --context max_epochs=2 --context envs_per_worker=8 \
-  --context rollout_instance_type=g6e.8xlarge --force
+cdk deploy GR00TRLEKSStack "${CTX[@]}" \
+  --context mode=train --context max_epochs=2 --context envs_per_worker=8 --force
 kubectl logs -n training -l ray.io/node-type=head -f    # watch for global_step_2 + checkpoint save
 
 # (c) LOCATE the checkpoint (the actor .pt FILE, not the dir):
@@ -179,13 +182,11 @@ kubectl exec -n training <head-pod> -- \
   find /mnt/fsx/rl-training/results -path '*/global_step_2/actor/model_state_dict/full_weights.pt'
 
 # (d) EVAL that checkpoint — pass the FULL FSx .pt path from (c):
-cdk deploy GR00TRLEKSStack --context compute_backend=eks \
-  --context vpc_id=<vpc> --context s3_data_bucket=<bucket> --context image_uri=$IMG \
-  --context mode=eval --context rollout_instance_type=g6e.8xlarge \
-  --context num_rollout_workers=1 --context eval_total_envs=8 \
+cdk deploy GR00TRLEKSStack "${CTX[@]}" \
+  --context mode=eval --context num_rollout_workers=1 --context eval_total_envs=8 \
   --context eval_ckpt=<the full_weights.pt path from step c> --force
 
-# (e) TEARDOWN — see Step 7 for the full sequence.
+# (e) TEARDOWN — reuse "${CTX[@]}" on destroy; see Step 7 for the full sequence.
 ```
 
 ### 3. Configure kubectl Access

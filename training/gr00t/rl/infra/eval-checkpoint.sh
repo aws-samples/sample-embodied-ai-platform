@@ -27,7 +27,7 @@
 #   Syntax check only:         bash -n ./eval-checkpoint.sh
 #   Usage:                     ./eval-checkpoint.sh --help
 #
-# LIFECYCLE OWNERSHIP (SKILL Known Hiccup #14 — the paid-for lesson):
+# LIFECYCLE OWNERSHIP:
 #   A crashed or hung eval (e.g. the Isaac Sim `omni.usd::newStage` fatal) leaves the
 #   RayCluster head pod `Running`, so an unattended eval burns g6e INDEFINITELY. The
 #   --execute path therefore OWNS the eval cluster's lifecycle end to end: a bash
@@ -70,7 +70,7 @@
 #   * val_check_interval=N -> the in-flight AGGREGATE eval number, live in TensorBoard.
 #
 # ─────────────────────────────────────────────────────────────────────────────
-#  DESIGN NOTES / SELF-CONTAINED STAGE MACHINE  (validated on the 2026-08-20 run)
+#  DESIGN NOTES / SELF-CONTAINED STAGE MACHINE
 # ─────────────────────────────────────────────────────────────────────────────
 # This backend drives the ENTIRE per-stage sweep in ONE `--execute` invocation with NO
 # human/agent in the loop (public-mirror requirement). It deploys the stack + forms the
@@ -751,8 +751,7 @@ latest_eval_logdir() {
   run_capture "kubectl exec -n '${K8S_NAMESPACE}' '${FSX_POD}' ${FSX_CT:+-c '${FSX_CT}'} -- sh -c 'ls -1dt ${EVAL_RESULTS_PARENT}/*/ 2>/dev/null | head -1'"
 }
 
-# reform_raycluster_eks(): the SELF-CONTAINED per-stage restart (Phase-13 fix; codifies the
-# manually-validated 2026-08-20 procedure). RLinf's only_eval head runs once then exits,
+# reform_raycluster_eks(): the SELF-CONTAINED per-stage restart. RLinf's only_eval head runs once then exits,
 # and KubeRay restarts it with a NEW Ray GCS cluster-id that orphans the workers (they can't
 # re-register → "GCS authentication error"). So to run a FRESH stage we delete ALL RayCluster
 # pods, let KubeRay rebuild, and poll `ray status` until num_nodes are Active — periodically

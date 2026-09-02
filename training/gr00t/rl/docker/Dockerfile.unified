@@ -81,7 +81,7 @@ RUN git clone https://github.com/isaac-sim/IsaacLab-Arena.git /opt/IsaacLab-Aren
 # `from lightwheel_sdk.loader import object_loader`, triggered by Arena's blanket
 # asset registration on any teleop/env import). Arena is installed --no-deps above,
 # so this transitive dep is otherwise missing and the trocar env worker dies with
-# `ModuleNotFoundError: No module named 'lightwheel_sdk'` (Phase 14 us-west-2 smoke).
+# `ModuleNotFoundError: No module named 'lightwheel_sdk'` at env-creation import time.
 # The SDK is Apache-2.0 and public on PyPI. Pinned for byte-repeatable rebuilds.
 #
 # RUNTIME EGRESS the trocar eval needs (ALL reached WITHOUT credentials in the smoke —
