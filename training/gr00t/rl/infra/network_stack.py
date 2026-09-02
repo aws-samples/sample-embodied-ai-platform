@@ -110,7 +110,13 @@ class GR00TRLNetworkStack(Stack):
         # When set, hand the VPC an explicit AZ list (EKS-eligible + FSx + g6e);
         # otherwise fall back to auto-selecting the first max(2, max_azs) AZs.
         if availability_zones:
-            vpc_kwargs["availability_zones"] = list(availability_zones)
+            _azs = list(dict.fromkeys(availability_zones))  # de-dup, keep order
+            if len(_azs) < 2:
+                raise ValueError(
+                    f"network_azs must list at least 2 distinct AZs for an EKS-ready "
+                    f"VPC (got {availability_zones!r}); EKS requires subnets in >=2 AZs."
+                )
+            vpc_kwargs["availability_zones"] = _azs
         else:
             vpc_kwargs["max_azs"] = max(2, max_azs)
         vpc = ec2.Vpc(self, "VPC", **vpc_kwargs)
