@@ -27,7 +27,9 @@ Deploy and run PPO training for GR00T N1.5 on EKS with KubeRay using heterogeneo
 
 ### Choosing a region
 
-You may deploy to ANY region that has p5/p5e (learner) + g6e (rollout/eval) capacity. Keep
+You may deploy to ANY region that has **g6e capacity** (learner default, rollout, and eval all
+run on g6e). p5/p5e is **OPTIONAL** and only matters if you pass `--context
+capacity_reservation_id=<cr-id>` to run the learner on reserved p5 (H100) capacity. Keep
 S3 + ECR + VPC + FSx all in that ONE region — the FSx Data Repository Association (DRA)
 requires the S3 bucket to be same-region. PROBE capacity first with `infra/capacity-probe.sh`
 before deploying. Recommended regions where this was validated / capacity tends to exist:
@@ -268,13 +270,13 @@ a typed confirmation to spend.
 cd training/gr00t/rl/infra
 export AWS_REGION=us-east-2 AWS_DEFAULT_REGION=us-east-2 CDK_DEFAULT_REGION=us-east-2 \
        CDK_DEFAULT_ACCOUNT=<acct> VPC_ID=<vpc> S3_DATA_BUCKET=<bucket> \
-       IMAGE_URI=<acct>.dkr.ecr.us-east-2.amazonaws.com/<repo>:<tag>
+       IMAGE_URI=<acct>.dkr.ecr.us-east-2.amazonaws.com/<repo>@sha256:<digest>
 # Dry-run (safe): prints the full plan, spends $0
 ./eval-checkpoint.sh --backend eks --ckpt s3://<bucket>/<...>/global_step_N/actor/model_state_dict/full_weights.pt --n 64
 # Real (PAID): add --execute (then type 'eval-checkpoint')
 ```
 
-**Three gotchas the script now handles for you (learned the hard way, 2026-08-20):**
+**Three gotchas the script now handles for you:**
 
 1. **`--ckpt` may be `s3://<S3_DATA_BUCKET>/<key>` OR the FSx path.** The head entrypoint
    loads it as a LOCAL FSx path (`test -f`), NOT an s3 URI. The script auto-translates
@@ -403,7 +405,7 @@ deletion of `eval_embodied_agent.py`. The `_broadcast` deadlock (below) is fixed
 | g6e-dry in the FSx AZ | Run eval/rollout cross-AZ via `EKS_ROLLOUT_SUBNET_IDS`/`EKS_EVAL_LEARNER_SUBNET_IDS`; FSx read cross-AZ. §6.5 |
 | Silent ~3h hang; `ValueError: Unsupported object type` / `invalid load key` after a Gloo broadcast failure (`_broadcast` deadlock) | `stage-s3-eks.sh` applies `patches/RLinf-649e7579-broadcast-raise.patch` (RLinf swallows the broadcast exception and reads uninitialized buffers as pickle); the patch re-raises so training dies loudly and `auto-recover` restarts from the latest checkpoint. Keep RLinf pinned at `649e757` — do NOT bump the pin to fix this |
 | Head pod restarts / can't find `/mnt/fsx/third_party` right after a first deploy | Data may not have landed yet. `prepare-artifacts.sh` gates the EKS deploy on staging (Step 2), so this only bites if you bypassed the wrapper. Confirm staging converged (the `GR00T-RL-Pipeline` stage-data arm, ~15-20 min incl. the ~5.5 GB model): `aws s3 ls s3://<bucket>/_STAGING_COMPLETE` (the marker is written last, only on full success). FSx imports lazily via the DRA; KubeRay self-heals the head until data lands |
-| Changed the patch / pins / workflows and need to re-stage | Re-run the stage-data arm: `./prepare-artifacts.sh --region <region> --mode data` (or `aws codebuild start-build --project-name GR00T-RL-Pipeline --environment-variables-override name=STAGE_MODE,value=stage-data,type=PLAINTEXT --region <region>`); `aws s3 sync --delete` converges the bucket to the new tree |
+| Changed the patch / pins / workflows and need to re-stage | If you edited files **locally**, first **redeploy `GR00TRLArtifactsStack`** — the `GR00T-RL-Pipeline` project builds from an **immutable source asset bundled at synth time**, so re-running the pipeline without a redeploy re-stages the OLD source. Then re-run the stage-data arm: `./prepare-artifacts.sh --region <region> --mode data` (or `aws codebuild start-build --project-name GR00T-RL-Pipeline --environment-variables-override name=STAGE_MODE,value=stage-data,type=PLAINTEXT --region <region>`); `aws s3 sync --delete` converges the bucket to the new tree |
 | CodeBuild staging fails with S3 `AccessDenied` | If the data bucket uses a customer-managed KMS key, grant the `GR00T-RL-Pipeline` role `kms:Encrypt`/`kms:Decrypt`/`kms:GenerateDataKey` on that key (the bucket `grant_read_write` alone does not cover a CMK), or use SSE-S3 |
 | **Before public release:** EKS is pinned to Kubernetes 1.31 | k8s 1.31 is in AWS EKS **extended support** (ends 2026-11-26). Bump `eks.KubernetesVersion` in `infra/eks_kuberay_stack.py` off `V1_31` to a standard-support version (and re-validate KubeRay/addon compatibility) before a public release |
 | **Before public release:** workload should pin the image by digest | The EKS workload must run the wrapper-resolved `@sha256:<digest>` (what `prepare-artifacts.sh` verifies + hands to `cdk deploy`), NOT the mutable `:latest` tag — `:latest` can drift to an unverified image. Confirm the deployed `image_uri` is a `@sha256` reference, not a tag |

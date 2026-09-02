@@ -343,7 +343,7 @@ elif [ "${MODE}" = "eval" ]; then
         echo "  Log dir: ${LOG_DIR}"
         echo "  Video sink: ${LOG_DIR}/video/eval/"
 
-        # Hydra overrides (order from 07-RESEARCH.md §5 / 07-01-PLAN.md interfaces):
+        # Hydra overrides (eval-mode component placement + topology):
         #   cluster.component_placement=...       (RESET to eval-shaped dict; the YAML default
         #                                          may be Format A (actor/env,rollout keys) or
         #                                          Format B (single actor,env,rollout key) —

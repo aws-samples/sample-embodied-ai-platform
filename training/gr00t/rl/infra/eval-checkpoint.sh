@@ -162,8 +162,8 @@ EKS_NUM_ROLLOUT_WORKERS="${EKS_NUM_ROLLOUT_WORKERS:-7}"
 # CB-backed training learner NG during the eval (wasteful for a pure eval).
 CAPACITY_RESERVATION_ID="${CAPACITY_RESERVATION_ID:-}"
 EKS_LEARNER_INSTANCE_TYPE="${EKS_LEARNER_INSTANCE_TYPE:-p5.48xlarge}"
-# Other STRUCTURAL context keys the eval deploy must not silently revert (Codex
-# red-team). These default to the SAME app.py defaults, so an unset override is a
+# Other STRUCTURAL context keys the eval deploy must not silently revert.
+# These default to the SAME app.py defaults, so an unset override is a
 # byte-identical no-op for a stack deployed at defaults — but if the training stack
 # was deployed with a non-default value (e.g. kuberay 1.2.0 for the async path, or a
 # cross-AZ rollout subnet), you MUST set the matching env var here or the eval
@@ -295,7 +295,7 @@ run_capture() {
   fi
 }
 
-# run_capture_argv(): array-safe capture (Codex red-team). Same contract as run_capture
+# run_capture_argv(): array-safe capture. Same contract as run_capture
 # but takes an argv ARRAY, executed directly with "$@" — NO `bash -c` reparse. Required
 # whenever an argument contains characters the shell would eat, e.g. a `python3 -c`
 # program whose source has its own double quotes (`os.environ.get("EC_LOG_DIR", "")`).
@@ -331,7 +331,7 @@ _num_stages=$(echo "$STAGES" | wc -w)
 [[ "$_num_stages" -ge 1 ]] || die "--stages must name at least one stage in 1..4 (got '${STAGES}')."
 for _s in $STAGES; do case "$_s" in 1|2|3|4) ;; *) die "--stages entries must each be in 1..4 (got '$_s')." ;; esac; done
 
-# INJECTION CLOSE (Codex red-team): every env-overridable identifier that is interpolated
+# INJECTION CLOSE: every env-overridable identifier that is interpolated
 # into a run_sh()/run_capture() `bash -c` string (the NG discovery/teardown loops and the
 # FSx-read helpers) must be free of shell metacharacters. The eks `cdk deploy` itself is
 # already array-safe (launch_eval_eks), but these names still flow through a shell string.
@@ -381,7 +381,7 @@ if [[ -n "$EKS_EVAL_LEARNER_SUBNET_IDS" ]]; then
   [[ "$EKS_EVAL_LEARNER_SUBNET_IDS" =~ ^subnet-[0-9a-f]+(,subnet-[0-9a-f]+)*$ ]] \
     || die "EKS_EVAL_LEARNER_SUBNET_IDS must be a comma-separated list of subnet-ids (got '$EKS_EVAL_LEARNER_SUBNET_IDS')."
 fi
-# Reform knobs (Codex red-team): RAY_*_CONTAINER flow into kubectl exec / bash -c strings
+# Reform knobs: RAY_*_CONTAINER flow into kubectl exec / bash -c strings
 # (validate as safe names); REFORM_TIMEOUT/REFORM_RECYCLE_EVERY enter Bash arithmetic
 # (validate as plain positive integers so a value like 'x[$(cmd)]' can't inject).
 [[ "$RAY_HEAD_CONTAINER" =~ ^[A-Za-z0-9._-]+$ ]] || die "RAY_HEAD_CONTAINER must be a container name (got '$RAY_HEAD_CONTAINER')."
@@ -632,7 +632,7 @@ patch_stage() {
 # GR00TRLEKSStack directly via `cdk deploy --context compute_backend=eks --context
 # mode=eval ...` (per the deploy-eks-training SKILL). vpc_id / s3_data_bucket /
 # image_uri come from env; eval_ckpt (or model_path) + eval_total_envs thread the payload
-# through app.py -> the head-pod eval env. ARRAY-SAFE (Codex red-team): the env + context
+# through app.py -> the head-pod eval env. ARRAY-SAFE: the env + context
 # tokens are passed to run() as an argv ARRAY (`run env "${envs[@]}" cdk ... "${ctx[@]}"`),
 # NOT flattened into a bash -c string — so a value containing spaces/;/$() (e.g. a hostile
 # VPC_ID) can never be re-parsed as shell. Each --context and its value are SEPARATE tokens.
@@ -683,7 +683,7 @@ launch_eval_eks() {
   echo "    on-demand g6e eval-learner NG desired=1 + rollout NG; head pod routes by is_eval)"
   # Array-safe: cd in a subshell, then run() executes env+cdk as a proper argv array.
   ( cd "$SCRIPT_DIR" && run env "${envs[@]}" cdk deploy "$EKS_STACK_NAME" "${ctx[@]}" --require-approval never )
-  # CFN scale-to-zero DRIFT guard (Codex red-team): a prior teardown scaled these
+  # CFN scale-to-zero DRIFT guard: a prior teardown scaled these
   # NGs to desired=0 OUTSIDE CloudFormation. If the eval template's DesiredSize
   # equals the last-deployed template's (e.g. eval-learner desired=1 both times),
   # CFN sees no property change and LEAVES the NG at the drifted 0 → the eval head

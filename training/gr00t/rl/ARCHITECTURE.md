@@ -1,6 +1,6 @@
 # GR00T RL Post-Training — Architecture & Decision Record
 
-End-to-end architecture for reinforcement-learning post-training of NVIDIA **GR00T N1.5** (3B diffusion Vision-Language-Action policy) on the **Assemble Trocar** task, across four AWS compute backends. Includes a step-by-step flow and an **architecture-decisions table** documenting why each significant choice was made over its alternative, with sources and quantified impact.
+End-to-end architecture for reinforcement-learning post-training of NVIDIA **GR00T N1.5** (3B diffusion Vision-Language-Action policy) on the **Assemble Trocar** task, across three AWS compute backends (`batch-mnp`, `sagemaker`, `eks`). Includes a step-by-step flow and an **architecture-decisions table** documenting why each significant choice was made over its alternative, with sources and quantified impact.
 
 > Pricing cells use a **pricing snapshot retrieved 2026-08-09** (us-east-2; re-verify before budgeting) from the AWS Price List API (p5.48xlarge on-demand `$55.04/hr`, g6e.8xlarge on-demand `$4.53/hr` / spot `~$1.81/hr`). Rates change — re-verify before budgeting.
 
@@ -18,7 +18,6 @@ flowchart LR
         B1["batch-mnp"]
         B2["sagemaker"]
         B3["eks — reference (validated) path"]
-        B4["hyperpod-eks"]
     end
     subgraph EKSCtl["EKS Control Plane (k8s 1.31)"]
         KubeRay["KubeRay Operator"]
@@ -39,7 +38,7 @@ flowchart LR
         FSx[("FSx for Lustre<br/>hot cache /mnt/fsx")]
     end
     Operator -->|"cdk deploy --context ..."| CDK
-    CDK --> B1 & B2 & B3 & B4
+    CDK --> B1 & B2 & B3
     B3 --> EKSCtl
     EKSCtl --> Nodes
     KubeRay --> RayC
@@ -54,7 +53,7 @@ flowchart LR
     classDef storage fill:#e8f5e9,stroke:#1b5e20
     classDef ctl fill:#fce4ec,stroke:#880e4f
     class Operator op
-    class CDK,B1,B2,B3,B4 cdk
+    class CDK,B1,B2,B3 cdk
     class Learner,Rollout,EvalNG,Head,Workers compute
     class S3,FSx storage
     class KubeRay,NVDP,FSxCSI ctl
@@ -65,7 +64,7 @@ flowchart LR
 ## Architecture Flow
 
 ### Deployment (steps 1–6)
-1. Engineer runs `cdk deploy --context compute_backend={batch-mnp|sagemaker|eks|hyperpod-eks} ...`. `app.py` routes to the matching stack. **`eks` is the reference (validated) path.**
+1. Engineer runs `cdk deploy --context compute_backend={batch-mnp|sagemaker|eks} ...`. `app.py` routes to the matching stack. **`eks` is the reference (validated) path.**
 2. The EKS backend provisions the cluster (k8s 1.31) with three node groups: learner (Capacity-Block-backed p5), rollout (g6e ×8), and eval-learner (on-demand, `desired=0` unless `mode=eval`).
 3. FSx for Lustre is created and linked to the S3 bucket via a Data Repository Association (DRA). S3 is the source of truth; FSx is the hot cache. `batch_import_meta_data_on_create=True` so FSx sees existing S3 data at boot.
 4. KubeRay operator (Helm) reconciles the RayCluster custom resource into a heterogeneous head pod (nodeSelector `node-role: learner`) + 8 worker pods (`node-role: rollout`).
@@ -204,14 +203,14 @@ sequenceDiagram
 <details>
 <summary><b>E5 · Video capture</b> — MP4 rollouts → FSx → S3.</summary>
 
-- **E5.1** Eval videos are **OFF by default**: the entrypoint sets `++env.eval.video_cfg.save_video=${SAVE_VIDEO:-False}`, overriding the yaml default of `True`. Set the `SAVE_VIDEO=true` container env to write MP4 rollouts to `${LOG_DIR}/video/eval/` on FSx. (`SAVE_VIDEO` is not yet exposed as a CDK context param.)
+- **E5.1** Eval videos are **OFF by default**: the entrypoint sets `++env.eval.video_cfg.save_video=${SAVE_VIDEO:-False}`, overriding the yaml default of `True`. Pass `--context save_video=true` at deploy (plumbed app.py→stack→entrypoint `SAVE_VIDEO`) to write MP4 rollouts to `${LOG_DIR}/video/eval/` on FSx.
 - **E5.2** When enabled, DRA auto-exports the videos to S3 for review — a policy can be inspected without ever booking a Capacity Block.
 
 </details>
 
 ### Failure handling
 - **RLinf collective desync:** a local `_broadcast` raise patch turns a silent Gloo-failure deadlock into a fast failure (now fixed upstream — [PR #1414](https://github.com/RLinf/RLinf/pull/1414)). An auto-recover harness (`scripts/auto-recover.sh`) watches head-pod logs and restarts from the latest `global_step_N` checkpoint via `RESUME_DIR`.
-- **Capacity Block handoff:** contiguous blocks require a ~15-min manual CDK re-deploy to rotate the reservation ID (the pain the HyperPod-on-EKS backend targets).
+- **Capacity Block handoff:** contiguous blocks require a ~15-min manual CDK re-deploy to rotate the reservation ID — a known operational cost of Capacity-Block-backed capacity. (Persistent, self-healing capacity alternatives could remove this rotation; none is shipped in this repo.)
 
 ---
 
@@ -297,7 +296,7 @@ Read the TensorBoard as four questions:
 
 - **M3.1** `eval-checkpoint.sh --ckpt <global_step_N> --n 64` runs the per-stage `success_stage` sweep (Stages 1–4, N=64, cleared terminations, full 256 steps — the standalone per-stage methodology), reads `eval/success_once` per stage from the FSx-persisted TensorBoard events, computes a Wilson 95% CI per stage, and prints a per-stage table + a **PASS / CONTINUE** verdict against the same-apparatus reference 100 / 93.75 / 85.9 / 78.1 (NVIDIA's RL checkpoint re-measured on this N=64 path; NVIDIA's *posted* headline is **100 / 92 / 85 / 82** on 100 scenes, and the N=64 row sits inside its Wilson 95% CI).
 - **M3.2** Comparing two checkpoints (e.g. `global_step_2` vs `_4`) shows the per-stage numbers moving toward NVIDIA's band — the signal for "run longer vs stop." **PASS** = every stage lands in (or above) NVIDIA's CI band; otherwise **CONTINUE**, naming the short stages.
-- **M3.3** `eval-checkpoint.sh` is backend-aware (`--backend {hyperpod-eks|eks}`) and owns its eval cluster's lifecycle — it tears the eval capacity down on success, on failure, and at a `MAX_RUNTIME` hard-deadline, so a crashed eval never burns GPUs unattended.
+- **M3.3** `eval-checkpoint.sh` runs on `--backend eks` and owns its eval cluster's lifecycle — it tears the eval capacity down on success, on failure, and at a `MAX_RUNTIME` hard-deadline, so a crashed eval never burns GPUs unattended.
 
 </details>
 
@@ -329,13 +328,12 @@ Each row: the choice, the rejected alternative, why it won, an authoritative sou
 
 | Decision | Chosen ▸ Rejected | Why | Source | Impact / limit |
 |----------|-------------------|-----|--------|----------------|
-| Learner GPU | **p5.48xlarge (8×H100)** ▸ g6e.48xlarge (8×L40S) | H100 far faster on the PPO step; single node keeps FSDP on NVLink | internal benchmark (prose) | PPO step **30 min (H100) vs 3h50m (L40S) = 7.7×** |
+| Learner GPU | **p5.48xlarge (8×H100)** ▸ g6e.48xlarge (8×L40S) | H100 far faster on the PPO step; single node keeps FSDP on NVLink | observed in our validation (sample figures, not a reproducible public benchmark) | PPO step **30 min (H100) vs 3h50m (L40S) = 7.7×** |
 | Learner topology | **Single 8-GPU node** ▸ multi-node FSDP | avoids cross-node NCCL + RAM-OOM at init; NVLink all-reduce | — | 8 FSDP shards, gbs 2048 |
 | Rollout instance | **g6e.8xlarge (256GB)** ▸ g6e.4xlarge (128GB) | g6e.4xlarge's 128 GB RAM OOM'd the rollout worker during validation | — | 128GB OOM → 256GB safe |
 | H100 procurement | **EC2 Capacity Blocks** ▸ on-demand p5 | on-demand p5 was not reliably available in the target Region/AZ during validation | [Capacity Blocks](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-capacity-blocks.html) | **prepaid**; block handoff = ~15 min manual re-deploy |
 | GPU AMI | **AL2023_X86_64_NVIDIA** ▸ AL2 GPU / Bottlerocket | AL2023 = driver 580 + CUDA 13; device plugin Helm-installed | [EKS optimized accelerated AMI](https://docs.aws.amazon.com/eks/latest/userguide/eks-optimized-ami.html) | device plugin not bundled → must Helm-install |
 | Rollout Spot | **Deferred, candidate** ▸ Spot now / Spot-for-MNP | rollout stateless/restartable = Spot-safe; MNP Spot out-of-scope (gang-schedule reclaim kills job) | [Karpenter+Spot](https://aws.amazon.com/blogs/containers/using-amazon-ec2-spot-instances-with-karpenter/) | **~60% off** ($4.53→~$1.81/hr snapshot) |
-| HyperPod capacity | **Training Plan (p5) + on-demand (g6e)** ▸ single reservation | g6e.8xlarge **not** training-plan-eligible; p5 is | [training plans](https://docs.aws.amazon.com/sagemaker/latest/dg/reserve-capacity-with-training-plans.html) | cluster quotas 0.0 → increase is prereq |
 
 <details>
 <summary><b>1.1 · Learner instance sizing — the formula, and why p5</b></summary>
@@ -350,7 +348,7 @@ M_states ≈ P × 16 bytes   (fp16 weights 2 + grads 2 + Adam m/v 8 + fp32 maste
 By this alone a 3B model is tiny — it'd fit almost anywhere. So the static formula is necessary but **not** the deciding factor.
 
 **Dynamic (activations) — the real driver, config-dependent, not a clean formula:**
-For a VLA the peak is activations, and they spike: vision tokens (640×480 patch embeddings), the Eagle/Qwen3 backbone, the diffusion head, and the killer — the `lm_head` **logits tensor** `= batch × seq × vocab`, which measured **~30.7 GiB for one micro-batch at mbs=128**. That allocation **OOM'd the 48 GB L40S at mbs=128**, requiring **mbs=32 + gradient checkpointing** there; the 80 GB H100 ran **mbs=128 without gradient checkpointing** (an internal benchmark measured both). Gradient checkpointing trades compute to shrink this.
+For a VLA the peak is activations, and they spike: vision tokens (640×480 patch embeddings), the Eagle/Qwen3 backbone, the diffusion head, and the killer — the `lm_head` **logits tensor** `= batch × seq × vocab`, which measured **~30.7 GiB for one micro-batch at mbs=128**. That allocation **OOM'd the 48 GB L40S at mbs=128**, requiring **mbs=32 + gradient checkpointing** there; the 80 GB H100 ran **mbs=128 without gradient checkpointing** (both observed in our validation — sample figures, not a reproducible public benchmark). Gradient checkpointing trades compute to shrink this.
 
 **Selection rule:** `aggregate_GPU_mem ≥ M_states + peak_activation × margin`, where `peak_activation` depends on batch size, token count, denoise steps, and checkpointing — so an **empirical "does it OOM at *this* config" check is genuinely required**, not laziness.
 
@@ -379,16 +377,12 @@ Notes on the candidates (all **unverified on this workload**): **p4d.24xlarge (�
 | Heterogeneous backend | **EKS + KubeRay** ▸ SageMaker heterogeneous / Batch MNP | SageMaker VPC-mode blocks EFA on multi-GPU heterogeneous; Batch MNP homogeneous-only | `infra/eks_kuberay_stack.py` | enables p5+g6e on one cluster |
 | Ray lifecycle | **KubeRay CR** ▸ manual `ray start` | declarative; removes ~200 lines of IP-discovery from the Batch entrypoint | [KubeRay docs](https://docs.ray.io/en/latest/cluster/kubernetes/index.html) | delegates to `$KUBERAY_GEN_RAY_START_CMD` |
 | GPU scheduling | **k8s device plugin** ▸ CUDA_VISIBLE_DEVICES / DRA driver | isolation + placement; k8s DRA needs 1.34 (we're on 1.31) | `infra/eks_kuberay_stack.py` | pods Pending if plugin missing |
-| 3rd backend | **HyperPod on EKS** ▸ standalone/Slurm | persistent self-healing removes CB rotation; keeps KubeRay investment | [HyperPod-EKS](https://docs.aws.amazon.com/sagemaker/latest/dg/sagemaker-hyperpod-eks.html) | targets the ~15-min block-handoff |
-| HyperPod stack | **Separate `HyperPodEKSStack`** ▸ extend EKS stack | keeps the validated `eks` flow byte-for-byte untouched | — | zero risk to reference path |
-| HyperPod Helm | **deploy-script step** ▸ wire through CDK | keeps CDK pure-infra; matches AWS Ray-on-HyperPod flow | — | — |
-| HyperPod node parity | **label instance groups `node-role`** ▸ parameterize nodeSelector | RayCluster manifest runs unchanged | — | + health-taint toleration |
 
 ### 3 · Storage
 
 | Decision | Chosen ▸ Rejected | Why | Source | Impact / limit |
 |----------|-------------------|-----|--------|----------------|
-| Shared FS | **FSx for Lustre** ▸ EFS | native S3↔FSx DRA sync, high-throughput multi-reader I/O for model/config load + sharded-checkpoint write. NOTE: an internal benchmark stayed **GPU-compute-bound** — FSx did not measurably speed the rollout step itself vs the loading/checkpoint paths | internal benchmark (prose) | EFS ~100 MB/s vs FSx ~1+ GB/s on load/checkpoint I/O |
+| Shared FS | **FSx for Lustre** ▸ EFS | native S3↔FSx DRA sync, high-throughput multi-reader I/O for model/config load + sharded-checkpoint write. NOTE: our validation stayed **GPU-compute-bound** — FSx did not measurably speed the rollout step itself vs the loading/checkpoint paths | observed in our validation (sample figures, not a reproducible public benchmark) | EFS ~100 MB/s vs FSx ~1+ GB/s on load/checkpoint I/O |
 | FSx tier | **PERSISTENT_2** ▸ SCRATCH_2 | persistence/durability for long runs + checkpoint safety (SCRATCH data is not replicated). NOTE: DRA is NOT the differentiator — only the `scratch_1` deployment type is excluded from DRA; SCRATCH_2 supports it | [AWS FSx DRA docs](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-fsx-datarepositoryassociation.html) | ~3.6% cost premium; 250 MB/s/TiB |
 | Source of truth | **S3 + DRA auto-import** ▸ FSx as primary | S3 durable; FSx ephemeral cache; checkpoints auto-export | — | S3 must be same region as FSx |
 | DRA import | **batch_import_meta_data_on_create=True** ▸ default | else FSx appears empty despite S3 data | [AWS FSx DRA docs](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-fsx-datarepositoryassociation.html) | avoids boot "file not found" |
@@ -409,7 +403,7 @@ Notes on the candidates (all **unverified on this workload**): **p4d.24xlarge (�
 |----------|-------------------|-----|--------|----------------|
 | RLinf version | **pin `649e7579` + `_broadcast` patch** ▸ newer/main | pin doesn't need weight_syncer; upgrade queued for native async PPO | [RLinf](https://github.com/RLinf/RLinf) | async PPO landed [PR #654](https://github.com/RLinf/RLinf/pull/654) ~3wk after pin |
 | PPO mode | **synchronous** ▸ async now | RLinf pin async is SAC-only (`train_async.py` raises for PPO) | — | native async = bounded-staleness + off-policy correction (queued upgrade) |
-| Rollout pipelining | **`pipeline_stage_num: 2`** ▸ shipped `1` | on-policy-safe, possible VRAM relief — NOTE the shipped sync yaml is `1`; `2` is a proposed (untried) speedup | — | ~15% ceiling, zero correctness risk |
+| Rollout pipelining | **`pipeline_stage_num: 1`** (shipped) ▸ `2` (future, untried) | the sync yaml ships `1`; `2` is a proposed on-policy-safe speedup with possible VRAM relief — **not implemented/validated here** | — | `2` bounded by the ~15% async ceiling if ever tried |
 | FSDP config | **sync default mbs 32 + grad-ckpt (all learners)** ▸ larger mbs no ckpt | the sync entrypoint defaults mbs=32/grad-ckpt=True regardless of GPU (L40S-safe); the H100 benchmark used **mbs=128 via an explicit `MICRO_BATCH_SIZE=128` override** — there is no automatic H100 auto-select | `docker/entrypoint-eks.sh:132-143` | H100 (mbs128) ~30 min vs L40S (mbs32) ~3h50m |
 | cpu_offload | **disabled** ▸ enabled | NCCL deadlock at FSDP init | — | confirmed deadlock |
 | torch.compile | **disabled** ▸ enabled | deadlocks with Isaac Sim multi-GPU | — | `TORCHDYNAMO_DISABLE=1` |
