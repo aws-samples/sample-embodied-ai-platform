@@ -1,3 +1,8 @@
+---
+name: deploy-eks-training
+description: Deploy and run GR00T N1.5 PPO RL post-training on EKS + KubeRay (heterogeneous g6e learner + rollout fleet, FSx for Lustre backed by S3). Covers the two-stack build/stage/deploy flow, train and standalone-eval modes, monitoring, and teardown.
+---
+
 # Deploy GR00T RL Training on EKS (Heterogeneous)
 
 Deploy and run PPO training for GR00T N1.5 on EKS with KubeRay using heterogeneous instance types, backed by FSx for Lustre.

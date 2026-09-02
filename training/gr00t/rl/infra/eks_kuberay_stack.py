@@ -71,6 +71,7 @@ class EKSKubeRayStack(Stack):
         task_description: str = None,
         eval_inject_noise: str = None,
         noise_level: str = None,
+        save_video: str = None,
         kuberay_version: str = "1.1.0",
         rollout_subnet_ids: str = None,
         eval_learner_subnet_ids: str = None,
@@ -661,6 +662,9 @@ class EKSKubeRayStack(Stack):
                 *([{"name": "TASK_DESCRIPTION", "value": task_description}] if task_description else []),
                 *([{"name": "EVAL_INJECT_NOISE", "value": str(eval_inject_noise)}] if eval_inject_noise else []),
                 *([{"name": "NOISE_LEVEL", "value": str(noise_level)}] if noise_level else []),
+                # Eval MP4 rollout videos are OFF by default (entrypoint SAVE_VIDEO:-False);
+                # set --context save_video=true to write them to ${LOG_DIR}/video/eval/.
+                *([{"name": "SAVE_VIDEO", "value": str(save_video)}] if save_video else []),
             ],
             "worker_replicas": num_rollout_workers,
         }

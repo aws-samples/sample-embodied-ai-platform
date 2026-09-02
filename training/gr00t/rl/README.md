@@ -36,7 +36,7 @@ region — the FSx DRA requires same-region S3:
   = 256 vCPUs; a training learner + rollout fleet is larger). Request the *"Running On-Demand G and
   VT instances"* quota (code `L-DB2E81BA`) in your region **before** deploying — new accounts start
   well below what a real run needs, and increases can take hours to days.
-- **VPC:** a VPC with **≥2 private subnets in different AZs**, each with **NAT gateway egress**
+- **VPC (required for EKS):** the EKS path imports an **existing** VPC via `--context vpc_id=<id>` (it uses `Vpc.from_lookup` and does **NOT** auto-create one — only the `batch-mnp` backend creates a VPC if omitted). Provide a VPC with **≥2 private subnets in different AZs**, each with **NAT gateway egress**
   (nodes must reach the EKS API, ECR, PyPI/GitHub, and the public Omniverse asset CDN — see the
   asset note below). Pick AZ(s) that actually have g6e capacity; **probe first** with
   `infra/capacity-probe.sh --subnet <subnet-id> --instance-type g6e.8xlarge --capacity <n>`.
@@ -345,6 +345,7 @@ AWS_DEFAULT_REGION=<region> cdk deploy GR00TRLEKSStack \
 
 - **Output:** checkpoints at `${LOG_DIR}/checkpoints/global_step_N/`, TensorBoard at `${LOG_DIR}/tensorboard/` under FSx.
 - **Cost-bounded / plumbing run:** add `--context max_epochs=N` to stop after N global_steps (default is the entrypoint's 1000). Because `save_interval=2` writes a checkpoint every 2 steps, e.g. `--context max_epochs=2` produces an eval-able `global_step_2/` checkpoint and stops — useful to validate the train path end-to-end before committing to a full run. Shrink `--context num_rollout_workers` / `--context envs_per_worker` to lower per-step cost (per-step time scales with `total_num_envs × rollout_epoch`).
+- **Env density (default vs benchmark):** `total_num_envs = num_rollout_workers × ENVS_PER_WORKER`. The entrypoint default is `ENVS_PER_WORKER=32`, but a **co-located Isaac-Sim + policy rollout OOMs a 48 GB L40S above ~8 envs/GPU** — so for a real g6e rollout pass **`--context envs_per_worker=8`**. The benchmark's 64-env config is 8 workers × 8 envs/GPU; the shipped yaml carries `total_num_envs: 64` as that target. On a larger rollout GPU you can test higher densities — this is a knob, not a fixed value.
 
 ### MODE=eval
 
@@ -475,7 +476,7 @@ Storage: FSx for Lustre (PERSISTENT_2) via the FSx CSI driver at /mnt/fsx,
 Operators: KubeRay, NVIDIA device plugin
 ```
 
-**Eval mode** (`--context mode=eval`) drops the training learner pod and uses a `(1 + num_rollout_workers)`-pod topology on `<rollout-instance>` (1× L40S each). Default is 2 pods (smoke); benchmark eval at the yaml-default `total_num_envs=64` typically uses `--context num_rollout_workers=7` (8 pods total, 8 envs/GPU). No p5.48xlarge / no Capacity Block required. The head pod runs `entrypoint-eks.sh → eval_embodied_agent.py` and writes MP4 rollouts to `${LOG_DIR}/video/eval/`. See the [Modes](#modes) section above for both smoke and benchmark invocations.
+**Eval mode** (`--context mode=eval`) drops the training learner pod and uses a `(1 + num_rollout_workers)`-pod topology on `<rollout-instance>` (1× L40S each). Default is 2 pods (smoke); benchmark eval at the yaml-default `total_num_envs=64` typically uses `--context num_rollout_workers=7` (8 pods total, 8 envs/GPU). No p5.48xlarge / no Capacity Block required. The head pod runs `entrypoint-eks.sh → eval_embodied_agent.py`; pass `--context save_video=true` to write MP4 rollouts to `${LOG_DIR}/video/eval/` (off by default). See the [Modes](#modes) section above for both smoke and benchmark invocations.
 
 ## Training Configuration
 
