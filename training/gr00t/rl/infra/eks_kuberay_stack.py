@@ -605,7 +605,7 @@ class EKSKubeRayStack(Stack):
                 "memory": "600Gi",
                 "nvidia.com/gpu": "8",
             },
-            # No memory limit for training — matches HEAD's head-pod resources.
+            # No memory limit for training — matches the training head pod's resources.
             "limits": {
                 "cpu": "192",
                 "nvidia.com/gpu": "8",

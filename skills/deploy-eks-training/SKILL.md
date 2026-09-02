@@ -186,7 +186,9 @@ cdk deploy GR00TRLEKSStack "${CTX[@]}" \
   --context mode=eval --context num_rollout_workers=1 --context eval_total_envs=8 \
   --context eval_ckpt=<the full_weights.pt path from step c> --force
 
-# (e) TEARDOWN — reuse "${CTX[@]}" on destroy; see Step 7 for the full sequence.
+# (e) TEARDOWN — delete the RayCluster, then destroy with the SAME CTX (subnets included).
+kubectl delete raycluster gr00t-rl-training -n training --ignore-not-found
+cdk destroy GR00TRLEKSStack "${CTX[@]}" --force    # see Step 7 for the LAST-RESORT hang path
 ```
 
 ### 3. Configure kubectl Access

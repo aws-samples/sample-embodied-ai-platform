@@ -42,7 +42,7 @@ RUN rm -rf /isaac-sim/exts/omni.isaac.ml_archive/pip_prebundle/torch* \
            /isaac-sim/exts/omni.isaac.ml_archive/pip_prebundle/typing_extensions* \
            /isaac-sim/exts/omni.pip.cloud/pip_prebundle/typing_extensions*
 
-# Import verification (BUILD-02): fail the build if any critical import breaks
+# Import verification: fail the build if any critical import breaks
 RUN /isaac-sim/python.sh -c "\
 import torch; \
 assert torch.__version__.startswith('2.8'), f'Expected torch 2.8.x, got {torch.__version__}'; \
