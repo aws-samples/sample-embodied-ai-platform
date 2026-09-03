@@ -18,6 +18,14 @@ Reinforcement learning post-training for NVIDIA GR00T N1.5 on the Assemble Troca
 
 **EKS + KubeRay is validated end-to-end: 8 clean PPO iterations across ~37h unattended, with checkpoints saved.** The Batch MNP path RAM-OOMs after ~2 PPO iterations (the head node exhausts system RAM), so use EKS for any real run and reserve Batch for short smoke tests.
 
+## Deploy Skills (agent-driven deploys)
+
+Step-by-step deploy runbooks live under [`skills/`](skills/), authored so a coding agent (or a
+human) can drive a deploy end-to-end — prerequisites, build/stage/deploy, monitoring, and teardown:
+
+- [`skills/deploy-eks-training/`](skills/deploy-eks-training/SKILL.md) — EKS + KubeRay (recommended, validated), incl. train + standalone-eval + per-stage eval.
+- [`skills/deploy-batch-training/`](skills/deploy-batch-training/SKILL.md) — AWS Batch MNP (homogeneous, quick experiments).
+
 ## Quick Start
 
 ### Prerequisites

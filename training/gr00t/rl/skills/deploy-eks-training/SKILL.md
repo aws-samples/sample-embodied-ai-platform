@@ -271,9 +271,9 @@ a typed confirmation to spend.
 
 ```bash
 cd training/gr00t/rl/infra
-export AWS_REGION=us-east-2 AWS_DEFAULT_REGION=us-east-2 CDK_DEFAULT_REGION=us-east-2 \
+export AWS_REGION=<region> AWS_DEFAULT_REGION=<region> CDK_DEFAULT_REGION=<region> \
        CDK_DEFAULT_ACCOUNT=<acct> VPC_ID=<vpc> S3_DATA_BUCKET=<bucket> \
-       IMAGE_URI=<acct>.dkr.ecr.us-east-2.amazonaws.com/<repo>@sha256:<digest>
+       IMAGE_URI=<acct>.dkr.ecr.<region>.amazonaws.com/<repo>@sha256:<digest>
 # Dry-run (safe): prints the full plan, spends $0
 ./eval-checkpoint.sh --backend eks --ckpt s3://<bucket>/<...>/global_step_N/actor/model_state_dict/full_weights.pt --n 64
 # Real (PAID): add --execute (then type 'eval-checkpoint')
@@ -401,7 +401,7 @@ deletion of `eval_embodied_agent.py`. The `_broadcast` deadlock (below) is fixed
 | `Eagle2_5_VLImageProcessorFast` not found | Transient on first boot; resolves on restart |
 | P5/P5e capacity unavailable | Fall back to g6e instances |
 | S3 bucket must be same region as FSx | DRA requires same-region S3 |
-| CDK lookup uses wrong region | Set `AWS_REGION=us-east-2` explicitly (not just CDK_DEFAULT_REGION) |
+| CDK lookup uses wrong region | Set `AWS_REGION=<region>` explicitly (not just CDK_DEFAULT_REGION) |
 | Eval head crash-loops: `total_num_envs must be divisible...` | N must be divisible by `num_nodes=1+num_rollout_workers`; for N=64 use 7 workers (8 nodes). See §6.5 gotcha 2 |
 | Eval head crash: `EVAL_CKPT file not found: s3://...` | Pass the FSx path, not the s3:// URI (or use eval-checkpoint.sh which auto-translates). §6.5 gotcha 1 |
 | Multi-stage eval reports stage-1's number for all stages | The head must be reformed between stages so it re-reads `success_stage`; use eval-checkpoint.sh (handles it). §6.5 gotcha 3 |
