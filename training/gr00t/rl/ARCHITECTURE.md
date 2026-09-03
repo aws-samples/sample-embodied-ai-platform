@@ -209,7 +209,7 @@ sequenceDiagram
 </details>
 
 ### Failure handling
-- **RLinf collective desync:** a local `_broadcast` raise patch turns a silent Gloo-failure deadlock into a fast failure (now fixed upstream — [PR #1414](https://github.com/RLinf/RLinf/pull/1414)). An auto-recover harness (`scripts/auto-recover.sh`) watches head-pod logs and restarts from the latest `global_step_N` checkpoint via `RESUME_DIR`.
+- **RLinf collective desync:** a local `_broadcast` raise patch turns a silent Gloo-failure deadlock into a fast failure ([issue #1378](https://github.com/RLinf/RLinf/issues/1378) now fixed upstream — [PR #1414](https://github.com/RLinf/RLinf/pull/1414)). An auto-recover harness (`scripts/auto-recover.sh`) watches head-pod logs and restarts from the latest `global_step_N` checkpoint via `RESUME_DIR`.
 - **Capacity Block handoff:** contiguous blocks require a ~15-min manual CDK re-deploy to rotate the reservation ID — a known operational cost of Capacity-Block-backed capacity. (Persistent, self-healing capacity alternatives could remove this rotation; none is shipped in this repo.)
 
 ---
