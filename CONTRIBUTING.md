@@ -20,6 +20,38 @@ reported the issue. Please try to include as much information as you can. Detail
 * Anything unusual about your environment or deployment
 
 
+## Development Setup
+
+Set up the Python environment with [`uv`](https://docs.astral.sh/uv/), then arm the
+credential-scanning hooks. Both are one-time, per-clone steps.
+
+**Python environment:**
+
+```bash
+uv sync --extra infra --extra workstation --inexact
+source .venv/bin/activate
+uv pip install -r data/requirements.txt
+npm install -g aws-cdk
+```
+
+`--inexact` is required because the `data/` engine's dependencies are installed separately
+from `data/requirements.txt` and are deliberately not declared in `pyproject.toml`; a plain
+`uv sync` would prune them back out of the shared `.venv`. `uv` creates the `.venv` itself
+(hence `sync` before `activate`); it lives at the repo root and both CDK apps expect it
+activated.
+
+**Credential-scanning hooks:**
+
+```bash
+brew install git-secrets gitleaks
+git config core.hooksPath .githooks
+git secrets --register-aws
+```
+
+`git secrets --register-aws` is per-clone and must be re-run on every fresh clone — see
+[.githooks/README.md](.githooks/README.md) for the full setup rationale.
+
+
 ## Contributing via Pull Requests
 Contributions via pull requests are much appreciated. Before sending us a pull request, please ensure that:
 
