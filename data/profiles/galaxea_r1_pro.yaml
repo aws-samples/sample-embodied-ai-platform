@@ -1,0 +1,210 @@
+# Galaxea R1 Pro embodiment profile.
+#
+# This file is the single source of truth for how the Galaxea R1 Pro's ROS2/MCAP
+# topics map onto the canonical contract in data/contracts/. There is zero
+# robot-specific Python anywhere under data/ — everything a future adapter,
+# synchronizer, or writer needs to handle this robot lives here.
+embodiment: galaxea_r1_pro
+schema_version: 1
+robot_type: r1pro
+
+master_clock:
+  topic: /hdas/camera_head/left_raw/image_raw_color/compressed
+  target_fps: null  # null = native rate; measured per-recording native rates across the
+                    # three sample MCAPs are ~29.95 / ~29.83 / ~30.00 Hz (corrected 2026-09-06,
+                    # Phase 3 D-09 -- supersedes 01-RESEARCH.md's earlier, much lower estimate).
+                    # Rate detection is dynamic; this comment carries no runtime effect.
+  max_camera_coverage_deficit_ticks: 8  # G-01/VERIFY-01 gap closure (04-04-PLAN.md), declared
+                    # 2026-09-08. 04-VERIFICATION.md's aggregate count (frames_submitted=300 vs
+                    # parquet_row_count=304, a 4-tick deficit) was assumed to be trailing; direct
+                    # per-tick re-measurement against the real 2026-09-04 recordings
+                    # (data/samples/vr-teleop-20260904/) found it is actually a 4-tick LEADING
+                    # gap on both wrist cameras of episode 0 (each starts recording ~170ms after
+                    # the master camera's own first frame) -- see
+                    # data/tests/test_sync_camera_coverage.py. Because this mechanism's covered
+                    # prefix is measured from grid tick 0, a leading gap always yields
+                    # kept_ticks=0 regardless of the declared tolerance here, so that specific
+                    # episode correctly REJECTS rather than truncates -- the intended outcome:
+                    # it is excluded, the other two (zero-deficit) episodes convert cleanly, and
+                    # GR00T's loader never sees the mismatched video. 8 ticks (~267 ms) is the
+                    # declared tolerance for a genuine TRAILING or interior deficit within that
+                    # budget -- exactly the scenario this plan's own tracer test constructs
+                    # (head=10, wrist_left=8) -- one doubling of headroom over the 4-tick
+                    # magnitude actually measured, not reverse-engineered to make any one
+                    # specific recording pass. This field is hashed into profile_hash, so
+                    # declaring it supersedes the prior hash and every prefix built under it --
+                    # intended, since the fixed pipeline must produce a new dataset revision
+                    # anyway.
+
+cameras:
+  head_left:
+    topic: /hdas/camera_head/left_raw/image_raw_color/compressed
+    role: master_clock       # this camera IS the timeline; decoded per tick, never resampled
+    required: true
+    emit: true
+    video_key: observation.images.head
+  head_right:
+    topic: /hdas/camera_head/right_raw/image_raw_color/compressed
+    role: secondary
+    required: true
+    emit: false              # stereo pair captured but not written by default
+    sync_policy: nearest
+    max_sync_gap_ms: 40
+  wrist_left:
+    topic: /hdas/camera_wrist_left/color/image_raw/compressed
+    role: secondary
+    required: true
+    emit: true
+    video_key: observation.images.wrist_left
+    sync_policy: nearest
+    max_sync_gap_ms: 40
+  wrist_right:
+    topic: /hdas/camera_wrist_right/color/image_raw/compressed
+    role: secondary
+    required: true
+    emit: true
+    video_key: observation.images.wrist_right
+    sync_policy: nearest
+    max_sync_gap_ms: 40
+
+# joint_names below are author-declared, not derived from any MCAP message field.
+# Measured this phase (01-RESEARCH.md, Empirical Findings #2, all 3 sample
+# recordings): on every /hdas/feedback_* topic, msg.name is a single group label
+# of length 1 (e.g. ['left_arm']), never a per-joint name array — only `position`
+# carries the real per-joint values, at the lengths declared per field below.
+# There is no per-joint name array anywhere in the recordings to zip against, so
+# per-joint ordering here is authoritative and declared, never measured.
+state_topics:
+  arm_left:
+    topic: /hdas/feedback_arm_left
+    field: position
+    joint_names: [arm_l_j1, arm_l_j2, arm_l_j3, arm_l_j4, arm_l_j5, arm_l_j6, arm_l_j7]
+    required: true
+    resample: interp
+    state_key: left_arm
+    include_in_observation_state: true
+  arm_right:
+    topic: /hdas/feedback_arm_right
+    field: position
+    joint_names: [arm_r_j1, arm_r_j2, arm_r_j3, arm_r_j4, arm_r_j5, arm_r_j6, arm_r_j7]
+    required: true
+    resample: interp
+    state_key: right_arm
+    include_in_observation_state: true
+  torso:
+    topic: /hdas/feedback_torso
+    field: position
+    joint_names: [torso_j1, torso_j2, torso_j3, torso_j4]
+    required: true
+    resample: interp
+    state_key: torso
+    include_in_observation_state: true
+  gripper_left:
+    topic: /hdas/feedback_gripper_left
+    field: position
+    joint_names: [gripper_left]
+    required: true
+    resample: zoh            # discrete-ish actuator
+    state_key: left_gripper
+    include_in_observation_state: true
+  gripper_right:
+    topic: /hdas/feedback_gripper_right
+    field: position
+    joint_names: [gripper_right]
+    required: true
+    resample: zoh
+    state_key: right_gripper
+    include_in_observation_state: true
+  chassis:
+    topic: /hdas/feedback_chassis
+    field: position
+    joint_names: [chassis_x, chassis_y, chassis_theta]
+    required: false           # tabletop episodes may show the base stationary/absent
+    resample: interp
+    state_key: chassis
+    include_in_observation_state: false   # declared and captured, excluded from the emitted vector
+
+# Action source is an ORDERED per-field list (CONT-07, decided: promote — see
+# 01-02-PLAN.md's <assumption_delta_decision>). There is no separate
+# preferred-topic key and no single named-fallback key: the first entry with
+# messages wins at resolution time in Phase 2.
+#
+# For arm_left, /motion_target/target_joint_state_arm_left measured ZERO
+# messages across all three sample MCAPs (01-RESEARCH.md, Empirical Findings
+# #2) — control_arm_left is the only path ever exercised for the left arm in
+# the available data. It is still listed first, deliberately, for left/right
+# symmetry with arm_right (where target_joint_state_arm_right IS populated) and
+# because a future recording session could populate it; the ordered-sources
+# mechanism costs nothing extra to probe a structurally empty topic first, and
+# keeping both arms' source lists shaped identically is one less special case
+# for Phase 2's resolver to carry. This is a deliberate choice, not an
+# unexamined inheritance from 01-01-SUMMARY.md's illustrative example.
+action_topics:
+  left_arm:
+    sources:
+      - topic: /motion_target/target_joint_state_arm_left
+        field: position
+        message_type: sensor_msgs/msg/JointState
+      - topic: /motion_control/control_arm_left
+        field: p_des
+        message_type: hdas_msg/msg/MotorControl
+    joint_names: [arm_l_j1, arm_l_j2, arm_l_j3, arm_l_j4, arm_l_j5, arm_l_j6, arm_l_j7]
+    required: true
+    resample: interp
+    action_key: left_arm
+  right_arm:
+    sources:
+      - topic: /motion_target/target_joint_state_arm_right
+        field: position
+        message_type: sensor_msgs/msg/JointState
+      - topic: /motion_control/control_arm_right
+        field: p_des
+        message_type: hdas_msg/msg/MotorControl
+    joint_names: [arm_r_j1, arm_r_j2, arm_r_j3, arm_r_j4, arm_r_j5, arm_r_j6, arm_r_j7]
+    required: true
+    resample: interp
+    action_key: right_arm
+  left_gripper:
+    sources:
+      - topic: /motion_target/target_position_gripper_left
+        field: position
+        message_type: sensor_msgs/msg/JointState
+    joint_names: [gripper_left]
+    required: true
+    resample: zoh
+    action_key: left_gripper
+  right_gripper:
+    sources:
+      - topic: /motion_target/target_position_gripper_right
+        field: position
+        message_type: sensor_msgs/msg/JointState
+    joint_names: [gripper_right]
+    required: true
+    resample: zoh
+    action_key: right_gripper
+
+# This order = the LeRobot observation.state column order. Sums to the measured
+# emitted-vector width — computed by summing joint_names over these keys, never
+# hardcoded as a literal DoF total (01-RESEARCH.md corrects an earlier
+# arithmetic slip that miscounted this as 26/27; the real emitted-vector total
+# is the sum over exactly these five keys). chassis is deliberately omitted
+# (declared above with include_in_observation_state: false).
+state_vector_order: [left_arm, right_arm, torso, left_gripper, right_gripper]
+
+# This order = the LeRobot action column order.
+action_primary: [left_arm, right_arm, left_gripper, right_gripper]
+
+# VALID-03 (D-GAP-01 Defect B, 03-11-PLAN.md Option B decision): the
+# tracking-error-minimizing lag between action_primary's target stream and
+# its paired observation.state feedback, in persisted ~30Hz camera-grid
+# timesteps (negative = target LEADS feedback). Measured 2026-09-07 via
+# `.venv/bin/python -m data.tools.measure_action_state_pairing` against all
+# three recordings under data/samples/vr-teleop-20260904/ at `--decimate 5`
+# (the persisted grid rate) and `--skip-samples 700` (clearing the idle
+# prefix Finding 5 describes): tracking_error_profile.argmin_lag == -4 in
+# every recording, identical under `--clock header_stamp`
+# (03-11-SUMMARY.md Finding 7: the log_time/header_stamp skew is
+# immaterial, ~0.01 grid periods median against a 33.3ms tick). Re-measure
+# with the same tool against any new recording batch before trusting this
+# value on a materially different motion profile.
+expected_action_state_lag: -4

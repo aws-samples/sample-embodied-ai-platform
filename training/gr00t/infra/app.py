@@ -73,7 +73,8 @@ class IsaacLabDcvStack(Stack):
             efs_sg_id=batch_stack.efs_sg_id,  # Share security group
             # Preferred: g6.4xlarge, g6.2xlarge, g5.2xlarge or larger.
             # If capacity errors occur, try changing availability_zone between us-west-2a/b/c/d.
-            instance_type="g6.4xlarge",       # Fall back to g6/g5.2xlarge if capacity unavailable.
+            instance_type="g6e.8xlarge",      # Set out-of-band via modify-instance-attribute after g6e capacity search; keep in sync to avoid CDK drift.
+            availability_zone="us-west-2b",   # Pins synth to PublicSubnet2 (subnet-05d66b6d8dead7b76), matching the live IsaacLabDcvStack deployment and its stopped g6e.8xlarge instance -- without this, an aws-cdk-lib version difference can resolve the None-fallback subnet_selection to a different public subnet than the one already deployed, flipping the cross-stack export IsaacGr00tBatchStack exports and IsaacLabDcvStack imports, which blocks a scoped BatchStack-only deploy (WINDOWS id 10).
             isaac_sim_version="5.1.0",        # Latest version with valid NGC container
             isaac_lab_version="v2.3.0",       # Matches isaac-lab:2.3.0 on NGC
             leisaac_enabled=True,             # Required for gr00t

@@ -1,0 +1,9 @@
+{
+  "golden_prefix": "/absolute/path/to/a/converted/lerobot/v2.1/dataset/prefix",
+  "source_sha256": [
+    "<sha256 hex digest of the first source MCAP recording this golden was built from>",
+    "<sha256 hex digest of the second source MCAP recording, in ascending episode order>"
+  ],
+  "pipeline_version": "1.0.0",
+  "profile_hash": "<sha256 hex digest of the EmbodimentProfile this golden was built under, from data.contracts.profile.profile_hash>"
+}

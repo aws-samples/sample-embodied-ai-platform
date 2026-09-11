@@ -1,0 +1,18 @@
+[project]
+name = "sample-embodied-ai-platform"
+version = "0.0.0"
+requires-python = ">=3.14"
+dependencies = []
+
+[project.optional-dependencies]
+infra = [
+    "aws-cdk-lib==2.177.0",
+    "constructs==10.5.1",
+]
+workstation = [
+    "aws-cdk-lib==2.177.0",
+    "constructs==10.5.1",
+]
+
+[tool.uv]
+package = false

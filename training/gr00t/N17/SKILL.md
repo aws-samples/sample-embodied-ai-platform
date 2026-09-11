@@ -65,11 +65,12 @@ jq --version
 REPO_ROOT=$(git rev-parse --show-toplevel)
 ls -la "$REPO_ROOT/.venv/bin/python"
 
-# If venv is missing, create it:
-cd "$REPO_ROOT" && python3 -m venv .venv
+# If dependencies are missing, sync them (uv creates .venv at Python 3.14 automatically):
+cd "$REPO_ROOT" && uv sync --extra infra --extra workstation --inexact
 source .venv/bin/activate
-pip install -r training/gr00t/infra/requirements.txt
-pip install -r workstation/requirements.txt
+# --inexact is required: this .venv also holds the data engine's own packages
+# (installed separately from data/requirements.txt, kept outside pyproject.toml),
+# and a plain `uv sync` would prune anything not declared in pyproject.toml.
 ```
 
 **HuggingFace token (required for N1.7 training AND evaluation):** The N1.7 model
@@ -108,7 +109,7 @@ npx cdk synth --quiet
 **Expected output:** `Successfully synthesized to .../cdk.out` listing both stack names.
 
 If synth fails, fix the error before proceeding. Common issues:
-- Missing Python dependencies -> `pip install -r requirements.txt`
+- Missing Python dependencies -> `uv sync --extra infra --extra workstation --inexact`
 - Version validation errors -> check `workstation/versions.py` for supported IsaacSim versions
 
 ## Phase 2.5: Probe GPU Instance Capacity
@@ -394,6 +395,12 @@ ssh dcv-isaac "grep -q 'self._appwindow is not None' /home/ubuntu/leisaac-repo/s
 If missing, re-run `run-isaaclab.sh -c 'echo patched'` and check again.
 
 ## Phase 7: Submit Training Job
+
+> **Converting and verifying against a data-engine dataset?** See
+> [`../../../data/README.md`](../../../data/README.md) for how to produce the `DATASET_LOCAL_DIR`/
+> `MODALITY_CONFIG_PATH`/`EMBODIMENT_TAG` overrides this phase's job submission needs, and run
+> `python -m data.tools.verify_gr00t_run` after the job completes for VERIFY-01/02/03's
+> degeneracy-grading step.
 
 ### 7a. Verify container image is ready
 

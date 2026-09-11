@@ -54,11 +54,12 @@ jq --version
 REPO_ROOT=$(git rev-parse --show-toplevel)
 ls -la "$REPO_ROOT/.venv/bin/python"
 
-# If venv is missing, create it:
-cd "$REPO_ROOT" && python3 -m venv .venv
+# If dependencies are missing, sync them (uv creates .venv at Python 3.14 automatically):
+cd "$REPO_ROOT" && uv sync --extra infra --extra workstation --inexact
 source .venv/bin/activate
-pip install -r training/gr00t/infra/requirements.txt
-pip install -r workstation/requirements.txt
+# --inexact is required: this .venv also holds the data engine's own packages
+# (installed separately from data/requirements.txt, kept outside pyproject.toml),
+# and a plain `uv sync` would prune anything not declared in pyproject.toml.
 ```
 
 Also confirm CDK has been bootstrapped in the target account/region:
@@ -82,7 +83,7 @@ npx cdk synth --quiet
 **Expected output:** `Successfully synthesized to .../cdk.out` listing both stack names.
 
 If synth fails, fix the error before proceeding. Common issues:
-- Missing Python dependencies -> `pip install -r requirements.txt`
+- Missing Python dependencies -> `uv sync --extra infra --extra workstation --inexact`
 - Version validation errors -> check `workstation/versions.py` for supported IsaacSim versions
 
 ## Phase 2.5: Probe GPU Instance Capacity

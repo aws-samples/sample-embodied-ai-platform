@@ -1,0 +1,35 @@
+# Shipped run-config exemplar for the Galaxea R1 Pro batch-conversion CLI
+# (CLI-03, D-11). VERIFY-03's documented workstation procedure loads this
+# file directly.
+#
+# This file carries only RUN KNOBS: input discovery, output location,
+# format/codec, task string, fps override, and the optional per-episode
+# stats file. It is deliberately separate from the hashed embodiment
+# profile (data/profiles/galaxea_r1_pro.yaml) -- changing a key in THIS
+# file never changes profile_hash, so a run-config edit never invalidates
+# a resumed prefix's CLI-08 promotion guard.
+run_config_version: 1
+# Re-recorded session (2026-09-09): 2 recordings (991 MB), both arms moving,
+# with session metadata sidecars (metadata.yaml / *.json digest) present but
+# NOT consumed by this pipeline today -- deliberately deferred, per the
+# operator's explicit decision, to a later plan. Supersedes the prior
+# vr-teleop-20260904 (3 recordings) input directory named below; that
+# directory's own conversions (rev-6e16976b, rev-7b347f2c) remain on EFS,
+# untouched, as historical evidence (see .planning/WINDOWS.md ids 6-12).
+input_dir: data/samples/vr-teleop-20260909
+# Each real recording lives one level down, in its own RAW-suffixed directory
+# (data/samples/vr-teleop-20260909/<recording>/<recording>.mcap) -- "*.mcap"
+# alone matches nothing against this layout. input_glob is UNCHANGED from the
+# 04-03 fix (04-06/04-08's own read_first note): "*/*.mcap" already matches a
+# one-level-nested layout, and the 2026-09-09 recordings share that same
+# layout, so no glob change is needed for this input-directory swap.
+# Per this file's own header comment, editing input_dir here does NOT change
+# profile_hash -- only data/profiles/galaxea_r1_pro.yaml's content does that.
+input_glob: "*/*.mcap"
+inputs: null
+output_prefix: /mnt/efs/gr00t/datasets/pending
+format_key: "v2.1"
+codec: h264
+task_string: "auto"
+fps_override: null
+emit_episodes_stats: false

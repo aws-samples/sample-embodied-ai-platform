@@ -59,9 +59,6 @@ training/**/infra/cdk.out/*
 training/**/infra/cdk.context.json
 workstation/cdk.out/*
 
-# Kiro IDE settings
-.kiro/
-
 # macOS files
 **/.DS_Store
 
@@ -71,6 +68,17 @@ workstation/cdk.out/*
 **/env
 
 # agents settings
+.kiro/
+.claude/
 .mcp.json
 CLAUDE.md
 .planning
+.gsd
+
+# sample data
+data/samples/
+data/goldens/baseline.json
+
+# cache
+.pytest_cache
+.mypy_cache

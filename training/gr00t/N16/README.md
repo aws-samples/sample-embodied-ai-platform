@@ -29,7 +29,6 @@ training/gr00t/
     ├── batch_stack.py
     ├── dcv_stack.py
     ├── configure_dcv_instance.sh
-    ├── requirements.txt
     ├── cdk.json               # Context (VPC/EFS/SG IDs) when importing existing resources
     └── architecture.drawio.png
 ```

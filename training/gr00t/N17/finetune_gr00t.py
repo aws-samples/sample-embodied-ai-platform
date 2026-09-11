@@ -5,6 +5,17 @@ This script orchestrates the model-specific portion of the workflow:
 1. Validate dataset path prepared by the entrypoint shell script
 2. Build FinetuneConfig from environment variables
 3. Run training via N1.7's experiment.run API
+
+D-06 (2026-09-08): this wrapper no longer patches the dataset's parquet files in place.
+The removed in-place patch step appended an `annotation.human.task_description`
+string column, but a direct trace of upstream Isaac-GR00T at pinned commit
+23ace64f17aa5015259b8609d371eb61a357c776 (`gr00t/data/dataset/lerobot_episode_loader.py`)
+showed the loader never needed it: it reads the parquet column named by our own
+`modality.json`'s `original_key` (already `task_index`) and joins its integer value through
+an int-keyed `tasks_map` built from `tasks.jsonl` -- so the appended column was this wrapper's
+own invention, and writing real task text into it would have raised a `KeyError` against that
+int-keyed map. Removing it also makes this wrapper's dataset-directory contact non-mutating by
+construction, which is required for the data engine's own never-write-in-place guard.
 """
 
 import os
@@ -13,8 +24,6 @@ import logging
 import json
 import importlib.util
 from pathlib import Path
-import pyarrow.parquet as pq
-import pyarrow as pa
 import torch
 from torch.distributed.run import main as torchrun
 
@@ -97,7 +106,8 @@ class FinetuneWorkflow:
     def validate_dataset(self):
         """
         Ensure a local dataset directory is ready.
-        Patches parquet files and creates modality.json for N1.7 compatibility.
+        Creates or patches modality.json for N1.7 compatibility. Does not touch
+        the dataset's parquet files (see module docstring, D-06).
         """
         logger.info("Validating dataset...")
 
@@ -147,41 +157,6 @@ class FinetuneWorkflow:
                 with open(modality_json_path, "w") as f:
                     json.dump(modality_content, f, indent=4)
                 logger.info(f"Patched modality.json: added annotation.{annotation_key}")
-
-        # Patch parquet files: add annotation.human.task_description column
-        # if missing (LeIsaac compatible key)
-        self._patch_parquet_annotations()
-
-    def _patch_parquet_annotations(self):
-        """Add annotation.human.task_description column to parquet files if missing."""
-        annotation_col = "annotation.human.task_description"
-        data_dir = os.path.join(self.dataset_local_dir, "data")
-        if not os.path.isdir(data_dir):
-            # Try root-level parquet files
-            data_dir = self.dataset_local_dir
-
-        for parquet_file in Path(data_dir).rglob("*.parquet"):
-            try:
-                table = pq.read_table(str(parquet_file))
-                if annotation_col not in table.column_names:
-                    # Use task_index as fallback source
-                    if "task_index" in table.column_names:
-                        task_col = table.column("task_index")
-                        # Convert integers to strings if needed
-                        str_col = pa.array(
-                            [str(v.as_py()) for v in task_col], type=pa.string()
-                        )
-                        table = table.append_column(annotation_col, str_col)
-                        pq.write_table(table, str(parquet_file))
-                        logger.info(
-                            f"Patched {parquet_file.name}: added {annotation_col} from task_index"
-                        )
-                    else:
-                        logger.warning(
-                            f"{parquet_file.name}: no task_index column to copy from"
-                        )
-            except Exception as e:
-                logger.warning(f"Could not patch {parquet_file}: {e}")
 
     def _load_modality_config(self):
         """Load modality config from the specified Python file."""

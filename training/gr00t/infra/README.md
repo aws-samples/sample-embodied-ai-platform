@@ -56,9 +56,12 @@ Choose the path that best fits your environment and requirements:
 Deploy both stacks automatically with CDK. Works on **any architecture** (x86 or ARM) - the infrastructure automatically handles container building in the cloud when needed.
 
 ```bash
-# Install dependencies
+# Sync dependencies from the repo root (uv creates .venv at Python 3.14 automatically;
+# --inexact is required because this .venv also holds the data engine's own packages)
+uv sync --extra infra --extra workstation --inexact
+source .venv/bin/activate
+
 cd training/gr00t/infra
-pip install -r requirements.txt
 
 # Set AWS region for deployment
 export AWS_REGION=us-west-2  # or your preferred region
@@ -149,8 +152,9 @@ cdk deploy IsaacLabDcvStack
 Deploy just a DCV workstation without the Batch training pipeline, using the standalone module:
 
 ```bash
+uv sync --extra workstation --inexact
+source .venv/bin/activate
 cd workstation
-pip install -r requirements.txt
 AWS_DEFAULT_REGION=us-west-2 cdk deploy --profile <your-profile>
 ```
 
@@ -230,7 +234,7 @@ with `ISAAC_LAB_IMAGE` env var for N1.6 evaluation.
 ## Deployment Checklist
 
 - [ ] Install AWS CDK CLI: `npm install -g aws-cdk`
-- [ ] Install Python dependencies: `pip install -r requirements.txt`
+- [ ] Install Python dependencies: `uv sync --extra infra --extra workstation --inexact` (from the repo root)
 - [ ] Set AWS region: `export AWS_REGION=us-west-2`
 - [ ] Bootstrap CDK: `cdk bootstrap`
 - [ ] Request GPU instance quota (g6e.2xlarge or larger)

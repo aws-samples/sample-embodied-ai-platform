@@ -12,8 +12,11 @@ This module can be used in two ways:
 ## Quick Start (Standalone)
 
 ```bash
+# Sync dependencies from the repo root (uv creates .venv at Python 3.14 automatically;
+# --inexact is required because this .venv also holds the data engine's own packages)
+uv sync --extra workstation --inexact
+source .venv/bin/activate
 cd workstation
-pip install -r requirements.txt
 
 # Bootstrap CDK (one-time per account/region)
 AWS_DEFAULT_REGION=us-west-2 cdk bootstrap --profile <your-profile>
@@ -161,7 +164,6 @@ workstation/
 ├── configure_dcv_instance.sh # Parameterized bootstrap script (416 lines)
 ├── app.py                   # Standalone CDK app entry point
 ├── cdk.json                 # CDK app configuration
-├── requirements.txt         # Pinned Python dependencies
 └── README.md                # This file
 ```
 

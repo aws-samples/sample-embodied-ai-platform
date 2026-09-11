@@ -46,7 +46,6 @@ training/gr00t/
     ├── app.py                 # CDK entry point
     ├── batch_stack.py
     ├── codebuild_stack.py
-    ├── requirements.txt
     ├── cdk.json               # Context (VPC/EFS/SG IDs) when importing existing resources
     └── architecture.drawio.png
 ```
