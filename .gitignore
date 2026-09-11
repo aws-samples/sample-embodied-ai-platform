@@ -58,6 +58,7 @@ CATKIN_IGNORE
 training/**/infra/cdk.out/*
 training/**/infra/cdk.context.json
 workstation/cdk.out/*
+workstation/cdk.context.json
 
 # macOS files
 **/.DS_Store

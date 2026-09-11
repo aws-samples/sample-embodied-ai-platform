@@ -1,0 +1,36 @@
+# gitleaks config for this repo (gitleaks 8.30.1). Extends the tool's
+# built-in default rule set (do not redefine rules here) and adds only a
+# narrow, repo-specific allowlist.
+#
+# NOTE (recorded 2026-09-10, quick task 260910-v0o, Task 2): a full scan of
+# the current tracked tree with the stock default config
+# (`gitleaks dir <tracked-tree-only>`) reported ZERO leaks -- none of the
+# four known-safe sites below actually trigger a default gitleaks rule
+# today. These allowlist entries are kept anyway, defensively, matching the
+# same reasoning as .gitallowed: if a future default-ruleset update starts
+# flagging one of these known-safe shapes, the gate should not silently
+# reopen. See 260910-v0o-SUMMARY.md for the full, observed classification.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Known-safe placeholders/public values in this repo -- see .gitallowed for the git-secrets side of the same four sites."
+
+paths = [
+  # Dataset statistics: float arrays with long digit/base64-ish runs, a
+  # classic false-positive shape for generic secret detectors. Not a
+  # credential.
+  '''training/sample_dataset/meta/episodes_stats\.jsonl''',
+]
+
+regexes = [
+  # AWS's own documentation placeholder account ID -- appears in
+  # training/gr00t/infra/README.md (ECR image URI examples) and
+  # training/gr00t/infra/batch_stack.py (docstring example).
+  '''123456789012''',
+
+  # Canonical's public Ubuntu AMI publisher account ID -- required for the
+  # AMI lookup in workstation/dcv_construct.py to resolve; not a secret.
+  '''099720109477''',
+]

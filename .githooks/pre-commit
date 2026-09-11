@@ -1,0 +1,65 @@
+#!/bin/sh
+# .githooks/pre-commit
+#
+# Credential/secret scanning on commit (D-01/D-02, quick task 260910-v0o).
+# Twin of .githooks/pre-push -- see that file's header for the full
+# rationale (chaining to system core.hooksPath, warn-and-continue policy).
+#
+# One-time setup per clone (see .githooks/README.md for full detail):
+#   brew install git-secrets gitleaks
+#   git config core.hooksPath .githooks
+#   git secrets --register-aws
+#
+# pre-commit takes no positional args and no stdin (unlike pre-push); it
+# scans staged content rather than a push range.
+
+exit_code=0
+
+have_git_secrets=0
+have_gitleaks=0
+command -v git-secrets >/dev/null 2>&1 && have_git_secrets=1
+command -v gitleaks >/dev/null 2>&1 && have_gitleaks=1
+
+# --- Scan -------------------------------------------------------------
+if [ "$have_git_secrets" = "1" ]; then
+  if ! git secrets --scan --cached; then
+    echo "[pre-commit] BLOCKED by git-secrets: prohibited pattern found in staged content." >&2
+    exit_code=1
+  fi
+else
+  echo "[pre-commit] WARNING: git-secrets not installed -- skipping AWS credential scan." >&2
+  echo "[pre-commit]          Install with: brew install git-secrets   (see .githooks/README.md)" >&2
+fi
+
+if [ "$have_gitleaks" = "1" ]; then
+  # --staged: gitleaks' own documented flag for exactly this use ("good for
+  # pre-commit") -- scans the staged diff, not the whole working tree/history.
+  if ! gitleaks git --no-banner --staged .; then
+    echo "[pre-commit] BLOCKED by gitleaks: secret found in staged content." >&2
+    exit_code=1
+  fi
+else
+  echo "[pre-commit] WARNING: gitleaks not installed -- skipping generic secret scan." >&2
+  echo "[pre-commit]          Install with: brew install gitleaks   (see .githooks/README.md)" >&2
+fi
+
+# --- Delegate, unconditionally -----------------------------------------
+# Same rationale as pre-push: resolve the system hooksPath at runtime and
+# invoke its same-named hook, guarding against self-delegation.
+sys_hooks_dir=$(git config --system --get core.hooksPath 2>/dev/null)
+this_hooks_dir=$(cd "$(dirname "$0")" && pwd -P)
+delegate_status=0
+
+if [ -n "$sys_hooks_dir" ] && [ -d "$sys_hooks_dir" ]; then
+  sys_hooks_dir_real=$(cd "$sys_hooks_dir" && pwd -P)
+  if [ "$sys_hooks_dir_real" != "$this_hooks_dir" ] \
+    && [ -x "$sys_hooks_dir_real/pre-commit" ]; then
+    "$sys_hooks_dir_real/pre-commit"
+    delegate_status=$?
+  fi
+fi
+
+if [ "$exit_code" != "0" ]; then
+  exit "$exit_code"
+fi
+exit "$delegate_status"

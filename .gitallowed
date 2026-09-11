@@ -1,0 +1,35 @@
+# git-secrets allowlist (read by git-secrets/bin/git-secrets's load_allowed()).
+# Each non-comment, non-blank line is an extended regex (grep -E) tested
+# against the full "file:line:matched-text" string of every git-secrets
+# match. A match on any line here suppresses that finding.
+#
+# Keep this file NARROW: pin the exact literal or exact path, one entry per
+# known-safe site, with a comment stating what it is and why it is safe.
+# Never widen an entry to force a red finding green -- if something doesn't
+# clearly belong to one of the sites below, it is a real finding, not an
+# allowlist candidate.
+#
+# NOTE (recorded 2026-09-10, quick task 260910-v0o, Task 2): as of
+# git-secrets 1.3.0 with only `--register-aws` patterns registered, none of
+# the four sites below actually trip a match today -- the AWS account-id
+# pattern requires an ACCOUNT/ID keyword immediately before the value with a
+# `:`/`=`/`=>` connector, and none of these four sites use that exact
+# keyword+connector shape (they're bare digits in a URI, a list literal, or
+# a comment). These entries are kept anyway, defensively, so a future
+# git-secrets pattern-set update that starts matching these shapes doesn't
+# silently reopen the gate -- see 260910-v0o-SUMMARY.md for the full,
+# observed-not-assumed classification.
+
+# AWS's own documentation placeholder account ID -- appears in
+# training/gr00t/infra/README.md (ECR image URI examples) and
+# training/gr00t/infra/batch_stack.py (docstring example).
+123456789012
+
+# Canonical's public Ubuntu AMI publisher account ID -- required for the
+# AMI lookup in workstation/dcv_construct.py to resolve; not a secret, it is
+# Canonical's own published AMI-owner account.
+099720109477
+
+# Dataset statistics (float arrays with long digit/base64-ish runs -- a
+# classic git-secrets false-positive shape); not a credential.
+training/sample_dataset/meta/episodes_stats\.jsonl
