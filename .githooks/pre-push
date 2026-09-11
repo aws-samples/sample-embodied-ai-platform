@@ -1,0 +1,129 @@
+#!/bin/sh
+# .githooks/pre-push
+#
+# Credential/secret scanning on push (D-01/D-02, quick task 260910-v0o).
+#
+# One-time setup per clone (see .githooks/README.md for full detail):
+#   brew install git-secrets gitleaks
+#   git config core.hooksPath .githooks
+#   git secrets --register-aws
+#
+# IMPORTANT -- this hook CHAINS, it does not REPLACE:
+#   `core.hooksPath` is already set at *system* scope on this machine to
+#   Amazon git-defender's hooks directory. Setting it to `.githooks` at the
+#   *local* (repo) scope overrides that for this clone. If this script did
+#   not re-invoke git-defender's own pre-push hook, enabling `.githooks`
+#   would be a net loss of scanning, not a gain. Step 3 below resolves the
+#   system hooksPath at runtime and delegates to it unconditionally -- this
+#   is the one part of this script that must never be skipped or "fixed
+#   away", even when our own scanners find nothing.
+#
+# Missing-tool policy: WARN AND CONTINUE, never hard-block. This hooks dir
+# is opt-in per clone (D-02); a contributor who has not yet run
+# `brew install git-secrets gitleaks` should still be able to push -- they
+# just don't get the extra local scan. The git-defender delegation in step 3
+# runs regardless of whether our scanners ran, so the mandatory org-level
+# control is never suppressed just because a local tool is missing.
+
+remote_name="$1"
+remote_url="$2"
+zero_sha="0000000000000000000000000000000000000000"
+
+# --- 1. Buffer stdin -----------------------------------------------------
+# git feeds pre-push the list of refs being pushed on stdin, one line per
+# ref: "<local-ref> <local-sha1> <remote-ref> <remote-sha1>". stdin can only
+# be read once, and the delegate in step 3 needs the same list -- so read it
+# into a variable now and replay it later. Consuming stdin without replaying
+# it is the failure mode that silently blinds git-defender while looking
+# like the hook ran fine.
+stdin_data=$(cat)
+
+exit_code=0
+
+have_git_secrets=0
+have_gitleaks=0
+command -v git-secrets >/dev/null 2>&1 && have_git_secrets=1
+command -v gitleaks >/dev/null 2>&1 && have_gitleaks=1
+
+# --- 2. Scan --------------------------------------------------------------
+# Restrict both scanners to the commits actually being pushed where we can
+# determine a range (remote_sha..local_sha per ref); fall back to scanning
+# up to local_sha alone (e.g. a brand-new remote ref, nothing to diff
+# against). NOTE: `git secrets --scan-history` deliberately is NOT used
+# here -- it hardcodes `git log --all`, which scans every local and
+# remote-tracking ref, not just the one being pushed. On this repo that
+# picks up an unrelated, already-published finding on a completely
+# different branch (feat/rl-multi-backend-training) and would block every
+# future push forever regardless of what it actually contains. That
+# whole-repo sweep is still valuable -- it just belongs in a periodic audit
+# (Task 3's `--scan-history` run), not in a per-push gate scoped to "what is
+# about to leave this machine right now."
+log_opts=""
+while IFS=' ' read -r local_ref local_sha remote_ref remote_sha; do
+  [ -z "$local_ref" ] && continue
+  [ "$local_sha" = "$zero_sha" ] && continue # branch deletion, nothing to scan
+  if [ -n "$remote_sha" ] && [ "$remote_sha" != "$zero_sha" ] \
+    && git cat-file -e "$remote_sha" 2>/dev/null; then
+    range="${remote_sha}..${local_sha}"
+  else
+    range="$local_sha"
+  fi
+  if [ -z "$log_opts" ]; then
+    log_opts="$range"
+  else
+    log_opts="$log_opts $range"
+  fi
+done <<STDIN_EOF
+$stdin_data
+STDIN_EOF
+
+if [ "$have_git_secrets" = "1" ] && [ -n "$log_opts" ]; then
+  # shellcheck disable=SC2086 -- log_opts is intentionally word-split (may
+  # be multiple ref ranges, one per pushed ref).
+  if ! git log -p $log_opts | git secrets --scan -; then
+    echo "[pre-push] BLOCKED by git-secrets: prohibited pattern found in commits being pushed." >&2
+    exit_code=1
+  fi
+elif [ "$have_git_secrets" != "1" ]; then
+  echo "[pre-push] WARNING: git-secrets not installed -- skipping AWS credential scan." >&2
+  echo "[pre-push]          Install with: brew install git-secrets   (see .githooks/README.md)" >&2
+fi
+
+if [ "$have_gitleaks" = "1" ] && [ -n "$log_opts" ]; then
+  if ! gitleaks git --no-banner --log-opts="$log_opts" .; then
+    echo "[pre-push] BLOCKED by gitleaks: secret found in commits being pushed." >&2
+    exit_code=1
+  fi
+elif [ "$have_gitleaks" != "1" ]; then
+  echo "[pre-push] WARNING: gitleaks not installed -- skipping generic secret scan." >&2
+  echo "[pre-push]          Install with: brew install gitleaks   (see .githooks/README.md)" >&2
+fi
+
+# --- 3. Delegate, unconditionally -----------------------------------------
+# Resolve the system hooksPath at runtime (stays readable through this
+# repo's local override -- verified during planning) and invoke its
+# same-named hook with the original args and the replayed stdin, then use
+# its exit status when our own scan was clean. Guard against self-
+# delegation: if the resolved dir IS this .githooks dir, skip, or the hook
+# would recurse forever.
+sys_hooks_dir=$(git config --system --get core.hooksPath 2>/dev/null)
+this_hooks_dir=$(cd "$(dirname "$0")" && pwd -P)
+delegate_status=0
+
+if [ -n "$sys_hooks_dir" ] && [ -d "$sys_hooks_dir" ]; then
+  sys_hooks_dir_real=$(cd "$sys_hooks_dir" && pwd -P)
+  if [ "$sys_hooks_dir_real" != "$this_hooks_dir" ] \
+    && [ -x "$sys_hooks_dir_real/pre-push" ]; then
+    printf '%s\n' "$stdin_data" | "$sys_hooks_dir_real/pre-push" "$remote_name" "$remote_url"
+    delegate_status=$?
+  fi
+fi
+
+# Our own scan finding always blocks, regardless of the delegate's result
+# (the delegate still ran above -- git-defender must see every push
+# attempt, blocked or not). Otherwise, propagate the delegate's exact exit
+# status so its own diagnostics/exit-code semantics survive unchanged.
+if [ "$exit_code" != "0" ]; then
+  exit "$exit_code"
+fi
+exit "$delegate_status"
